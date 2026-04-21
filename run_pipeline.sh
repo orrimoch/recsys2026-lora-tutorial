@@ -100,10 +100,15 @@ if [[ "$SKIP_VENV" != "1" ]]; then
     fi
 fi
 
-# Always activate.
-# shellcheck disable=SC1090
-source "$VENV_DIR/bin/activate"
-echo "  active python: $(which python) ($(python --version))"
+# Activate venv if it exists. On Colab/CI we typically use the system Python
+# directly with SKIP_VENV=1 — no venv to source.
+if [[ -f "$VENV_DIR/bin/activate" ]]; then
+    # shellcheck disable=SC1090
+    source "$VENV_DIR/bin/activate"
+    echo "  active python: $(which python) ($(python --version)) [via $VENV_DIR]"
+else
+    echo "  no venv at $VENV_DIR; using system python: $(which python) ($(python --version))"
+fi
 
 # --- Stage 2: dataset ---
 if [[ "$SKIP_DATASET" != "1" ]]; then
