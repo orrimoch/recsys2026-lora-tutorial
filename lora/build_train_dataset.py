@@ -143,37 +143,34 @@ def format_track_for_prompt(meta: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def build_user_profile_str(user_profile_blob: str | None,
-                           user_meta: dict[str, Any] | None) -> str:
-    bits = []
-    if user_meta:
-        demo_fields = ["age", "country", "gender"]
-        demo_parts = [f"{k}={user_meta.get(k)}" for k in demo_fields if user_meta.get(k)]
-        if demo_parts:
-            bits.append(f"User profile (demographics): {', '.join(demo_parts)}")
-    if user_profile_blob:
-        bits.append(f"Additional user context: {user_profile_blob}")
-    return "\n".join(bits)
+def id_to_profile_str(user_meta: dict[str, Any] | None) -> str:
+    """Match v10 inference's UserProfileDB.id_to_profile_str EXACTLY.
+    Columns: user_id, age_group, gender, country_name. One per line."""
+    if not user_meta:
+        return ""
+    cols = ["user_id", "age_group", "gender", "country_name"]
+    return "\n".join(f"{k}: {user_meta.get(k)}" for k in cols)
 
 
 def build_sys_prompt(roleplay: str, response_gen: str,
                      user_profile_blob: str, user_meta: dict[str, Any] | None,
                      conversation_goal: str | dict | None,
                      gold_track_meta: dict[str, Any]) -> str:
+    """Reproduces v10 inference's build_sys_prompt_v2 exactly. CRITICAL for
+    train-test parity — if the LoRA learns a different prompt format than
+    inference uses, it produces garbage at inference time."""
     sections = [roleplay.strip(), response_gen.strip()]
 
     person_bits = []
-    prof_str = build_user_profile_str(user_profile_blob, user_meta)
-    if prof_str:
-        person_bits.append(prof_str)
+    profile_str = id_to_profile_str(user_meta)
+    if profile_str:
+        person_bits.append(f"User profile (demographics): {profile_str}")
+    if user_profile_blob:
+        person_bits.append(f"Additional user context: {user_profile_blob}")
     if conversation_goal:
-        goal_str = (
-            conversation_goal.get("listener_goal", "")
-            if isinstance(conversation_goal, dict)
-            else str(conversation_goal)
-        )
-        if goal_str:
-            person_bits.append(f"Conversation goal: {goal_str}")
+        # v10 stringifies the WHOLE dict (its f-string emits the dict repr).
+        # Don't pre-extract listener_goal — that's a different prompt.
+        person_bits.append(f"Conversation goal: {conversation_goal}")
     if person_bits:
         sections.append("=== About this user ===\n" + "\n".join(person_bits))
 

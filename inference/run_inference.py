@@ -1,20 +1,24 @@
 """End-to-end Blind-A inference: BM25 retrieval + Qwen 2.5-3B + optional LoRA.
 
-Self-contained — no dependency on the larger music-crs-baselines repo. Reads
-the test set from HuggingFace, builds a BM25 index over the catalog, generates
-responses with the v10 champion prompt template, and writes the JSON the
-challenge expects.
+This script reproduces the v10 champion pipeline EXACTLY, with an optional
+LoRA adapter wrapped around the base model. Pair with `make_prediction_zip.py`
+to package the upload artifact.
 
-Pair with `make_prediction_zip.py` to get the final upload artifact.
+Behavior parity with v10 (`music-crs-baselines/run_inference_blindset_full_v6.py`)
+verified as of 2026-04-21. Notable v10 invariants this preserves:
+  - BM25 input is the FULL conversation history formatted as "role: content"
+    (not just the last user turn). Blind-A has up to 13 turns per row.
+  - Music-role turns in history are expanded to "track_id: ..., track_name: ..."
+    via the same MusicCatalogDB.id_to_metadata stringification.
+  - User profile uses HF columns: user_id, age_group, gender, country_name.
+  - conversation_goal is rendered with str() — the raw dict gets repr'd into
+    the prompt (matches v10's f-string behavior).
+  - track_split_types is exactly ["all_tracks"] (the catalog), not test splits.
 
 CLI:
-    python run_inference.py \
-        --output ./output/predictions.json \
-        --base_model Qwen/Qwen2.5-3B-Instruct \
-        --lora_adapter_path ./lora_adapters/qwen3b_blinda_v1/final_adapter \
-        --prompts_dir ./prompts \
-        --bm25_cache ./cache/bm25 \
-        --device mps
+    python run_inference.py --output ./output/predictions.json
+    python run_inference.py --output ./output/predictions.json \\
+        --lora_adapter_path ./lora_adapters/qwen3b_blinda_v1/final_adapter
 """
 from __future__ import annotations
 
@@ -36,20 +40,64 @@ FINAL_K = 20
 TOP_N_FOR_LLM = 3
 
 
-# ---------- BM25 retrieval ----------------------------------------------------
+# ---------- Catalog + user databases (match v10's mcrs.db_item / mcrs.db_user) ----
 
-def stringify_metadata(meta: dict, fields: list[str]) -> str:
-    out = []
+def load_track_catalog(dataset_name: str, split: str = "all_tracks") -> dict[str, dict]:
+    """Catalog of all tracks. v10 uses ONLY the all_tracks split — not the
+    catalog-test split. Test split is for evaluation purposes only."""
+    ds = load_dataset(dataset_name, split=split)
+    return {r["track_id"]: r for r in ds}
+
+
+def load_user_profiles(dataset_name: str, split: str = "all_users") -> dict[str, dict]:
+    """User-id → demographics map."""
+    try:
+        ds = load_dataset(dataset_name, split=split)
+        return {r["user_id"]: r for r in ds}
+    except Exception as e:
+        print(f"[infer] user metadata unavailable ({e}); skipping demographics", file=sys.stderr)
+        return {}
+
+
+def id_to_profile_str(user_profiles: dict, user_id: str) -> str:
+    """Match v10's UserProfileDB.id_to_profile_str: prints user_id + age_group
+    + gender + country_name, one per line."""
+    if user_id not in user_profiles:
+        return ""
+    user = user_profiles[user_id]
+    cols = ["user_id", "age_group", "gender", "country_name"]
+    return "\n".join(f"{k}: {user.get(k)}" for k in cols)
+
+
+def id_to_metadata_str(track_meta: dict, track_id: str, corpus_types: list[str]) -> str:
+    """Match v10's MusicCatalogDB.id_to_metadata exactly: lowercased,
+    comma-separated 'field: value' string starting with track_id."""
+    meta = track_meta[track_id]
+    parts = [f"track_id: {track_id}"]
+    for ct in corpus_types:
+        v = meta[ct]
+        if isinstance(v, list):
+            v = ", ".join(v).lower()
+        else:
+            v = str(v).lower()
+        parts.append(f"{ct}: {v}")
+    return ", ".join(parts)
+
+
+# ---------- BM25 ------------------------------------------------------------
+
+def stringify_metadata_for_bm25(meta: dict, fields: list[str]) -> str:
+    """Match v10's BM25_MODEL._stringify_metadata exactly."""
+    out = ""
     for f in fields:
-        v = meta.get(f)
+        v = meta[f]
         if isinstance(v, list):
             v = ", ".join(v)
-        out.append(f"{f}: {v}")
-    return "\n".join(out)
+        out += f"{f}: {v}\n"
+    return out
 
 
-def build_or_load_bm25(track_meta_dict: dict, cache_dir: str) -> tuple[bm25s.BM25, list[str]]:
-    """Build BM25 index over the catalog, or reload from disk cache."""
+def build_or_load_bm25(track_meta: dict, cache_dir: str) -> tuple[bm25s.BM25, list[str]]:
     corpus_name = "_".join(CORPUS_FIELDS)
     index_dir = os.path.join(cache_dir, corpus_name)
     ids_path = os.path.join(index_dir, "track_ids.json")
@@ -59,24 +107,22 @@ def build_or_load_bm25(track_meta_dict: dict, cache_dir: str) -> tuple[bm25s.BM2
         track_ids = json.load(open(ids_path))
         return retriever, track_ids
 
-    print(f"[bm25] building index over {len(track_meta_dict)} tracks (this is a one-time cost)",
-          file=sys.stderr)
-    track_ids = list(track_meta_dict.keys())
-    corpus = [stringify_metadata(track_meta_dict[tid], CORPUS_FIELDS) for tid in track_ids]
+    print(f"[bm25] building index over {len(track_meta)} tracks (one-time)", file=sys.stderr)
+    track_ids = list(track_meta.keys())
+    corpus = [stringify_metadata_for_bm25(track_meta[t], CORPUS_FIELDS) for t in track_ids]
     corpus_tokens = bm25s.tokenize(corpus)
     retriever = bm25s.BM25()
     retriever.index(corpus_tokens)
     os.makedirs(index_dir, exist_ok=True)
     retriever.save(index_dir, corpus=corpus)
     with open(ids_path, "w") as f:
-        json.dump(track_ids, f)
+        json.dump(track_ids, f, indent=2)
+    # Reload to get the load_corpus=True semantics (documents come back as dicts).
+    retriever = bm25s.BM25.load(index_dir, load_corpus=True)
     return retriever, track_ids
 
 
 def bm25_retrieve(retriever, track_ids, queries: list[str], topk: int) -> list[list[str]]:
-    """Batched query against the BM25 index. Handles both modes of bm25s
-    output: dicts (when retriever was reloaded with corpus) or scalar
-    indices (when retriever is the fresh build)."""
     query_tokens = bm25s.tokenize([q.lower() for q in queries])
     scores = retriever.retrieve(query_tokens, k=topk, return_as="tuple")
     out = []
@@ -92,7 +138,24 @@ def bm25_retrieve(retriever, track_ids, queries: list[str], topk: int) -> list[l
     return out
 
 
-# ---------- Prompt building (matches v10 champion) ---------------------------
+# ---------- Per-row input construction (THE KEY FIX) ------------------------
+
+def build_retrieval_input(conversations: list[dict], track_meta: dict,
+                          corpus_types: list[str]) -> str:
+    """v10 invariant: BM25 query is the WHOLE conversation, with 'music' turns
+    replaced by the track's metadata string. Critical for multi-turn rows."""
+    lines = []
+    for turn in conversations:
+        role = turn["role"]
+        content = turn["content"]
+        if role == "music":
+            role = "assistant"
+            content = id_to_metadata_str(track_meta, content, corpus_types)
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+# ---------- Prompt building (matches v10 exactly) ---------------------------
 
 def first(v: Any) -> str:
     if isinstance(v, list):
@@ -119,31 +182,24 @@ def format_track_for_prompt(meta: dict) -> str:
     return " ".join(parts)
 
 
-def build_user_profile_str(user_profile_blob: str | None,
-                           user_meta: dict | None) -> str:
-    bits = []
-    if user_meta:
-        demo = [f"{k}={user_meta.get(k)}" for k in ("age", "country", "gender") if user_meta.get(k)]
-        if demo:
-            bits.append(f"User profile (demographics): {', '.join(demo)}")
-    if user_profile_blob:
-        bits.append(f"Additional user context: {user_profile_blob}")
-    return "\n".join(bits)
-
-
 def build_sys_prompt(roleplay: str, response_gen: str,
-                     user_profile_blob: str | None, user_meta: dict | None,
-                     conversation_goal: Any, top_tracks: list[dict]) -> str:
+                     user_profiles: dict, user_id: str | None,
+                     conversation_goal: Any, user_profile_blob: str | None,
+                     top_tracks: list[dict]) -> str:
+    """Reproduces v10's build_sys_prompt_v2 exactly, including:
+      - Demographics from id_to_profile_str (user_id/age_group/gender/country_name)
+      - conversation_goal stringified via plain str() (dict repr in prompt)
+      - Same section labels and ordering"""
     sections = [roleplay.strip(), response_gen.strip()]
 
     person_bits = []
-    prof = build_user_profile_str(user_profile_blob, user_meta)
-    if prof:
-        person_bits.append(prof)
+    profile_str = id_to_profile_str(user_profiles, user_id) if user_id else ""
+    if profile_str:
+        person_bits.append(f"User profile (demographics): {profile_str}")
+    if user_profile_blob:
+        person_bits.append(f"Additional user context: {user_profile_blob}")
     if conversation_goal:
-        goal = conversation_goal.get("listener_goal", "") if isinstance(conversation_goal, dict) else str(conversation_goal)
-        if goal:
-            person_bits.append(f"Conversation goal: {goal}")
+        person_bits.append(f"Conversation goal: {conversation_goal}")
     if person_bits:
         sections.append("=== About this user ===\n" + "\n".join(person_bits))
 
@@ -157,23 +213,19 @@ def build_sys_prompt(roleplay: str, response_gen: str,
     return "\n\n".join(sections)
 
 
-# ---------- LLM generation ---------------------------------------------------
+# ---------- LLM generation --------------------------------------------------
 
 def custom_batch_generate(model, tokenizer, sys_prompts: list[str],
                           user_queries: list[str], device: str,
                           max_new_tokens: int, max_input_len: int) -> list[str]:
-    """[system, user] chat template only. Avoids the fake-assistant turn that
-    causes 'Glad you enjoyed X' hallucinations on cold-start queries."""
+    """Match v10's custom_batch_generate exactly: [system, user] template,
+    truncation max_length=3072, greedy decode."""
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     formatted = []
     for sp, uq in zip(sys_prompts, user_queries):
-        chat = [
-            {"role": "system", "content": sp},
-            {"role": "user", "content": uq},
-        ]
+        chat = [{"role": "system", "content": sp}, {"role": "user", "content": uq}]
         formatted.append(tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True))
-
     tok = tokenizer(formatted, return_tensors="pt", padding=True,
                     truncation=True, max_length=max_input_len)
     input_ids = tok.input_ids.to(device)
@@ -189,15 +241,13 @@ def custom_batch_generate(model, tokenizer, sys_prompts: list[str],
     return tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)
 
 
-# ---------- Main pipeline ----------------------------------------------------
+# ---------- Main pipeline ---------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=str, required=True,
-                        help="Path to write predictions JSON.")
+    parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--base_model", type=str, default="Qwen/Qwen2.5-3B-Instruct")
-    parser.add_argument("--lora_adapter_path", type=str, default=None,
-                        help="Optional. Skip for v10-baseline-style (no fine-tune).")
+    parser.add_argument("--lora_adapter_path", type=str, default=None)
     parser.add_argument("--prompts_dir", type=str, default="./prompts")
     parser.add_argument("--bm25_cache", type=str, default="./cache/bm25")
     parser.add_argument("--test_dataset", type=str,
@@ -206,14 +256,12 @@ def main() -> None:
                         default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata")
     parser.add_argument("--user_meta_dataset", type=str,
                         default="talkpl-ai/TalkPlayData-Challenge-User-Metadata")
-    parser.add_argument("--device", type=str, default=None,
-                        help="Auto-detect if omitted (cuda > mps > cpu).")
+    parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--max_new_tokens", type=int, default=192)
     parser.add_argument("--max_input_len", type=int, default=3072)
     parser.add_argument("--lm_batch_size", type=int, default=1)
     parser.add_argument("--retrieval_batch_size", type=int, default=64)
-    parser.add_argument("--subset", type=int, default=None,
-                        help="Optional row cap for smoke testing.")
+    parser.add_argument("--subset", type=int, default=None)
     args = parser.parse_args()
 
     # Device + dtype.
@@ -227,29 +275,20 @@ def main() -> None:
     dtype = torch.bfloat16 if args.device == "cuda" else torch.float32
     print(f"[infer] device={args.device} dtype={dtype}", file=sys.stderr)
 
-    # Load datasets.
+    # Datasets.
     print("[infer] loading test set", file=sys.stderr)
     test = load_dataset(args.test_dataset, split="test")
     if args.subset:
         test = test.select(range(min(args.subset, len(test))))
 
-    print("[infer] loading track metadata", file=sys.stderr)
-    track_meta_ds = load_dataset(args.track_meta_dataset)
-    track_meta_concat = concatenate_datasets([track_meta_ds[s] for s in track_meta_ds.keys()])
-    track_meta_dict = {r["track_id"]: r for r in track_meta_concat}
+    print("[infer] loading track catalog (all_tracks split only — match v10)", file=sys.stderr)
+    track_meta = load_track_catalog(args.track_meta_dataset, split="all_tracks")
 
-    print("[infer] loading user metadata", file=sys.stderr)
-    try:
-        user_meta_ds = load_dataset(args.user_meta_dataset)
-        user_meta_concat = concatenate_datasets([user_meta_ds[s] for s in user_meta_ds.keys()])
-        user_meta_dict = {r["user_id"]: r for r in user_meta_concat}
-    except Exception as e:
-        print(f"[infer] user metadata unavailable ({e}); skipping demographics",
-              file=sys.stderr)
-        user_meta_dict = {}
+    print("[infer] loading user profiles", file=sys.stderr)
+    user_profiles = load_user_profiles(args.user_meta_dataset, split="all_users")
 
-    # BM25 index.
-    retriever, track_ids = build_or_load_bm25(track_meta_dict, args.bm25_cache)
+    # BM25 over the catalog.
+    retriever, track_ids = build_or_load_bm25(track_meta, args.bm25_cache)
 
     # Prompts.
     roleplay = open(os.path.join(args.prompts_dir, "roleplay.txt"), encoding="utf-8").read()
@@ -264,8 +303,7 @@ def main() -> None:
     if args.lora_adapter_path:
         if not os.path.isdir(args.lora_adapter_path):
             raise FileNotFoundError(f"adapter not found: {args.lora_adapter_path}")
-        print(f"[infer] applying LoRA adapter from {args.lora_adapter_path}",
-              file=sys.stderr)
+        print(f"[infer] applying LoRA adapter from {args.lora_adapter_path}", file=sys.stderr)
         from peft import PeftModel
         model = PeftModel.from_pretrained(model, args.lora_adapter_path)
         model = model.merge_and_unload()
@@ -274,11 +312,14 @@ def main() -> None:
     if hasattr(model, "generation_config"):
         model.generation_config.do_sample = False
 
-    # Build per-row inputs.
-    metadata_rows = []
+    # Per-row inputs. v10 invariant: BM25 input is the FULL conversation;
+    # LLM user message is just the LAST user turn.
+    retrieval_inputs = []
     user_queries = []
+    metadata_rows = []
     item_rows = []
     for item in test:
+        retrieval_inputs.append(build_retrieval_input(item["conversations"], track_meta, CORPUS_FIELDS))
         user_queries.append(item["conversations"][-1]["content"])
         metadata_rows.append({
             "session_id": item["session_id"],
@@ -289,8 +330,8 @@ def main() -> None:
 
     # Retrieval.
     all_picks = []
-    for i in tqdm(range(0, len(user_queries), args.retrieval_batch_size), desc="bm25"):
-        batch = user_queries[i:i + args.retrieval_batch_size]
+    for i in tqdm(range(0, len(retrieval_inputs), args.retrieval_batch_size), desc="bm25"):
+        batch = retrieval_inputs[i:i + args.retrieval_batch_size]
         for hits in bm25_retrieve(retriever, track_ids, batch, RETRIEVAL_TOPK):
             picked = list(dict.fromkeys(hits))[:FINAL_K]
             all_picks.append(picked)
@@ -298,13 +339,14 @@ def main() -> None:
     # Build sys prompts.
     sys_prompts = []
     for idx, picks in enumerate(all_picks):
-        top_metas = [track_meta_dict[t] for t in picks[:TOP_N_FOR_LLM] if t in track_meta_dict]
+        top_metas = [track_meta[t] for t in picks[:TOP_N_FOR_LLM] if t in track_meta]
         sp = build_sys_prompt(
             roleplay=roleplay,
             response_gen=response_gen,
-            user_profile_blob=item_rows[idx].get("user_profile") or "",
-            user_meta=user_meta_dict.get(item_rows[idx].get("user_id")),
+            user_profiles=user_profiles,
+            user_id=item_rows[idx].get("user_id"),
             conversation_goal=item_rows[idx].get("conversation_goal"),
+            user_profile_blob=item_rows[idx].get("user_profile") or "",
             top_tracks=top_metas,
         )
         sys_prompts.append(sp)
@@ -320,7 +362,7 @@ def main() -> None:
         )
         all_responses.extend(r.strip() for r in outs)
 
-    # Assemble + write.
+    # Write JSON.
     results = []
     for i, meta in enumerate(metadata_rows):
         results.append({
