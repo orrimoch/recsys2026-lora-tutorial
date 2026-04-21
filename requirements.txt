@@ -1,0 +1,20 @@
+# Pinned to versions verified working in the recsys26 venv.
+# Bump cautiously — TRL/transformers in particular have breaking changes between minor versions.
+
+# Core ML
+torch>=2.4,<2.11
+transformers>=4.45,<5.6
+datasets>=2.20,<5.0
+accelerate>=0.34,<2.0
+
+# LoRA fine-tuning
+peft>=0.13
+trl>=0.12,<0.14
+
+# Retrieval
+bm25s>=0.3.0,<0.4
+
+# Utilities
+numpy>=1.26,<3.0
+tqdm>=4.66
+huggingface_hub>=0.25

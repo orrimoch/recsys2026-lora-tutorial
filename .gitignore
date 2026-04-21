@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+*.egg
+
+# Venv
+recsys26-lora/
+recsys26/
+venv/
+.venv/
+.python-version
+
+# Data + caches (everything pulled at runtime)
+data/
+cache/
+output/
+lora_adapters/
+
+# HF + model caches
+.cache/
+.huggingface/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Logs
+*.log
