@@ -139,6 +139,51 @@ def load_retrieval_module(
             ],
             k=60,
         )
+    # cf-bpr user x item affinity retriever (exp 025 A2).
+    # Query-independent; scores per-user against all tracks via cosine on
+    # precomputed cf-bpr embeddings. Warm users only; cold users get empty list
+    # (RRF fusion falls back to other branches).
+    elif retrieval_type == "cf_bpr":
+        from .cf_bpr import CF_BPR
+        return CF_BPR(dataset_name, track_split_types, corpus_types, cache_dir)
+    # wRRF with cf-bpr as a 4th branch (on top of wrrf_bm25_dense_lyrics_v1).
+    # cf-bpr weight chosen lower (0.25) than dense (0.4) because only ~43% of
+    # Blind-A users are warm — we don't want this sub to dominate for the 57%
+    # cold users who will see an empty ranking from it.
+    elif retrieval_type == "wrrf_bm25_dense_lyrics_cfbpr_v1":
+        return RRF_MODEL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            sub_specs=[
+                {
+                    "type": "bm25",
+                    "corpus_types": [
+                        "track_name", "artist_name", "album_name",
+                        "release_date", "tag_list",
+                    ],
+                    "topk_internal": 60,
+                    "weight": 1.0,
+                },
+                {
+                    "type": "dense_metadata_qwen3_instruct",
+                    "corpus_types": corpus_types,
+                    "topk_internal": 20,
+                    "weight": 0.4,
+                },
+                {
+                    "type": "dense_lyrics_qwen3_instruct",
+                    "corpus_types": corpus_types,
+                    "topk_internal": 20,
+                    "weight": 0.4,
+                },
+                {
+                    "type": "cf_bpr",
+                    "corpus_types": corpus_types,
+                    "topk_internal": 20,
+                    "weight": 0.25,
+                },
+            ],
+            k=60,
+        )
     # Sequential retrieve-then-rerank.
     elif retrieval_type == "bm25_then_dense_rerank_v1":
         # BM25 (v2a 5-field corpus) first-stage top-100 → dense metadata+instruct rerank.

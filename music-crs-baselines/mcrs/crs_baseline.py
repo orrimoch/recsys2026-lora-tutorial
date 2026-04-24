@@ -171,6 +171,7 @@ class CRS_BASELINE:
         sys_prompts = []
         retrieval_inputs = []
         session_memories = []
+        user_ids: list[Optional[str]] = []
 
         for data in batch_data:
             user_query = data['user_query']
@@ -182,12 +183,22 @@ class CRS_BASELINE:
             retrieval_input = "\n".join([f"{conversation['role']}: {conversation['content']}" for conversation in session_memory])
             retrieval_inputs.append(retrieval_input)
             session_memories.append(session_memory)
+            user_ids.append(user_id)
 
         # Stage 1: Batch retrieval. Pull retrieval_topk (default 20; 40 when
-        # a reranker is configured) candidates per query.
+        # a reranker is configured) candidates per query. user_ids thread
+        # through so cf-bpr-style user-aware retrievers can use them.
         stage1_topk = self.retrieval_topk
         if hasattr(self.retrieval, 'batch_text_to_item_retrieval'):
-            batch_retrieval_items = self.retrieval.batch_text_to_item_retrieval(retrieval_inputs, topk=stage1_topk)
+            try:
+                batch_retrieval_items = self.retrieval.batch_text_to_item_retrieval(
+                    retrieval_inputs, topk=stage1_topk, user_ids=user_ids,
+                )
+            except TypeError:
+                # Back-compat: retriever predates the user_ids kwarg.
+                batch_retrieval_items = self.retrieval.batch_text_to_item_retrieval(
+                    retrieval_inputs, topk=stage1_topk,
+                )
         else:
             batch_retrieval_items = [self.retrieval.text_to_item_retrieval(inp, topk=stage1_topk) for inp in retrieval_inputs]
 

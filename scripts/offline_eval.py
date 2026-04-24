@@ -130,6 +130,7 @@ def build_query_gold_pairs(
             retrieval_input = "\n".join(history_lines)
             pairs.append({
                 "session_id": sess["session_id"],
+                "user_id": sess.get("user_id"),
                 "turn_number": int(turn_n),
                 "user_query": user_query,
                 "retrieval_input": retrieval_input,
@@ -171,10 +172,20 @@ def run_tier1(
             cfg.cache_dir,
         )
         retrieval_inputs = [p["retrieval_input"] for p in pairs]
-        print(f"[offline-eval] running batch retrieval (topk={topk_batch})")
-        preds_per_row = retrieval.batch_text_to_item_retrieval(
-            retrieval_inputs, topk=topk_batch,
-        )
+        user_ids = [p["user_id"] for p in pairs]
+        warm = sum(1 for u in user_ids if u)
+        print(f"[offline-eval] running batch retrieval (topk={topk_batch}) — "
+              f"user_ids present for {warm}/{len(user_ids)} pairs")
+        try:
+            preds_per_row = retrieval.batch_text_to_item_retrieval(
+                retrieval_inputs, topk=topk_batch, user_ids=user_ids,
+            )
+        except TypeError:
+            # Retriever predates user_ids kwarg (shouldn't happen after
+            # the cf-bpr wave but kept for forward-compat).
+            preds_per_row = retrieval.batch_text_to_item_retrieval(
+                retrieval_inputs, topk=topk_batch,
+            )
     finally:
         os.chdir(origin_cwd)
 

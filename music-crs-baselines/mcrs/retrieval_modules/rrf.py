@@ -69,13 +69,17 @@ class RRF_MODEL:
         print(f"[rrf] ready — k={self.k}, {len(self.subs)} sub-retriever(s)")
 
     def batch_text_to_item_retrieval(
-        self, queries: list[str], topk: int
+        self, queries: list[str], topk: int, user_ids=None,
     ) -> list[list[str]]:
+        # user_ids threaded through to any sub that uses it (e.g. cf_bpr).
+        # Subs that ignore it (BM25, dense) still accept it for interface parity.
         per_sub: list[list[list[str]]] = []
         for sub in self.subs:
             print(f"[rrf] running sub: {sub['label']}")
             per_sub.append(
-                sub["retriever"].batch_text_to_item_retrieval(queries, topk=sub["topk"])
+                sub["retriever"].batch_text_to_item_retrieval(
+                    queries, topk=sub["topk"], user_ids=user_ids,
+                )
             )
 
         results: list[list[str]] = []
@@ -90,5 +94,7 @@ class RRF_MODEL:
             results.append([tid for tid, _ in ordered[:topk]])
         return results
 
-    def text_to_item_retrieval(self, query: str, topk: int) -> list[str]:
-        return self.batch_text_to_item_retrieval([query], topk=topk)[0]
+    def text_to_item_retrieval(self, query: str, topk: int, user_id=None) -> list[str]:
+        return self.batch_text_to_item_retrieval(
+            [query], topk=topk, user_ids=[user_id] if user_id is not None else None,
+        )[0]

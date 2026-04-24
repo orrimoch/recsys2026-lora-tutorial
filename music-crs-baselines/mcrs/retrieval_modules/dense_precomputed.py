@@ -289,7 +289,11 @@ class DENSE_PRECOMPUTED:
         os.replace(tmp, self._query_cache_path)
         self._query_cache_dirty = False
 
-    def batch_text_to_item_retrieval(self, queries: list[str], topk: int) -> list[list[str]]:
+    def batch_text_to_item_retrieval(
+        self, queries: list[str], topk: int, user_ids=None,
+    ) -> list[list[str]]:
+        # user_ids accepted for interface parity (ignored — dense retrieval
+        # is query-only). Used by cf_bpr. See retrieval_modules/cf_bpr.py.
         # 1. Identify which queries are already cached.
         missing_idx = [i for i, q in enumerate(queries) if q not in self._query_cache]
         hits = len(queries) - len(missing_idx)
