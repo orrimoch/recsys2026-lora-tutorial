@@ -48,3 +48,4 @@ Per user directive 2026-04-24: shippable experiments are either two-step (retrie
 | 020-two-step-wrrf-lyrics-qwen15b-devset | [dev-local] | 0.0164 | 0.0784 | 0.0995 | 0.4418 | 0.3217 | — | 0.1261 | — | 2026-04-24 | PROMOTE to blind | 5ae994e |
 | 021-two-step-wrrf-lyrics-qwen15b-blindsetA | [blindA] | — | — | 0.19 | 0.03 | 0.67 | 3.15 | — | 0.33 | 2026-04-24 18:00 | shipped, rank 9/9 | f74baed |
 | 022-persona-qwen15b-blindsetA | [blindA] | — | — | 0.14 | 0.03 | 0.80 | 2.15 | — | 0.24 | 2026-04-24 18:22 | REJECTED — persona regressed LLM −1.00 on Qwen 1.5B | 53837f0 |
+| 023-rerank-qwen3b-blindsetA | [blindA] | — | — | 0.07 | 0.03 | 0.61 | 2.20 | — | 0.19 | 2026-04-24 | REJECTED — BGE-reranker misaligned with preference-based ground truth | 775488d |

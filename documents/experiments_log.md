@@ -52,6 +52,26 @@ New entries go at the TOP (newest first) so the most recent work is visible with
 - **Verdict**: **REJECTED**. Reverts to 021's stock prompt as the LLM baseline. Persona file retained under `system_prompts/response_generation_persona.txt` for possible future retry with Qwen 3B (where it might work as prior branch showed).
 - **Suggests next**: pivot to retrieval (52% of gap). Exp 023 stacks (a) BGE-reranker-v2-m3 cross-encoder over wRRF top-40→20, (b) Qwen 3B, (c) `max_new_tokens` 64→192. Three orthogonal axes; each touches different metrics so partial attribution is possible post-score.
 
+### Exp 023-rerank-qwen3b-blindsetA — Three-axis stack regressed; BGE-reranker is wrong tool for this task — 2026-04-24
+
+- **Hypothesis**: stacked 3 orthogonal changes on 021 baseline — (1) BGE-reranker-v2-m3 over wRRF top-40→20, (2) Qwen 1.5B→3B, (3) `max_new_tokens` 64→192. Predicted composite 0.33 → 0.39–0.41.
+- **Shipped result** (Blind-A): composite **0.19**, nDCG@20 **0.07** (−0.12 vs 021), LexDiv 0.61 (−0.06), LLM **2.20** (−0.95). Rank regression 9 → ~12+.
+- **Post-mortem diagnosis** (via local probe + qualitative inspection of 023 JSON vs 022 JSON):
+  - BGE-reranker-v2-m3 **code and model are correct.** Local probe: lofi-study query scored +2.4 vs lofi-match doc and −6.6 vs death-metal doc (correct directionality, no NaN). Not a code bug.
+  - 023 top-20 tids had **10/20 median overlap with 022 top-20** on the same 80 queries. The 10 differing picks are semantically sensible (e.g., "Music That You Can Dance To" for a dance query) but NOT the tracks Blind-A's ground truth rewards.
+  - **Root cause**: Blind-A ground truth rewards user preference / session-contextual picks (what the real user chose in their session continuation), NOT query-track semantic similarity. BM25+dense fusion happens to sit near that preference distribution; a generic cross-encoder pulls away from it.
+  - This is the same lesson from prior-branch v20: "retrieval changes that shift submission ordering from BM25's natural ordering cost LLM-judge, even when nDCG@20 improves". Here BM25 also already optimizes the right ordering AND the reranker hurts both nDCG AND LLM (because reranker's bad top-1 is passed to the LM as `recommend_item`, poisoning the response).
+- **Lessons**:
+  1. **H-6 (retrieval has high EV) needs refinement.** Retrieval HAS headroom (leader nDCG@20 0.44 vs ours 0.19) but only on task-aware signals: collaborative-filtering, user demographics, popularity, goal-conditioned retrieval. Off-the-shelf semantic rerankers HURT because they're optimizing the wrong objective. **BGE-reranker shelved.**
+  2. **Cascading failure mode**: bad reranker → bad top-1 → bad `recommend_item` → LM generates confident-but-wrong content → LLM judge tanks ALONG WITH nDCG. Retrieval and response axes are coupled via the top-1 citation path. Decouple: use different retrieval for prompt-top-1 vs the 20-list submission.
+  3. **Three-axis stacking violated attribution discipline.** We can only say "the stack regressed"; can't isolate Qwen 3B or max_new_tokens contributions. Exp 024 reverts to single-axis discipline.
+  4. **BGE-reranker is a zero-training dead-end for this task.** A fine-tuned reranker (trained on train-conversation (query, gold-music) pairs with `goal_progress_assessments` as graded relevance) might work, but that's R-4.2 (~1 day). LambdaMART with task-specific features is R-4.1 (also ~1 day). Neither is a quick fix.
+- **Verdict**: **REJECTED.** Revert to 021 baseline. Reranker code retained (no bug) for potential future use with a task-aware reranker.
+- **Suggests next**:
+  1. **Exp 024** — isolate response-side: Qwen 3B + max_new=192, NO reranker. Tests if the LM upgrade + length fix alone lifts composite without retrieval noise.
+  2. **Exp 025** (future) — if exp 024 doesn't lift LLM meaningfully, try Qwen 2.5-**7B** with stock prompt (prior branch regressed only with rigid few-shot; 7B + stock might work).
+  3. **Exp 026** (future, L effort) — LambdaMART-LtR (R-4.1) for task-aware retrieval upgrade. Only worth ~1-day investment if exp 024/025 hit a retrieval-bound plateau.
+
 ### Exp template (copy when starting a new experiment)
 
 ```markdown
