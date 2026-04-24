@@ -119,6 +119,38 @@ New entries go at the TOP (newest first) so the most recent work is visible with
   2. **Pivot to Blind-B infrastructure** — Blind-B releases 2026-06-15. Focus next 7 weeks on: (a) fine-tune BGE-reranker on train (R-4.2 — the only untried training-side retrieval), (b) LoRA distillation from 021 responses (E1 — the only training-side response approach that explicitly avoids the train-user/Gemini mismatch), (c) Qwen 2.5-7B / 14B on Colab A100 (larger model with surgical prompt rules, not exp 022's heavy persona).
   3. **If still experimenting on Blind-A**: accept the ±0.05 noise floor means single-slot experiments can't cleanly distinguish the ~±0.01 regressions we'd expect from any training-side tweak. Would need multi-seed submissions to average out noise, burning the submission budget.
 
+### Exp 028-top3-wrrf-qwen15b-blindsetA — Coupling hypothesis FALSIFIED; 021 is a narrow local optimum — 2026-04-25
+
+- **Hypothesis (H-11)**: prior 6 Blind-A regressions all showed LLM drops correlated with retrieval changes. Theory: retrieval's top-1 gets fed to LM as `recommend_item`, a bad top-1 → LM hallucinates → Gemini penalizes. Fix: pass top-3 candidates to LM, let it pick the best-matching one. Predicted LLM ≥ 3.15, unblocks future retrieval experiments.
+- **Shipped result** (Blind-A):
+  - composite 0.23 (−0.10 vs 021)
+  - nDCG@20 0.14 (−0.05 — retrieval stack literally unchanged, confirming ±0.05 Blind-A noise floor once more)
+  - CatDiv 0.03 (tied)
+  - LexDiv 0.77 (+0.10 — natural LM response variety with 3 tracks to describe)
+  - **LLM 2.10 (−1.05) — largest single-experiment LLM regression on fresh-model**
+- **Lessons**:
+  1. **H-11 FALSIFIED.** Top-3 in LM prompt REGRESSED LLM judge harder than any prior change, not lifted it. If the coupling hypothesis were correct, top-3 should have insulated LLM from retrieval changes; instead, the LM prompt-format change alone degraded Gemini scores worse than reranker-induced-top-1-changes did in isolation.
+  2. **021 is an exceptionally narrow local optimum.** The signature Gemini rewards is the specific combination: Qwen 1.5B + stock `response_generation.txt` + top-1 `recommend_item` + greedy + max_new_tokens=64. Any perturbation of ANY single dimension regresses LLM judge by 0.15–1.05.
+  3. **Pattern across 7 experiments** (022–028):
+     - Model swap (1.5B → 3B): −0.15
+     - Response length (64 → 192 tokens): −0.15 (bundled with 3B in 024)
+     - Persona prompt: −1.00
+     - Off-the-shelf reranker: −0.95
+     - Reward-model-based rerank: −0.55
+     - Learned (LambdaMART) rerank: −0.95
+     - Multi-candidate prompt: **−1.05** (worst)
+     Monotonically: the more structurally different from 021, the bigger the drop. Gemini isn't scoring retrieval quality directly — it's scoring whether the response matches a specific AI-speak template Qwen 1.5B+stock produces.
+  4. **The real blocker**: we don't have direct access to Gemini to train against its actual objective. Training against ANY train signal (exp 022, 026, 027) or standard retrieval objective (exp 023, 027) misaligns with Gemini's narrow preference.
+  5. **Submission budget overshoot**: 7 Blind-A slots used in ~24h, all regressions. Per plan §2.6 (3/week cap, 2 reserved for final retrain), we're significantly over budget. Any further Blind-A ships before Blind-B release should be extremely selective.
+- **Verdict**: **REJECTED.** Reverts to 021 champion. Coupling hypothesis dead. No more perturbation experiments on Blind-A until we have a fundamentally different approach.
+- **Suggests next**:
+  1. **STOP Blind-A ships.** 7 regressions definitively map the ceiling. The marginal information value of another failed experiment is near zero.
+  2. **Keep 021's `prediction.zip` as the Blind-A submission of record** until Blind-B releases (2026-06-15).
+  3. **Between now and Blind-B, invest in** (pick AT MOST two — this is ~7 weeks):
+     - **Offline eval harness overhaul**: none of our 7 regressions were predicted by offline nDCG@20 on 200-session train holdout (offline-to-Blind-A correlation is broken). A better pre-validator requires either (a) a local Gemini-proxy classifier trained on our 7 × 80 = 560 scored Blind-A responses, (b) a held-out offline set that matches Blind-A's distribution better (turn-1 only didn't; we saw in the first-turn-only test), or (c) accept offline is only useful as a regression detector, not a lift predictor.
+     - **Distillation from 021 outputs**: train Qwen 3B LoRA on 021's 80 Blind-A responses + dev-augmented synthetics. Target is 021's specific response style. THE ONLY generation-side direction we haven't tried that doesn't go through Gemini-misaligned train-user signal.
+     - **Blind-B preparation**: build the inference Colab notebook, pre-stage configs, verify the pipeline handles Blind-B's schema (likely same as Blind-A but with different 80 rows).
+
 ### Exp template (copy when starting a new experiment)
 
 ```markdown

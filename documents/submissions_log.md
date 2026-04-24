@@ -52,3 +52,4 @@ Per user directive 2026-04-24: shippable experiments are either two-step (retrie
 | 024-qwen3b-longresp-blindsetA | [blindA] | — | — | 0.14 | 0.03 | 0.62 | 3.00 | — | 0.29 | 2026-04-24 | REJECTED — Qwen 3B + stock + longer responses = AI-speak inflation | e033853 |
 | 026-reward-rerank-qwen15b-blindsetA | [blindA] | — | — | 0.14 | 0.03 | 0.78 | 2.60 | — | 0.27 | 2026-04-24 | REJECTED — H-9 falsified: reward model (AP 0.98 on train) ≠ Gemini | 70b8ebd |
 | 027-wrrf-lgbm-qwen15b-blindsetA | [blindA] | — | — | 0.11 | 0.03 | 0.77 | 2.20 | — | 0.23 | 2026-04-24 | REJECTED — LambdaMART (val 0.63 on train) regressed on Blind-A; 6th retrieval-rerank failure | 9d39379 |
+| 028-top3-wrrf-qwen15b-blindsetA | [blindA] | — | — | 0.14 | 0.03 | 0.77 | 2.10 | — | 0.23 | 2026-04-25 | REJECTED — coupling hypothesis FALSIFIED; top-3 prompt gave worst LLM drop yet (−1.05) | 1c172ea |
