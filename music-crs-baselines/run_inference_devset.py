@@ -70,6 +70,7 @@ def main(args):
     print("Removing cache directory for preventing memory issues...")
     os.system("rm -rf cache")
     config = OmegaConf.load(f"config/{args.tid}.yaml")
+    device = args.device or config.device
     music_crs = load_crs_baseline(
         lm_type=config.lm_type,
         retrieval_type=config.retrieval_type,
@@ -79,7 +80,7 @@ def main(args):
         user_split_types=config.user_split_types,
         corpus_types=config.corpus_types,
         cache_dir=config.cache_dir,
-        device=config.device,
+        device=device,
         attn_implementation=config.attn_implementation,
         dtype=torch.bfloat16
     )
@@ -139,6 +140,12 @@ if __name__ == "__main__":
         type=str,
         default="./exp/inference",
         help="Base directory for saving results (currently not used, results saved to exp/inference/)"
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Override config.device (e.g. 'cuda' on Colab, 'mps' on M-series Mac, 'cpu'). Defaults to config value."
     )
     args = parser.parse_args()
     main(args)

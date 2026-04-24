@@ -18,3 +18,5 @@ bm25s>=0.3.0,<0.4
 numpy>=1.26,<3.0
 tqdm>=4.66
 huggingface_hub>=0.25
+omegaconf>=2.3
+pandas>=2.0
