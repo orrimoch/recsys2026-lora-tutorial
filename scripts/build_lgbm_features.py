@@ -314,6 +314,12 @@ def main() -> int:
     p.add_argument("--cache-dir", type=str, default=str(BASELINES_DIR / "../experiments/cache"),
                    help="Cache dir (shared with retrievers).")
     args = p.parse_args()
+    # Resolve --out + --cache-dir to absolute paths so the mid-run chdir into
+    # BASELINES_DIR (required by the mcrs factory's relative cache lookups)
+    # doesn't misplace the output. Previous bug: --out data/lgbm_features.parquet
+    # landed at music-crs-baselines/data/ instead of repo-root data/.
+    args.out = os.path.abspath(args.out)
+    args.cache_dir = os.path.abspath(args.cache_dir)
 
     origin_cwd = os.getcwd()
     os.chdir(BASELINES_DIR)
