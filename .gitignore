@@ -19,6 +19,12 @@ cache/
 output/
 lora_adapters/
 
+# Inference outputs — large (~7.5 MB per devset run), reproducible via
+# Colab. Keep scored metric JSONs (scores/) since they're small and used
+# as fixtures for the Wave integration tests.
+music-crs-evaluator/exp/inference/
+music-crs-evaluator/exp/logs/
+
 # HF + model caches
 .cache/
 .huggingface/
