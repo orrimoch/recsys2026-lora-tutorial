@@ -71,3 +71,58 @@ class LLAMA_MODEL:
         # Decode only the newly generated tokens
         generated_texts = self.tokenizer.batch_decode(outputs[:,input_ids.shape[1]:], skip_special_tokens=True)
         return generated_texts
+
+    def batch_response_generation_multi(
+        self,
+        sys_prompts: list[str],
+        chat_histories: list[list],
+        recommend_items: list[str],
+        max_new_tokens: int = 192,
+        temperatures: list[float] | None = None,
+    ) -> list[list[str]]:
+        """Generate K candidate responses per input via temperature sampling.
+
+        Used by response-reranker pipelines (exp 026 and later): we sample
+        K diverse responses per query, score each with a reward model, and
+        ship the highest-scored one to output. The list of temperatures
+        controls diversity: [0.3, 0.7, 1.0] gives one focused + two varied.
+
+        Returns: list of N lists, each with len(temperatures) candidate strings.
+        """
+        if temperatures is None:
+            temperatures = [0.3, 0.7, 1.0]
+
+        # Format + tokenize input once (shared across all temperatures).
+        formatted = [
+            self._format_chat_history(sp, ch, ri)
+            for sp, ch, ri in zip(sys_prompts, chat_histories, recommend_items)
+        ]
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+        token_inputs = self.tokenizer(formatted, return_tensors="pt", padding=True, truncation=True)
+        input_ids = token_inputs.input_ids.to(self.device)
+        attention_mask = token_inputs.attention_mask.to(self.device)
+
+        n = len(formatted)
+        results: list[list[str]] = [[] for _ in range(n)]
+        for temp in temperatures:
+            with torch.no_grad():
+                if temp <= 0.0:
+                    outputs = self.lm.generate(
+                        input_ids, attention_mask=attention_mask,
+                        max_new_tokens=max_new_tokens,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        do_sample=False,
+                    )
+                else:
+                    outputs = self.lm.generate(
+                        input_ids, attention_mask=attention_mask,
+                        max_new_tokens=max_new_tokens,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        do_sample=True, temperature=temp, top_p=0.9,
+                        no_repeat_ngram_size=3,
+                    )
+            gen = self.tokenizer.batch_decode(outputs[:, input_ids.shape[1]:], skip_special_tokens=True)
+            for i, text in enumerate(gen):
+                results[i].append(text)
+        return results

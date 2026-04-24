@@ -6,6 +6,7 @@ from mcrs.db_user import UserProfileDB
 from mcrs.lm_modules import load_lm_module
 from mcrs.retrieval_modules import load_retrieval_module
 from mcrs.rerankers import load_reranker_module
+from mcrs.response_rerankers import load_response_reranker_module
 
 class CRS_BASELINE:
     """
@@ -44,6 +45,10 @@ class CRS_BASELINE:
         reranker_type: Optional[str] = None,
         retrieval_topk: int = 20,
         response_max_new_tokens: int = 64,
+        response_reranker_type: Optional[str] = None,
+        response_reranker_model_path: Optional[str] = None,
+        response_n_candidates: int = 3,
+        response_temperatures: Optional[List[float]] = None,
     ):
         """Initialize the CRS baseline components.
 
@@ -80,6 +85,14 @@ class CRS_BASELINE:
         # returns exactly 20. Submission format fixed at 20 tids.
         self.retrieval_topk = retrieval_topk
         self.response_max_new_tokens = response_max_new_tokens
+        # Response reranker (exp 026+): sample K responses and pick the best via
+        # a reward model trained on train goal_progress_assessments.
+        self.response_reranker_type = response_reranker_type
+        self.response_reranker = load_response_reranker_module(
+            response_reranker_type, model_path=response_reranker_model_path,
+        )
+        self.response_n_candidates = response_n_candidates
+        self.response_temperatures = response_temperatures or [0.3, 0.7, 1.0]
         self.item_db = MusicCatalogDB(self.item_db_name, self.track_split_types, self.corpus_types)
         self.user_db = UserProfileDB(self.user_db_name, self.user_split_types)
         self.prompts_dir = os.path.join(os.path.dirname(__file__), "system_prompts")
@@ -209,9 +222,37 @@ class CRS_BASELINE:
 
         recommend_items = [self.item_db.id_to_metadata(items[0]) for items in batch_retrieval_items]
 
-        # Stage 2: Batch response generation. Pass through the configured
-        # max_new_tokens so yaml can override the LM module default (64).
-        if hasattr(self.lm, 'batch_response_generation'):
+        # Stage 2: Batch response generation.
+        if self.response_reranker is not None and hasattr(self.lm, 'batch_response_generation_multi'):
+            # Multi-candidate + reward-model rerank path (exp 026+).
+            # Sample K responses per query, score each, ship the best one.
+            candidates_per_query = self.lm.batch_response_generation_multi(
+                sys_prompts, session_memories, recommend_items,
+                max_new_tokens=self.response_max_new_tokens,
+                temperatures=self.response_temperatures[: self.response_n_candidates],
+            )
+            # Build per-query context strings matching the reward model's
+            # training format (see scripts/build_reward_dataset.py).
+            contexts: list[str] = []
+            for i, data in enumerate(batch_data):
+                rec_meta = recommend_items[i] if i < len(recommend_items) else ""
+                user_query = data.get('user_query', '')
+                # Minimal context — no goal metadata available at Blind-A
+                # inference time (we don't know listener_goal); rely on
+                # query + recommended_track + prior history to drive scoring.
+                history_text = "\n".join(
+                    f"{t['role']}: {t['content']}" for t in data.get('session_memory', [])
+                )[:1000]
+                ctx = (
+                    f"User query: {user_query}\n"
+                    f"Recommended track: {rec_meta}\n"
+                    f"Prior dialog: {history_text}"
+                )
+                contexts.append(ctx)
+            best_idx = self.response_reranker.rerank(contexts, candidates_per_query)
+            responses = [cands[bi] for cands, bi in zip(candidates_per_query, best_idx)]
+        elif hasattr(self.lm, 'batch_response_generation'):
+            # Standard greedy path (exp 021/024 etc.).
             responses = self.lm.batch_response_generation(
                 sys_prompts, session_memories, recommend_items,
                 max_new_tokens=self.response_max_new_tokens,

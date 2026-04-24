@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional
 
 import torch
 from .crs_baseline import CRS_BASELINE
@@ -19,6 +19,10 @@ def load_crs_baseline(
     reranker_type: Optional[str] = None,
     retrieval_topk: int = 20,
     response_max_new_tokens: int = 64,
+    response_reranker_type: Optional[str] = None,
+    response_reranker_model_path: Optional[str] = None,
+    response_n_candidates: int = 3,
+    response_temperatures: Optional[List[float]] = None,
 ):
     return CRS_BASELINE(
         lm_type,
@@ -36,4 +40,8 @@ def load_crs_baseline(
         reranker_type,
         retrieval_topk,
         response_max_new_tokens,
+        response_reranker_type,
+        response_reranker_model_path,
+        response_n_candidates,
+        response_temperatures,
     )

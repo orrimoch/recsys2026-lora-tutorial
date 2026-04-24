@@ -76,6 +76,12 @@ def main(args):
     reranker_type = config.get("reranker_type", None)
     retrieval_topk = int(config.get("retrieval_topk", 20))
     response_max_new_tokens = int(config.get("response_max_new_tokens", 64))
+    response_reranker_type = config.get("response_reranker_type", None)
+    response_reranker_model_path = config.get("response_reranker_model_path", None)
+    response_n_candidates = int(config.get("response_n_candidates", 3))
+    # Optional list[float] from yaml; OmegaConf returns a ListConfig — convert.
+    _rt = config.get("response_temperatures", None)
+    response_temperatures = [float(x) for x in _rt] if _rt is not None else None
     music_crs = load_crs_baseline(
         lm_type=config.lm_type,
         retrieval_type=config.retrieval_type,
@@ -92,6 +98,10 @@ def main(args):
         reranker_type=reranker_type,
         retrieval_topk=retrieval_topk,
         response_max_new_tokens=response_max_new_tokens,
+        response_reranker_type=response_reranker_type,
+        response_reranker_model_path=response_reranker_model_path,
+        response_n_candidates=response_n_candidates,
+        response_temperatures=response_temperatures,
     )
     db = load_dataset(config.test_dataset_name, split="test")
     # Prepare all batch data at once
