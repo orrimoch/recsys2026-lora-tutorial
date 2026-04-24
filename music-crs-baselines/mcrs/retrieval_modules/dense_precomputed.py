@@ -33,6 +33,16 @@ DEFAULT_ENCODER = "Qwen/Qwen3-Embedding-0.6B"
 DEFAULT_EMBED_COL = "attributes-qwen3_embedding_0.6b"
 TRACK_EMB_DATASET = "talkpl-ai/TalkPlayData-Challenge-Track-Embeddings"
 
+# Module-level shared encoder + shared query cache. The wRRF factory
+# spins up multiple DENSE_PRECOMPUTED instances (e.g. metadata + lyrics),
+# each of which would otherwise (a) load its own copy of Qwen3-Embedding
+# (~1.2 GB in bf16) and (b) re-encode the same cold queries. Both are
+# pure waste — the encoder weights and the per-query embedding depend
+# only on (model, instruct_label), not on which track embedding column
+# the instance is scoring against. Keys: (encoder_name, instruct_label).
+_SHARED_ENCODER: dict[tuple, tuple] = {}
+_SHARED_QUERY_CACHE: dict[tuple, dict[str, np.ndarray]] = {}
+
 
 class DENSE_PRECOMPUTED:
     def __init__(
@@ -64,8 +74,17 @@ class DENSE_PRECOMPUTED:
         self.track_ids, self.track_mat = self._load_or_build_track_matrix()
         # Persistent query-embedding cache — shared across experiments that
         # reuse the same encoder AND the same instruct-wrapping strategy.
+        # In-memory dict is ALSO shared across all DENSE_PRECOMPUTED instances
+        # with the same (encoder, instruct_label) key, so a query encoded by
+        # retriever A is immediately visible to retriever B in the same run
+        # (prior design read/wrote the pickle, but each instance kept its
+        # own in-memory dict populated only at __init__ time, so concurrent
+        # retrievers would re-encode the same cold queries).
         self._query_cache_path = self._query_cache_file()
-        self._query_cache: dict[str, np.ndarray] = self._load_query_cache()
+        self._query_cache_key = (DEFAULT_ENCODER, self.instruct_label)
+        if self._query_cache_key not in _SHARED_QUERY_CACHE:
+            _SHARED_QUERY_CACHE[self._query_cache_key] = self._load_query_cache()
+        self._query_cache: dict[str, np.ndarray] = _SHARED_QUERY_CACHE[self._query_cache_key]
         self._query_cache_dirty = False
 
     def _cache_path(self) -> str:
@@ -184,6 +203,17 @@ class DENSE_PRECOMPUTED:
         import torch
         from transformers import AutoModel, AutoTokenizer
 
+        # Shared-singleton fast path: if another DENSE_PRECOMPUTED instance
+        # already loaded this encoder, reuse it (saves ~1.2 GB VRAM + a model
+        # load per extra retriever). The encoder is a pure function of
+        # (model, instruct_label) — safe to share.
+        key = (DEFAULT_ENCODER, self.instruct_label)
+        if key in _SHARED_ENCODER:
+            enc, tok, dev = _SHARED_ENCODER[key]
+            self._encoder, self._tokenizer, self._device = enc, tok, dev
+            print(f"[dense] reusing shared encoder {DEFAULT_ENCODER} on {dev}")
+            return enc, tok
+
         # Qwen3-Embedding expects left-padding for last-token pooling.
         self._tokenizer = AutoTokenizer.from_pretrained(DEFAULT_ENCODER, padding_side="left")
         # Device pick: CUDA > MPS > CPU. bf16 on accelerators (half the memory,
@@ -201,6 +231,7 @@ class DENSE_PRECOMPUTED:
         self._encoder = AutoModel.from_pretrained(DEFAULT_ENCODER, torch_dtype=encoder_dtype)
         self._encoder = self._encoder.to(self._device)
         self._encoder.eval()
+        _SHARED_ENCODER[key] = (self._encoder, self._tokenizer, self._device)
         print(f"[dense] loaded {DEFAULT_ENCODER} on {self._device} dtype={encoder_dtype}")
         return self._encoder, self._tokenizer
 
