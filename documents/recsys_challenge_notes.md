@@ -130,6 +130,22 @@ Defined in `music-crs-evaluator/metrics/`.
 - **`catalog_diversity`** = `|unique recommended tracks| / |catalog|` (50.4k)
 - **`lexical_diversity`** = Distinct-2 bigram ratio across all `predicted_response` strings
 
+### LLM-as-Judge — **Gemini, blind-set only** ⚠️
+Source: `documents/RecSys2026_links.html:200–228` (official challenge website).
+
+- Blind-set `predicted_response` strings are scored by a **Google Gemini** model used as an automatic judge.
+- Two text-only dimensions (independent of recommendation accuracy):
+  - **Personalization** — does the response reflect user context / preferences?
+  - **Explanation Quality** — is the justification coherent, grounded, useful?
+- **Prompt is not disclosed** to preserve blind-evaluation integrity.
+- **Every listed dimension contributes to the final score** (exact aggregation weights also not published).
+- Gemini ≠ Gemma. Gemini is Google's closed, API-only frontier LLM family. Gemma is their open-weights smaller family. We cannot run the judge locally; we can only approximate it (e.g., via Gemini API, or with a local proxy judge like Qwen — accepting a distribution gap).
+
+**Implications for design**:
+1. Response quality matters on Blind — we can't score it locally via nDCG alone.
+2. Personalization + explanation quality are the knobs; optimizing purely for retrieval accuracy leaves points on the table.
+3. Self-play / DPO loops using our own LLM-as-Judge (e.g. Qwen judging Qwen) will be **misaligned with the real judge**. Calibrate against Gemini API samples before trusting the signal (see `documents/research/recent_papers_ideas.md §6 — Judging the Judges`).
+
 ### Validation enforcement
 - `metrics_recsys.py:127–130` raises `ValueError` on duplicate predictions or duplicate GT.
 - `IDCG` computation caps at `min(len(gold), k)` — since `len(gold)=1`, effectively always 1.
@@ -214,6 +230,7 @@ Common fields across configs in `music-crs-baselines/config/`:
 7. **Do NOT modify** `music-crs-evaluator/exp/ground_truth/` (project rule).
 8. **Do NOT commit large artifacts** — model weights, cached indices, datasets. Use `data/`, `cache/`, `experiments/` (all git-ignored).
 9. **Blind evaluation is one-shot-ish** — you only learn Blind leaderboard scores; iterate on devset locally first (per submission prep protocol: train-only during iteration, train+dev for the final Blind submission).
+10. **Blind response quality is judged by Gemini (not Gemma, not us)** — nDCG alone doesn't predict Blind rank. Optimize for Personalization + Explanation Quality too. See §6.
 
 ---
 
