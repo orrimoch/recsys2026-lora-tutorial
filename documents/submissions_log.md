@@ -49,3 +49,5 @@ Per user directive 2026-04-24: shippable experiments are either two-step (retrie
 | 021-two-step-wrrf-lyrics-qwen15b-blindsetA | [blindA] | — | — | 0.19 | 0.03 | 0.67 | 3.15 | — | 0.33 | 2026-04-24 18:00 | shipped, rank 9/9 | f74baed |
 | 022-persona-qwen15b-blindsetA | [blindA] | — | — | 0.14 | 0.03 | 0.80 | 2.15 | — | 0.24 | 2026-04-24 18:22 | REJECTED — persona regressed LLM −1.00 on Qwen 1.5B | 53837f0 |
 | 023-rerank-qwen3b-blindsetA | [blindA] | — | — | 0.07 | 0.03 | 0.61 | 2.20 | — | 0.19 | 2026-04-24 | REJECTED — BGE-reranker misaligned with preference-based ground truth | 775488d |
+| 024-qwen3b-longresp-blindsetA | [blindA] | — | — | 0.14 | 0.03 | 0.62 | 3.00 | — | 0.29 | 2026-04-24 | REJECTED — Qwen 3B + stock + longer responses = AI-speak inflation | e033853 |
+| 026-reward-rerank-qwen15b-blindsetA | [blindA] | — | — | 0.14 | 0.03 | 0.78 | 2.60 | — | 0.27 | 2026-04-24 | REJECTED — H-9 falsified: reward model (AP 0.98 on train) ≠ Gemini | 70b8ebd |

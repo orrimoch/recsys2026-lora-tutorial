@@ -72,6 +72,30 @@ New entries go at the TOP (newest first) so the most recent work is visible with
   2. **Exp 025** (future) — if exp 024 doesn't lift LLM meaningfully, try Qwen 2.5-**7B** with stock prompt (prior branch regressed only with rigid few-shot; 7B + stock might work).
   3. **Exp 026** (future, L effort) — LambdaMART-LtR (R-4.1) for task-aware retrieval upgrade. Only worth ~1-day investment if exp 024/025 hit a retrieval-bound plateau.
 
+### Exp 026-reward-rerank-qwen15b-blindsetA — H-9 falsified: train reward model ≠ Gemini — 2026-04-24
+
+- **Hypothesis (H-9)**: a cross-encoder fine-tuned on train `goal_progress_assessments` (MOVES_TOWARD_GOAL vs DOES_NOT) would, when used as a response reranker picking best-of-K sampled responses, lift Gemini LLM judge by +0.1–0.3.
+- **Mechanism**: Qwen 1.5B greedy → Qwen 1.5B samples K=3 responses at temperatures [0.3, 0.7, 1.0], MiniLM-L-6 cross-encoder (fine-tuned on ~95k train (context, response) pairs with BCE, 2 epochs on A100) scores each, ship argmax.
+- **Reward model trained quality**: AP = **0.98** on held-out (session-level) val. Accuracy 93.2%, F1 0.93, Precision 0.94, Recall 0.92. Clean learned signal.
+- **Shipped result** (Blind-A, 80 rows):
+  - composite **0.27** (−0.06 vs 021)
+  - nDCG@20 **0.14** (−0.05 — consistent with ±0.05 noise pattern confirmed in 022/024; retrieval stack unchanged)
+  - CatDiv 0.03 (tied)
+  - LexDiv **0.78** (+0.11 — K-sampling diversity worked as designed)
+  - LLM **2.60** (−0.55 — big regression)
+- **Lessons**:
+  1. **H-9 FALSIFIED.** Near-perfect classifier of train-user preference (AP 0.98) produces responses that Gemini scores 0.55 WORSE than greedy Qwen 1.5B.
+  2. **Train-user preference ≠ Gemini-judge preference.** Two independent confirmations now: prior-branch LoRA-on-train (−1.45 LLM), and this reward-model reranker (−0.55 LLM). Different mechanisms, same failure mode.
+  3. **Gemini apparently rewards AI-speak-heavy greedy responses MORE than in-distribution user-satisfying ones.** Consistent with 022 (persona = too diverse/specific → failed), 024 (3B rambling → failed), and now 026 (train-user-aligned → failed). The Gemini scoring function favours the TEMPLATED response style; deviations in any direction hurt.
+  4. **Blind-A ±0.05 nDCG@20 noise is now confirmed four times** (021=0.19, 022=0.14, 024=0.14, 026=0.14 on same wRRF). Retrieval noise floor is ±0.05 on 80-row set.
+  5. **Path 2 (GRPO LoRA on the same reward signal) is dead.** If the reward model misaligns with Gemini, RL-amplifying its signal makes things worse, not better.
+  6. **LexDiv +0.11 is a neutral gain on the surface** — sampling did add vocabulary diversity — but Gemini's LLM-judge weight dominates (0.30 × (2.6−1)/4 = 0.12) and the LLM drop buried any LexDiv composite benefit.
+- **Verdict**: **REJECTED.** 021 remains champion (composite 0.33). Reward model shelved — not a Gemini alignment signal. All training-based generation-side directions using goal_progress_assessments as ground truth are now dead ends.
+- **Suggests next**:
+  1. **A1 LambdaMART retrieval reranker** — our Tier-A rank-3 candidate, now the clear next move. Retrieval-only (doesn't touch the response side where we keep losing), uses train gold as supervised labels, feature extractor already built (commit 48415fa). Target +0.03–0.08 nDCG@20 = composite 0.33 → 0.35–0.37.
+  2. **Reward model is NOT wasted** — it becomes a feature INSIDE LambdaMART's feature vector (predicted "user would like this" score per candidate). That's a task-aware signal no leader seems to exploit.
+  3. **Response-side: accept 021 greedy-stock as near-ceiling on Qwen 1.5B.** Stop trying to beat LLM judge via generation changes. Future ship-worthy LLM lifts must either (a) upgrade the retriever so the prompt has better metadata to cite, OR (b) distil from 021's own high-scoring responses (never from train data).
+
 ### Exp template (copy when starting a new experiment)
 
 ```markdown
