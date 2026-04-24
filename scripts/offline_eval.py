@@ -81,6 +81,7 @@ def load_train_holdout(size: int, seed: int) -> list[dict[str, Any]]:
 
 def build_query_gold_pairs(
     holdout: list[dict], item_db: MusicCatalogDB,
+    first_turn_only: bool = False,
 ) -> list[dict[str, Any]]:
     """For each music turn in each held-out session, build one
     (user_query, chat_history, gold_tid) eval pair.
@@ -96,7 +97,11 @@ def build_query_gold_pairs(
         if df.empty:
             continue
         # Find music turns — one eval pair per music turn.
+        # When first_turn_only=True, restrict to turn_number == 1 so the
+        # offline distribution mirrors Blind-A (single-turn, short query).
         music_rows = df[df["role"] == "music"]
+        if first_turn_only:
+            music_rows = music_rows[music_rows["turn_number"] == 1]
         for _, music_row in music_rows.iterrows():
             turn_n = music_row["turn_number"]
             gold_tid = music_row["content"]
@@ -141,6 +146,7 @@ def build_query_gold_pairs(
 
 def run_tier1(
     tid: str, holdout_size: int = 200, seed: int = 42, topk_batch: int = 20,
+    first_turn_only: bool = False,
 ) -> dict[str, float]:
     """Run retrieval-only offline eval for the given config."""
     cfg = OmegaConf.load(BASELINES_DIR / "config" / f"{tid}.yaml")
@@ -159,8 +165,9 @@ def run_tier1(
         item_db = MusicCatalogDB(
             cfg.item_db_name, list(cfg.track_split_types), list(cfg.corpus_types),
         )
-        print(f"[offline-eval] building eval pairs from {len(holdout)} sessions")
-        pairs = build_query_gold_pairs(holdout, item_db)
+        print(f"[offline-eval] building eval pairs from {len(holdout)} sessions "
+              f"(first_turn_only={first_turn_only})")
+        pairs = build_query_gold_pairs(holdout, item_db, first_turn_only=first_turn_only)
         print(f"[offline-eval] built {len(pairs)} (query, gold_tid) pairs")
 
         print(f"[offline-eval] loading retrieval: {cfg.retrieval_type}")
@@ -209,6 +216,7 @@ def run_tier1(
         "n_pairs": len(pairs),
         "holdout_size": holdout_size,
         "seed": seed,
+        "first_turn_only": first_turn_only,
     }
 
     print("\n=== Tier-1 offline eval result ===")
@@ -232,14 +240,15 @@ def append_log_row(tid: str, scores: dict[str, Any]) -> None:
         "",
         "## Table",
         "",
-        "| tid | seed | holdout_size | n_pairs | nDCG@1 | nDCG@10 | nDCG@20 | CatDiv | composite_retrieval |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| tid | seed | holdout_size | first_turn_only | n_pairs | nDCG@1 | nDCG@10 | nDCG@20 | CatDiv | composite_retrieval |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     if not log_path.exists():
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("\n".join(header_lines) + "\n")
+    ftyn = "yes" if scores.get("first_turn_only") else "no"
     row = (
-        f"| {tid} | {scores['seed']} | {scores['holdout_size']} | {scores['n_pairs']} |"
+        f"| {tid} | {scores['seed']} | {scores['holdout_size']} | {ftyn} | {scores['n_pairs']} |"
         f" {scores['ndcg@1']} | {scores['ndcg@10']} | {scores['ndcg@20']} |"
         f" {scores['catalog_diversity']} | {scores['composite_retrieval']} |"
     )
@@ -258,9 +267,16 @@ def main() -> int:
                    help="Deterministic holdout sample seed.")
     p.add_argument("--no-log", action="store_true",
                    help="Skip appending to offline_eval_log.md")
+    p.add_argument("--first-turn-only", action="store_true",
+                   help="Only use turn=1 music gold tracks. Mirrors Blind-A's "
+                        "single-turn distribution for more predictive offline/online "
+                        "calibration. Default False (all turns, noisier queries).")
     args = p.parse_args()
 
-    scores = run_tier1(args.tid, holdout_size=args.holdout_size, seed=args.seed)
+    scores = run_tier1(
+        args.tid, holdout_size=args.holdout_size, seed=args.seed,
+        first_turn_only=args.first_turn_only,
+    )
     if not args.no_log:
         append_log_row(args.tid, scores)
     return 0
