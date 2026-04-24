@@ -1,0 +1,258 @@
+"""LightGBM LambdaRank reranker (A1 / exp 027).
+
+Trained via colab/Build_LGBM_Features_And_Train.ipynb on (query, wRRF
+top-100 candidates) from 2000 train sessions with binary gold labels. Uses
+11 features per candidate:
+
+  Numeric:  wrrf_rank, cfbpr_score, pop_log, recency_years, tag_count, artist_in_query
+  Categorical: goal_category, goal_specificity, user_age_group, user_country, user_gender
+
+At inference:
+  - Input: queries, candidate_tids_per_query (from wRRF), user_ids,
+    goal_categories, goal_specificities, user_profiles_raw.
+  - Computes features for each candidate (static track metadata cache +
+    cfbpr lookup + query-artist match + session/user categoricals).
+  - LGBM booster scores each (query, candidate) pair.
+  - Returns top-K per query by descending score.
+
+Loads model + metadata from a local directory:
+  model_path/
+    booster.txt      (LightGBM text-format model)
+    metadata.json    (features, categorical levels, best_iter, val ndcg)
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+from typing import Any, Optional
+
+import numpy as np
+
+
+FEATURES_NUMERIC = ["wrrf_rank", "cfbpr_score", "pop_log", "recency_years", "tag_count", "artist_in_query"]
+FEATURES_CATEGORICAL = ["goal_category", "goal_specificity", "user_age_group", "user_country", "user_gender"]
+ALL_FEATURES = FEATURES_NUMERIC + FEATURES_CATEGORICAL
+
+
+def _first(v):
+    if isinstance(v, list):
+        return v[0] if v else None
+    return v
+
+
+def _tokenize_simple(s: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", (s or "").lower()))
+
+
+def _parse_user_profile(raw: Any) -> dict[str, str]:
+    """user_profile in Blind-A is a serialized dict (string). Sometimes already
+    a dict, sometimes a JSON-ish string with single quotes. Parse defensively."""
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    # Try JSON (double quotes)
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    # Try Python literal (single quotes)
+    try:
+        import ast
+        return ast.literal_eval(raw)
+    except Exception:
+        return {}
+
+
+class LGBM_RERANKER:
+    def __init__(
+        self,
+        item_db_name: str,
+        track_split_types: list[str],
+        corpus_types: list[str],
+        cache_dir: str = "./cache",
+        model_path: Optional[str] = None,
+    ) -> None:
+        if not model_path or not os.path.isdir(model_path):
+            raise FileNotFoundError(
+                f"LGBM_RERANKER requires a local model dir; got {model_path!r}. "
+                "Train via colab/Build_LGBM_Features_And_Train.ipynb, then unzip into "
+                "models/lgbm_ranker/ on the M4."
+            )
+        import lightgbm as lgb
+        self.model_path = model_path
+        self.booster = lgb.Booster(model_file=os.path.join(model_path, "booster.txt"))
+        with open(os.path.join(model_path, "metadata.json")) as f:
+            meta = json.load(f)
+        self.features: list[str] = meta["features"]
+        self.categorical_features: list[str] = meta["categorical_features"]
+        self.cat_levels: dict[str, list[str]] = meta["categorical_levels"]
+        # Build category -> int code maps for fast encoding at inference.
+        self.cat_index = {c: {v: i for i, v in enumerate(self.cat_levels[c])} for c in self.categorical_features}
+        print(f"[lgbm-rerank] loaded {os.path.join(model_path, 'booster.txt')} "
+              f"(best_iter={meta.get('best_iteration')}, "
+              f"val_ndcg20={meta.get('best_val_ndcg20'):.4f})")
+        # Track metadata lookup + cf-bpr tables (lightweight, reused).
+        self._load_track_meta(item_db_name, track_split_types)
+        self._load_cfbpr(cache_dir)
+        # Lazy-load user metadata when first rerank() call arrives.
+        self._user_meta: Optional[dict[str, dict]] = None
+
+    def _load_track_meta(self, item_db_name: str, track_split_types: list[str]) -> None:
+        from datasets import concatenate_datasets, load_dataset
+        print(f"[lgbm-rerank] loading track metadata {item_db_name}")
+        ds = load_dataset(item_db_name)
+        concat = concatenate_datasets([ds[s] for s in track_split_types])
+        self.tid_to_track: dict[str, dict] = {}
+        for r in concat:
+            self.tid_to_track[r["track_id"]] = {
+                "artist_name": _first(r.get("artist_name")) or "",
+                "tag_list": r.get("tag_list") or [],
+                "popularity": float(r.get("popularity") or 0.0),
+                "release_date": r.get("release_date"),
+            }
+        print(f"[lgbm-rerank] cached {len(self.tid_to_track)} track rows")
+
+    def _load_cfbpr(self, cache_dir: str) -> None:
+        # Reuse cf-bpr tables via the CF_BPR class so singleton caches hit.
+        from ..retrieval_modules.cf_bpr import CF_BPR
+        cf = CF_BPR(
+            dataset_name="talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
+            split_types=["all_tracks"],
+            corpus_types=["track_name"],
+            cache_dir=cache_dir,
+        )
+        self.cfbpr_tid_to_idx = {t: i for i, t in enumerate(cf.track_ids)}
+        self.cfbpr_track_mat = cf.track_mat
+        self.cfbpr_user_embs = cf.user_embs
+
+    def _load_user_meta_if_needed(self) -> None:
+        if self._user_meta is not None:
+            return
+        from datasets import concatenate_datasets, load_dataset
+        print("[lgbm-rerank] loading Challenge-User-Metadata")
+        um = load_dataset("talkpl-ai/TalkPlayData-Challenge-User-Metadata")
+        concat = concatenate_datasets([um[s] for s in um])
+        self._user_meta = {
+            r["user_id"]: {
+                "age_group": r.get("age_group") or "unknown",
+                "country_code": r.get("country_code") or "unknown",
+                "gender": r.get("gender") or "unknown",
+            }
+            for r in concat
+        }
+        print(f"[lgbm-rerank] cached metadata for {len(self._user_meta)} users")
+
+    def _encode_cat(self, col: str, value: Optional[str]) -> int:
+        """Map a categorical string to the int code LightGBM expects. Unknown
+        values map to -1 (LGBM treats as NaN/missing; booster handles)."""
+        if value is None:
+            return -1
+        return self.cat_index[col].get(str(value), -1)
+
+    def _compute_feature_matrix(
+        self,
+        query: str,
+        candidate_tids: list[str],
+        user_id: Optional[str],
+        goal_category: Optional[str],
+        goal_specificity: Optional[str],
+        user_profile_raw: Any,
+    ) -> np.ndarray:
+        """Build (N, F) feature matrix for N candidates."""
+        # User profile + metadata
+        self._load_user_meta_if_needed()
+        umeta = self._user_meta.get(user_id, {}) if user_id else {}
+        uprof = _parse_user_profile(user_profile_raw)
+        age = umeta.get("age_group") or uprof.get("age_group") or "unknown"
+        country = umeta.get("country_code") or uprof.get("country_code") or "unknown"
+        gender = umeta.get("gender") or uprof.get("gender") or "unknown"
+
+        # cf-bpr user vector (None for cold)
+        cfbpr_user_vec = self.cfbpr_user_embs.get(user_id) if user_id else None
+
+        query_tokens = _tokenize_simple(query)
+        query_joined = " ".join(query_tokens)
+
+        # Pre-encode session-level categoricals (same for all candidates in this query).
+        gc = self._encode_cat("goal_category", goal_category)
+        gs = self._encode_cat("goal_specificity", goal_specificity)
+        ag = self._encode_cat("user_age_group", age)
+        cc = self._encode_cat("user_country", country)
+        gn = self._encode_cat("user_gender", gender)
+
+        n = len(candidate_tids)
+        X = np.zeros((n, len(self.features)), dtype=np.float64)
+        f_idx = {f: i for i, f in enumerate(self.features)}
+
+        for rank, tid in enumerate(candidate_tids, start=1):
+            m = self.tid_to_track.get(tid, {})
+            artist = m.get("artist_name") or ""
+            artist_in_q = 1 if artist and artist.lower() in query_joined else 0
+            tag_count = len(m.get("tag_list") or [])
+            pop = m.get("popularity") or 0.0
+            rd = m.get("release_date")
+            try:
+                year = int(str(rd)[:4]) if rd else None
+            except ValueError:
+                year = None
+            recency = (2026 - year) if year else 0.0
+
+            if cfbpr_user_vec is not None and tid in self.cfbpr_tid_to_idx:
+                tv = self.cfbpr_track_mat[self.cfbpr_tid_to_idx[tid]]
+                cfbpr_score = float(np.dot(cfbpr_user_vec, tv))
+            else:
+                cfbpr_score = 0.0
+
+            X[rank - 1, f_idx["wrrf_rank"]] = rank
+            X[rank - 1, f_idx["cfbpr_score"]] = cfbpr_score
+            X[rank - 1, f_idx["pop_log"]] = float(np.log1p(pop))
+            X[rank - 1, f_idx["recency_years"]] = float(recency)
+            X[rank - 1, f_idx["tag_count"]] = tag_count
+            X[rank - 1, f_idx["artist_in_query"]] = artist_in_q
+            X[rank - 1, f_idx["goal_category"]] = gc
+            X[rank - 1, f_idx["goal_specificity"]] = gs
+            X[rank - 1, f_idx["user_age_group"]] = ag
+            X[rank - 1, f_idx["user_country"]] = cc
+            X[rank - 1, f_idx["user_gender"]] = gn
+
+        return X
+
+    def rerank(
+        self,
+        queries: list[str],
+        candidate_tids: list[list[str]],
+        topk: int,
+        user_ids: Optional[list[Optional[str]]] = None,
+        goal_categories: Optional[list[Optional[str]]] = None,
+        goal_specificities: Optional[list[Optional[str]]] = None,
+        user_profiles_raw: Optional[list[Any]] = None,
+    ) -> list[list[str]]:
+        n = len(queries)
+        # Default-fill side channels (support BGE-reranker-style calls that
+        # pass just (queries, candidates, topk)).
+        if user_ids is None:
+            user_ids = [None] * n
+        if goal_categories is None:
+            goal_categories = [None] * n
+        if goal_specificities is None:
+            goal_specificities = [None] * n
+        if user_profiles_raw is None:
+            user_profiles_raw = [None] * n
+
+        out: list[list[str]] = []
+        for i in range(n):
+            tids = candidate_tids[i]
+            X = self._compute_feature_matrix(
+                query=queries[i],
+                candidate_tids=tids,
+                user_id=user_ids[i],
+                goal_category=goal_categories[i],
+                goal_specificity=goal_specificities[i],
+                user_profile_raw=user_profiles_raw[i],
+            )
+            scores = self.booster.predict(X)
+            order = np.argsort(-scores)[:topk]
+            out.append([tids[j] for j in order])
+        return out

@@ -43,6 +43,7 @@ class CRS_BASELINE:
         dtype=torch.bfloat16,
         response_prompt_name: str = "response_generation",
         reranker_type: Optional[str] = None,
+        reranker_model_path: Optional[str] = None,
         retrieval_topk: int = 20,
         response_max_new_tokens: int = 64,
         response_reranker_type: Optional[str] = None,
@@ -77,8 +78,10 @@ class CRS_BASELINE:
         self.lm = load_lm_module(self.lm_type, self.device, self.attn_implementation, self.dtype)
         self.retrieval = load_retrieval_module(self.retrieval_type, self.item_db_name, self.track_split_types, self.corpus_types, self.cache_dir)
         self.reranker_type = reranker_type
+        self.reranker_model_path = reranker_model_path
         self.reranker = load_reranker_module(
             reranker_type, self.item_db_name, self.track_split_types, self.corpus_types, self.cache_dir,
+            model_path=reranker_model_path,
         )
         # When reranker is present, pull a larger candidate pool from retrieval
         # (retrieval_topk) and shrink to 20 via rerank. Otherwise retrieval
@@ -185,6 +188,9 @@ class CRS_BASELINE:
         retrieval_inputs = []
         session_memories = []
         user_ids: list[Optional[str]] = []
+        goal_categories: list[Optional[str]] = []
+        goal_specificities: list[Optional[str]] = []
+        user_profiles_raw: list[Any] = []
 
         for data in batch_data:
             user_query = data['user_query']
@@ -197,6 +203,12 @@ class CRS_BASELINE:
             retrieval_inputs.append(retrieval_input)
             session_memories.append(session_memory)
             user_ids.append(user_id)
+            # Session-level side channels for task-aware rerankers (A1 LGBM).
+            # Back-compat: absent in batch_data -> None, rerankers handle gracefully.
+            cg = data.get('conversation_goal') or {}
+            goal_categories.append(cg.get('category'))
+            goal_specificities.append(cg.get('specificity'))
+            user_profiles_raw.append(data.get('user_profile_raw'))
 
         # Stage 1: Batch retrieval. Pull retrieval_topk (default 20; 40 when
         # a reranker is configured) candidates per query. user_ids thread
@@ -215,10 +227,25 @@ class CRS_BASELINE:
         else:
             batch_retrieval_items = [self.retrieval.text_to_item_retrieval(inp, topk=stage1_topk) for inp in retrieval_inputs]
 
-        # Stage 1b: Rerank (optional). Cross-encoder scores each (query, track)
-        # pair and keeps the top-20 for submission.
+        # Stage 1b: Rerank (optional). Post-retrieval reranker scores each
+        # candidate and keeps the top-20 for submission. The rerank() call
+        # forwards user + goal side-channels; rerankers that don't use them
+        # (e.g. BGE cross-encoder) accept-and-ignore, while task-aware ones
+        # (LGBM LambdaMART) use them as categorical features.
         if self.reranker is not None:
-            batch_retrieval_items = self.reranker.rerank(retrieval_inputs, batch_retrieval_items, topk=20)
+            try:
+                batch_retrieval_items = self.reranker.rerank(
+                    retrieval_inputs, batch_retrieval_items, topk=20,
+                    user_ids=user_ids,
+                    goal_categories=goal_categories,
+                    goal_specificities=goal_specificities,
+                    user_profiles_raw=user_profiles_raw,
+                )
+            except TypeError:
+                # Back-compat: reranker predates the side-channel kwargs.
+                batch_retrieval_items = self.reranker.rerank(
+                    retrieval_inputs, batch_retrieval_items, topk=20,
+                )
 
         recommend_items = [self.item_db.id_to_metadata(items[0]) for items in batch_retrieval_items]
 

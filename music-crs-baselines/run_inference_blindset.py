@@ -74,6 +74,7 @@ def main(args):
     attn_implementation = args.attn_implementation or config.attn_implementation
     response_prompt_name = config.get("response_prompt_name", "response_generation")
     reranker_type = config.get("reranker_type", None)
+    reranker_model_path = config.get("reranker_model_path", None)
     retrieval_topk = int(config.get("retrieval_topk", 20))
     response_max_new_tokens = int(config.get("response_max_new_tokens", 64))
     response_reranker_type = config.get("response_reranker_type", None)
@@ -96,6 +97,7 @@ def main(args):
         dtype=torch.bfloat16,
         response_prompt_name=response_prompt_name,
         reranker_type=reranker_type,
+        reranker_model_path=reranker_model_path,
         retrieval_topk=retrieval_topk,
         response_max_new_tokens=response_max_new_tokens,
         response_reranker_type=response_reranker_type,
@@ -112,10 +114,15 @@ def main(args):
         chat_history = item['conversations'][:-1]
         user_query = item['conversations'][-1]['content']
         turn_number = item['conversations'][-1]['turn_number']
+        # Full session-level context — downstream rerankers (e.g. LGBM) may
+        # consume conversation_goal + user_profile as categorical features.
+        # Back-compat: LMs / other rerankers ignore these dict extras.
         batch_data.append({
             'user_query': user_query,
             'user_id': user_id,
-            'session_memory': chat_history
+            'session_memory': chat_history,
+            'conversation_goal': item.get('conversation_goal'),
+            'user_profile_raw': item.get('user_profile'),
         })
         metadata.append({
             'session_id': session_id,

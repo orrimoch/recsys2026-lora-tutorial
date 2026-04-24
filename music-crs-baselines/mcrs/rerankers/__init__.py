@@ -1,6 +1,12 @@
 """Reranker factory. Rerankers take a (query, candidate_tids) list and
 return a reordered + truncated tids list. Plugged in after the primary
-retriever in crs_baseline.batch_chat."""
+retriever in crs_baseline.batch_chat.
+
+All rerankers accept the side-channel kwargs user_ids / goal_categories /
+goal_specificities / user_profiles_raw in their rerank() method so the
+batch_chat call site can forward session context uniformly. Rerankers
+that don't use a given channel accept-and-ignore.
+"""
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -12,12 +18,14 @@ def load_reranker_module(
     track_split_types: list[str],
     corpus_types: list[str],
     cache_dir: str = "./cache",
+    model_path: Optional[str] = None,
 ) -> Optional[Any]:
     """Return a reranker instance or None if reranker_type is falsy.
 
     Each reranker exposes:
-      rerank(queries: list[str], candidate_tids: list[list[str]], topk: int)
-        -> list[list[str]]
+      rerank(queries, candidate_tids, topk, user_ids=None,
+             goal_categories=None, goal_specificities=None,
+             user_profiles_raw=None) -> list[list[str]]
     """
     if not reranker_type:
         return None
@@ -28,5 +36,20 @@ def load_reranker_module(
             track_split_types=track_split_types,
             corpus_types=corpus_types,
             cache_dir=cache_dir,
+        )
+    if reranker_type == "lgbm_rerank":
+        from .lgbm_rerank import LGBM_RERANKER
+        if not model_path:
+            raise ValueError(
+                "reranker_type=lgbm_rerank requires reranker_model_path in the "
+                "yaml (local dir holding booster.txt + metadata.json from "
+                "colab/Build_LGBM_Features_And_Train.ipynb)."
+            )
+        return LGBM_RERANKER(
+            item_db_name=item_db_name,
+            track_split_types=track_split_types,
+            corpus_types=corpus_types,
+            cache_dir=cache_dir,
+            model_path=model_path,
         )
     raise ValueError(f"Unsupported reranker type: {reranker_type}")

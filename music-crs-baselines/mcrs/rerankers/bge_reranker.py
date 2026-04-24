@@ -110,6 +110,9 @@ class BGE_RERANKER:
 
     def rerank(
         self, queries: list[str], candidate_tids: list[list[str]], topk: int,
+        # Side-channel kwargs (user_ids etc.) accepted for interface parity
+        # with LGBM_RERANKER. BGE is query-driven only — we ignore them.
+        **_kwargs: object,
     ) -> list[list[str]]:
         """Per query, score its candidates with the cross-encoder and return
         the top-k tids sorted by score descending."""

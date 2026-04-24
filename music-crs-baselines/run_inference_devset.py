@@ -74,6 +74,7 @@ def main(args):
     attn_implementation = args.attn_implementation or config.attn_implementation
     response_prompt_name = config.get("response_prompt_name", "response_generation")
     reranker_type = config.get("reranker_type", None)
+    reranker_model_path = config.get("reranker_model_path", None)
     retrieval_topk = int(config.get("retrieval_topk", 20))
     response_max_new_tokens = int(config.get("response_max_new_tokens", 64))
     response_reranker_type = config.get("response_reranker_type", None)
@@ -95,6 +96,7 @@ def main(args):
         dtype=torch.bfloat16,
         response_prompt_name=response_prompt_name,
         reranker_type=reranker_type,
+        reranker_model_path=reranker_model_path,
         retrieval_topk=retrieval_topk,
         response_max_new_tokens=response_max_new_tokens,
         response_reranker_type=response_reranker_type,

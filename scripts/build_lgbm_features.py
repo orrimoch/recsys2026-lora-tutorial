@@ -98,14 +98,14 @@ def load_user_meta() -> dict[str, dict]:
     return out
 
 
-# ------------------------------------------------------------------ wRRF probe
-class WRRFScorer:
-    """Wrap wRRF retrieval with side-channel access to per-sub scores so we
-    can recover wrrf_score + bm25_score + dense_meta_cos + dense_lyrics_cos
-    for feature extraction without re-running subs."""
+# ------------------------------------------------------------------ wRRF runner
+class WRRFRunner:
+    """Thin wrapper that runs the 021-champion wRRF stack and returns ranked
+    candidates with fusion score + position. Inference-friendly: the LGBM
+    reranker at inference only needs (tid, wrrf_rank) per candidate — no
+    per-sub ranks — so feature computation is cheap and deterministic."""
 
     def __init__(self, cache_dir: str, corpus_types: list[str]):
-        # Load wrrf_bm25_dense_lyrics_v1 stack (same as 021 champion).
         self.wrrf = load_retrieval_module(
             "wrrf_bm25_dense_lyrics_v1",
             "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
@@ -113,57 +113,15 @@ class WRRFScorer:
             corpus_types,
             cache_dir,
         )
-        # Unpack subs for direct access — bm25, dense_meta, dense_lyrics.
-        self.bm25_sub = self.wrrf.subs[0]["retriever"]
-        self.dense_meta_sub = self.wrrf.subs[1]["retriever"]
-        self.dense_lyrics_sub = self.wrrf.subs[2]["retriever"]
-        # Cached normalized query embeddings for dense scoring (per-query).
-        self._query_cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
     def run(self, queries: list[str], topk: int) -> list[list[dict]]:
-        """Return per-query list of {tid, wrrf_score, bm25_rank, dense_meta_cos, dense_lyrics_cos}
-        for the top-K fused candidates. bm25/dense scores come from per-sub caches.
-        """
-        # Step 1: get per-sub rankings at each sub's topk.
-        per_sub_ranks: list[list[list[str]]] = []
-        for sub in self.wrrf.subs:
-            per_sub_ranks.append(
-                sub["retriever"].batch_text_to_item_retrieval(queries, topk=sub["topk"])
-            )
-        # Step 2: compute dense cosines for the candidate set per query.
-        # We recover cosines by re-computing the q . track_emb lookup: dense
-        # subs already cache the query embedding; we re-access it.
-        out_all: list[list[dict]] = []
-        for q_idx, q in enumerate(queries):
-            # RRF fuse
-            fused: dict[str, float] = {}
-            bm25_rank: dict[str, int] = {}
-            meta_rank: dict[str, int] = {}
-            lyrics_rank: dict[str, int] = {}
-            for s_idx, sub in enumerate(self.wrrf.subs):
-                w = sub["weight"]
-                label = sub["label"]
-                ranks = per_sub_ranks[s_idx][q_idx]
-                for rank, tid in enumerate(ranks, start=1):
-                    fused[tid] = fused.get(tid, 0.0) + w / (self.wrrf.k + rank)
-                    if label == "bm25":
-                        bm25_rank[tid] = rank
-                    elif label == "dense_metadata_qwen3_instruct":
-                        meta_rank[tid] = rank
-                    elif label == "dense_lyrics_qwen3_instruct":
-                        lyrics_rank[tid] = rank
-            ordered = sorted(fused.items(), key=lambda kv: -kv[1])[:topk]
-            rows = []
-            for tid, score in ordered:
-                rows.append({
-                    "tid": tid,
-                    "wrrf_score": score,
-                    "bm25_rank": bm25_rank.get(tid, 999),
-                    "dense_meta_rank": meta_rank.get(tid, 999),
-                    "dense_lyrics_rank": lyrics_rank.get(tid, 999),
-                })
-            out_all.append(rows)
-        return out_all
+        """Per-query list of {tid, wrrf_rank} for the top-K fused candidates.
+        wrrf_rank = 1 for the top of wRRF output, K for the bottom."""
+        fused_per_q = self.wrrf.batch_text_to_item_retrieval(queries, topk=topk)
+        return [
+            [{"tid": tid, "wrrf_rank": r + 1} for r, tid in enumerate(tids)]
+            for tids in fused_per_q
+        ]
 
 
 # ------------------------------------------------------------------ features
@@ -221,11 +179,10 @@ def extract_features(
             "user_id": user_id,
             "turn_number": session_info["turn_number"],
             "candidate_tid": tid,
-            # numeric features
-            "wrrf_score": c["wrrf_score"],
-            "bm25_rank": c["bm25_rank"],
-            "dense_meta_rank": c["dense_meta_rank"],
-            "dense_lyrics_rank": c["dense_lyrics_rank"],
+            # numeric features — all computable from just (wRRF-output, user_id,
+            # track metadata). No per-sub ranks needed -> same features at
+            # inference without re-running subs.
+            "wrrf_rank": c["wrrf_rank"],
             "cfbpr_score": cfbpr_score,
             "pop_log": float(np.log1p(pop)),
             "recency_years": float(recency),
@@ -267,7 +224,7 @@ def build(
     track_meta = load_track_meta_lookup(item_db)
     user_meta = load_user_meta()
     cfbpr_tid_to_idx, cfbpr_track_mat, cfbpr_user_embs = load_track_cfbpr(cache_dir)
-    scorer = WRRFScorer(
+    scorer = WRRFRunner(
         cache_dir=cache_dir,
         corpus_types=["track_name", "artist_name", "album_name"],
     )
