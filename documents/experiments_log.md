@@ -96,6 +96,29 @@ New entries go at the TOP (newest first) so the most recent work is visible with
   2. **Reward model is NOT wasted** — it becomes a feature INSIDE LambdaMART's feature vector (predicted "user would like this" score per candidate). That's a task-aware signal no leader seems to exploit.
   3. **Response-side: accept 021 greedy-stock as near-ceiling on Qwen 1.5B.** Stop trying to beat LLM judge via generation changes. Future ship-worthy LLM lifts must either (a) upgrade the retriever so the prompt has better metadata to cite, OR (b) distil from 021's own high-scoring responses (never from train data).
 
+### Exp 027-wrrf-lgbm-qwen15b-blindsetA — A1 LambdaMART regressed; worst Blind-A ship; H-6 effectively falsified — 2026-04-24
+
+- **Hypothesis (H-10, derived from H-6)**: LightGBM LambdaRank over 11 engineered features (wrrf_rank, cfbpr_score, pop_log, recency_years, tag_count, artist_in_query, goal_category/specificity, user_age_group/country/gender) trained on 2000 train sessions would lift Blind-A nDCG@20 by +0.03–0.08, composite 0.33 → 0.35–0.37.
+- **Training signal**: val nDCG@20 = **0.6271** on train holdout. Feature gain split: cfbpr_score 41%, wrrf_rank 40%, user_country 8%, pop_log 5%, artist_in_query 3%, others 3%. Early-stopped at 6 rounds.
+- **Pre-ship interpretation**: val 0.63 inflated by cf-bpr leakage (cf-bpr was trained on train user-track interactions; val users ≈ train users by session split). But wrrf_rank at 40% gain suggested genuine ranking signal existed alongside leakage. Predicted real Blind-A lift: +0.02–0.05 nDCG@20.
+- **Shipped result** (Blind-A, 80 rows):
+  - composite **0.23** (−0.10 vs 021) — worst Blind-A ship on fresh-model
+  - nDCG@20 **0.11** (−0.08 — LambdaMART moved gold tracks OUT of top-20)
+  - CatDiv 0.03 (tied)
+  - LexDiv 0.77 (+0.10 — downstream effect of different top-1 tracks landing in prompts)
+  - LLM **2.20** (−0.95 — cascading from bad top-1 → LM hallucinates about mis-picked track)
+- **Lessons**:
+  1. **H-10 falsified; H-6 effectively falsified.** Learned retrieval reranker with task-specific features (incl cf-bpr, user demographics, goal categoricals) FAILS on Blind-A despite 0.63 train-val nDCG@20. The trained signal doesn't transfer to the 80-row Blind-A distribution. cf-bpr leakage on train is a partial explanation but can't explain ALL the regression — wrrf_rank's 40% contribution presumably carried real signal yet still regressed.
+  2. **Prior-branch v20 lesson reaffirmed on fresh-model**: any retrieval reshuffling away from wRRF's natural ordering costs both nDCG@20 AND LLM-judge (via the top-1 citation path). Three independent fresh-model confirmations now: BGE-reranker (023), reward-model (026 — response-side but similar cascade), LambdaMART (027).
+  3. **Blind-A distribution specifics**: with only 80 rows and 58 users (25 warm / 33 cold for cf-bpr), the user signal is sparse. LGBM learned patterns on 14k train queries that don't transfer to this small + specific benchmark.
+  4. **Inferred structural result**: wRRF + Qwen 1.5B + stock prompt is a LOCAL MAXIMUM for this specific Blind-A. Six consecutive experiments failed to beat it. Further gains require qualitatively different data (Blind-B when it releases), a different model entirely (LLaMA 70B, Mixtral, etc.), or accept the plateau.
+  5. **cf-bpr as "honest signal on Blind-A" was too optimistic.** Even without the leakage path, cf-bpr's learned user-track preferences from train don't transfer to Blind-A gold. The Blind-A held-out gold is a different distribution from train gold.
+- **Verdict**: **REJECTED.** Reverts to 021 champion. This is the 6th consecutive Blind-A ship to regress; we've mapped the ceiling.
+- **Suggests next**:
+  1. **STOP** further Blind-A submissions of zero-/light-training candidates. The plateau at composite 0.33 / rank 9 is real for this methodology.
+  2. **Pivot to Blind-B infrastructure** — Blind-B releases 2026-06-15. Focus next 7 weeks on: (a) fine-tune BGE-reranker on train (R-4.2 — the only untried training-side retrieval), (b) LoRA distillation from 021 responses (E1 — the only training-side response approach that explicitly avoids the train-user/Gemini mismatch), (c) Qwen 2.5-7B / 14B on Colab A100 (larger model with surgical prompt rules, not exp 022's heavy persona).
+  3. **If still experimenting on Blind-A**: accept the ±0.05 noise floor means single-slot experiments can't cleanly distinguish the ~±0.01 regressions we'd expect from any training-side tweak. Would need multi-seed submissions to average out noise, burning the submission budget.
+
 ### Exp template (copy when starting a new experiment)
 
 ```markdown
