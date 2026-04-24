@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 from .crs_baseline import CRS_BASELINE
 
@@ -14,6 +16,9 @@ def load_crs_baseline(
     attn_implementation="eager",
     dtype=torch.bfloat16,
     response_prompt_name: str = "response_generation",
+    reranker_type: Optional[str] = None,
+    retrieval_topk: int = 20,
+    response_max_new_tokens: int = 64,
 ):
     return CRS_BASELINE(
         lm_type,
@@ -28,4 +33,7 @@ def load_crs_baseline(
         attn_implementation,
         dtype,
         response_prompt_name,
+        reranker_type,
+        retrieval_topk,
+        response_max_new_tokens,
     )

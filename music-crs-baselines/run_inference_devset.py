@@ -73,6 +73,9 @@ def main(args):
     device = args.device or config.device
     attn_implementation = args.attn_implementation or config.attn_implementation
     response_prompt_name = config.get("response_prompt_name", "response_generation")
+    reranker_type = config.get("reranker_type", None)
+    retrieval_topk = int(config.get("retrieval_topk", 20))
+    response_max_new_tokens = int(config.get("response_max_new_tokens", 64))
     music_crs = load_crs_baseline(
         lm_type=config.lm_type,
         retrieval_type=config.retrieval_type,
@@ -86,6 +89,9 @@ def main(args):
         attn_implementation=attn_implementation,
         dtype=torch.bfloat16,
         response_prompt_name=response_prompt_name,
+        reranker_type=reranker_type,
+        retrieval_topk=retrieval_topk,
+        response_max_new_tokens=response_max_new_tokens,
     )
     db = load_dataset(config.test_dataset_name, split="test")
     # Prepare all batch data at once

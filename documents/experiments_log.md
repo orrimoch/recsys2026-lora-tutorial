@@ -35,6 +35,23 @@ New entries go at the TOP (newest first) so the most recent work is visible with
   2. **Exp 023 — Qwen 1.5B → 3B** with the persona prompt from 022. Only try AFTER 022 lands, to decouple prompt effect from model-size effect.
   3. **Exp 024 — retrieval lift via cross-encoder rerank** (BGE-reranker-v2-m3) on top of the wRRF-top-40 candidates → top-20 output. Targets the 52% nDCG@20 gap. Parallelisable with 022 since retrieval and prompt are independent axes.
 
+### Exp 022-persona-qwen15b-blindsetA — Persona+word-ban prompt REGRESSED, H-4 falsified — 2026-04-24 18:22
+
+- **Hypothesis (H-4)**: prior-branch persona+word-ban prompt that lifted Qwen 3B LLM judge by +0.40 (v5→v10) would similarly lift Qwen 1.5B by ~+0.40 on fresh-model. Predicted LLM 3.15 → 3.55, composite 0.33 → 0.36.
+- **Axis**: response-prompt (single-axis change vs 021).
+- **Shipped result** (Blind-A, 80 rows, Gemini):
+  - composite **0.24** (**−0.09** vs 021)
+  - nDCG@20 **0.14** (−0.05 vs 021 — unexpected; see lesson 4)
+  - LexDiv **0.80** (+0.13 vs 021)
+  - LLM **2.15** (**−1.00** vs 021 — catastrophic)
+- **Lessons**:
+  1. **H-4 FALSIFIED.** Prior-branch persona mechanism does NOT transfer to Qwen 1.5B. Swing was opposite of predicted (−1.00 vs +0.40).
+  2. **Root cause hypothesis**: the persona prompt has 10+ explicit directives (persona line, 4-word ban, length rule, "never apologise", "never ask for recs", etc.). Qwen 1.5B has insufficient instruction-following capacity for long directive lists — the model obeys the stylistic axes (LexDiv +0.13 confirms vocabulary shifted) but at the cost of grounding/specificity, which Gemini's Personalization and Explanation Quality dimensions penalise hard. Prior branch used 3B, which has more capacity.
+  3. **LexDiv is not a proxy for LLM quality.** LexDiv +0.13 came with LLM −1.00 — the two can move in OPPOSITE directions. Stop treating high LexDiv as "good-sign" for composite.
+  4. **Retrieval nDCG@20 −0.05 on a response-only change is unexpected.** Most likely cause: bf16 encoder non-determinism across Colab A100 instances (different runtimes give slightly different cosine ties, shuffled top-K). On 80-row Blind-A this registers as ±0.05 noise. Treat as evaluation variance, not a pipeline bug.
+- **Verdict**: **REJECTED**. Reverts to 021's stock prompt as the LLM baseline. Persona file retained under `system_prompts/response_generation_persona.txt` for possible future retry with Qwen 3B (where it might work as prior branch showed).
+- **Suggests next**: pivot to retrieval (52% of gap). Exp 023 stacks (a) BGE-reranker-v2-m3 cross-encoder over wRRF top-40→20, (b) Qwen 3B, (c) `max_new_tokens` 64→192. Three orthogonal axes; each touches different metrics so partial attribution is possible post-score.
+
 ### Exp template (copy when starting a new experiment)
 
 ```markdown

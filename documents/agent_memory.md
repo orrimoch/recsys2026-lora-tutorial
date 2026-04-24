@@ -94,9 +94,12 @@ What Gemini appears to reward / penalise. Grown **only** from blind-response min
 
 Claimed rewards / penalties, pending blind validation:
 
-- **H-4 (carried forward from prior branch)**: persona prompt + generic-AI-speak word-ban lifts Gemini LLM judge by ~+0.40 on a Qwen 1.5B–3B backbone. Test: exp 022 (same stack as 021, persona prompt swapped in). If LLM blind returns ≥ 3.45 → validated. If < 3.30 → prior-branch → fresh-model transfer is weaker than expected.
-- **H-5**: stock `response_generation.txt` "apologize on mismatch" directive depresses LLM judge; removing it AND adding persona together is the efficient fix (not one without the other). Tested alongside H-4 in exp 022; disentangled by future ablation if needed.
-- **H-6**: on this season's leaderboard (#1 nDCG@20 = 0.44 vs our 0.19), retrieval upgrades (cross-encoder rerank, LambdaMART) have higher composite EV than further LLM upgrades. Test: exp 024.
+- ~~**H-4**: persona prompt + word-ban lifts Gemini LLM judge by ~+0.40.~~ **FALSIFIED by exp 022 on 2026-04-24.** Persona prompt regressed LLM by **−1.00** on Qwen 1.5B (3.15 → 2.15). Prior-branch data was on Qwen 3B; does NOT transfer to 1.5B (likely due to the 10-directive prompt overwhelming 1.5B's instruction-following capacity). LexDiv +0.13 confirms style axes obeyed, but grounding/specificity crashed — Personalization + Explanation Quality judges punish it harder than style wins repay.
+- **H-4b (refined)**: persona prompt might still work on Qwen 3B. Test: if exp 023 (which uses Qwen 3B + stock prompt) lifts LLM cleanly, a follow-up comparing 3B+stock vs 3B+persona isolates model-size-as-prompt-capacity hypothesis.
+- ~~**H-5**: stock prompt's apology directive depresses LLM judge.~~ **Inconclusive from 022** (bundled change). Stock prompt scored LLM 3.15; persona-without-stock scored 2.15. This says the persona's NEGATIVE effects outweighed stock's apology-directive NEGATIVE effects. Stock-apology penalty is probably real but small (prior-branch said ~0.3 LLM), not the biggest lever.
+- **H-6 (carried forward)**: on this season's leaderboard (#1 nDCG@20 = 0.44 vs our 0.19), retrieval upgrades have higher composite EV than further LLM upgrades. Test: exp 023 (BGE-reranker as one of three stacked axes). Expected nDCG@20 lift alone: +0.03–0.05 from rerank.
+- **H-7 (new)**: Qwen 1.5B → 3B (prior-branch observed v2→v3 = LLM 1.8→2.7 = +0.9, but confounded by other changes). Test: isolate via 3B + stock prompt (no other changes) — this is partly what exp 023 does.
+- **H-8 (new)**: `max_new_tokens` 64 → 192 lifts LLM judge because prior-branch v10's 81-word responses (192 tokens) scored LLM 3.25, vs our 40-word responses (64 tokens) scoring 3.15. The 0.10 gap might be explained purely by response length. Test: component of exp 023.
 
 ---
 

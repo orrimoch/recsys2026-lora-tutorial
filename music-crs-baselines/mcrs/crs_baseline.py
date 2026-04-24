@@ -5,6 +5,7 @@ from mcrs.db_item import MusicCatalogDB
 from mcrs.db_user import UserProfileDB
 from mcrs.lm_modules import load_lm_module
 from mcrs.retrieval_modules import load_retrieval_module
+from mcrs.rerankers import load_reranker_module
 
 class CRS_BASELINE:
     """
@@ -40,6 +41,9 @@ class CRS_BASELINE:
         attn_implementation="eager",
         dtype=torch.bfloat16,
         response_prompt_name: str = "response_generation",
+        reranker_type: Optional[str] = None,
+        retrieval_topk: int = 20,
+        response_max_new_tokens: int = 64,
     ):
         """Initialize the CRS baseline components.
 
@@ -67,6 +71,15 @@ class CRS_BASELINE:
         self.attn_implementation = attn_implementation
         self.lm = load_lm_module(self.lm_type, self.device, self.attn_implementation, self.dtype)
         self.retrieval = load_retrieval_module(self.retrieval_type, self.item_db_name, self.track_split_types, self.corpus_types, self.cache_dir)
+        self.reranker_type = reranker_type
+        self.reranker = load_reranker_module(
+            reranker_type, self.item_db_name, self.track_split_types, self.corpus_types, self.cache_dir,
+        )
+        # When reranker is present, pull a larger candidate pool from retrieval
+        # (retrieval_topk) and shrink to 20 via rerank. Otherwise retrieval
+        # returns exactly 20. Submission format fixed at 20 tids.
+        self.retrieval_topk = retrieval_topk
+        self.response_max_new_tokens = response_max_new_tokens
         self.item_db = MusicCatalogDB(self.item_db_name, self.track_split_types, self.corpus_types)
         self.user_db = UserProfileDB(self.user_db_name, self.user_split_types)
         self.prompts_dir = os.path.join(os.path.dirname(__file__), "system_prompts")
@@ -170,20 +183,29 @@ class CRS_BASELINE:
             retrieval_inputs.append(retrieval_input)
             session_memories.append(session_memory)
 
-        # Stage 1: Batch retrieval
+        # Stage 1: Batch retrieval. Pull retrieval_topk (default 20; 40 when
+        # a reranker is configured) candidates per query.
+        stage1_topk = self.retrieval_topk
         if hasattr(self.retrieval, 'batch_text_to_item_retrieval'):
-            batch_retrieval_items = self.retrieval.batch_text_to_item_retrieval(retrieval_inputs, topk=20)
+            batch_retrieval_items = self.retrieval.batch_text_to_item_retrieval(retrieval_inputs, topk=stage1_topk)
         else:
-            # Fallback to sequential retrieval if batch method not available
-            batch_retrieval_items = [self.retrieval.text_to_item_retrieval(inp, topk=20) for inp in retrieval_inputs]
+            batch_retrieval_items = [self.retrieval.text_to_item_retrieval(inp, topk=stage1_topk) for inp in retrieval_inputs]
+
+        # Stage 1b: Rerank (optional). Cross-encoder scores each (query, track)
+        # pair and keeps the top-20 for submission.
+        if self.reranker is not None:
+            batch_retrieval_items = self.reranker.rerank(retrieval_inputs, batch_retrieval_items, topk=20)
 
         recommend_items = [self.item_db.id_to_metadata(items[0]) for items in batch_retrieval_items]
 
-        # Stage 2: Batch response generation
+        # Stage 2: Batch response generation. Pass through the configured
+        # max_new_tokens so yaml can override the LM module default (64).
         if hasattr(self.lm, 'batch_response_generation'):
-            responses = self.lm.batch_response_generation(sys_prompts, session_memories, recommend_items)
+            responses = self.lm.batch_response_generation(
+                sys_prompts, session_memories, recommend_items,
+                max_new_tokens=self.response_max_new_tokens,
+            )
         else:
-            # Fallback to sequential generation if batch method not available
             responses = [self.lm.response_generation(sys_prompts[i], session_memories[i], recommend_items[i])
                         for i in range(len(batch_data))]
 
