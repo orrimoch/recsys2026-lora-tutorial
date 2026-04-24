@@ -31,13 +31,23 @@ from typing import Any, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINES_DIR = REPO_ROOT / "music-crs-baselines"
-sys.path.insert(0, str(BASELINES_DIR))
 
 import pandas as pd  # noqa: E402
 from tqdm import tqdm  # noqa: E402
-from datasets import load_dataset  # noqa: E402
+from datasets import concatenate_datasets, load_dataset  # noqa: E402
 
-from mcrs.db_item import MusicCatalogDB  # noqa: E402
+
+# -- Lightweight _LightCatalogDB (deliberately does NOT import from mcrs) -----
+# The mcrs package's __init__.py eagerly imports CRS_BASELINE + all retrieval
+# modules, which pulls bm25s + omegaconf + pandas at import time. The reward-
+# dataset build doesn't use any of that — only needs a {track_id -> metadata}
+# lookup. Local class avoids the heavy cascade so Colab can run this script
+# even if only datasets + pandas + tqdm are installed (no bm25s needed).
+class _LightCatalogDB:
+    def __init__(self, dataset_name: str, split_types: list[str]) -> None:
+        ds = load_dataset(dataset_name)
+        concat = concatenate_datasets([ds[s] for s in split_types])
+        self.metadata_dict = {item["track_id"]: item for item in concat}
 
 
 LABEL_POS = "MOVES_TOWARD_GOAL"
@@ -52,7 +62,7 @@ def _first(v):
     return v
 
 
-def track_summary(track_id: str, item_db: MusicCatalogDB) -> str:
+def track_summary(track_id: str, item_db: _LightCatalogDB) -> str:
     """Short metadata string for the recommended track."""
     try:
         meta = item_db.metadata_dict.get(track_id, {})
@@ -75,7 +85,7 @@ def track_summary(track_id: str, item_db: MusicCatalogDB) -> str:
     return " ".join(parts)
 
 
-def history_summary(df, turn_n: int, item_db: MusicCatalogDB) -> str:
+def history_summary(df, turn_n: int, item_db: _LightCatalogDB) -> str:
     """Last MAX_HISTORY_TURNS of dialog, with music turns expanded to metadata."""
     prior = df[df["turn_number"] < turn_n]
     if prior.empty:
@@ -104,10 +114,9 @@ def build(n_sessions: int, seed: int, out_path: str, split_val: float) -> None:
     print(f"[reward-data] using {len(sessions)} sessions (seed={seed})")
 
     print(f"[reward-data] loading item_db")
-    item_db = MusicCatalogDB(
+    item_db = _LightCatalogDB(
         "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
         ["all_tracks"],
-        ["track_name", "artist_name", "album_name"],
     )
 
     rows = []
@@ -201,13 +210,10 @@ def main() -> int:
     p.add_argument("--split-val", type=float, default=0.1,
                    help="Fraction of sessions held out for validation (default 0.1).")
     args = p.parse_args()
-
-    origin_cwd = os.getcwd()
-    os.chdir(BASELINES_DIR)
-    try:
-        build(args.n_sessions, args.seed, args.out, args.split_val)
-    finally:
-        os.chdir(origin_cwd)
+    # No chdir needed — the script no longer imports from mcrs. The previous
+    # chdir was to let mcrs-relative cache paths resolve, but we've removed
+    # all mcrs dependencies from this build step.
+    build(args.n_sessions, args.seed, args.out, args.split_val)
     return 0
 
 
