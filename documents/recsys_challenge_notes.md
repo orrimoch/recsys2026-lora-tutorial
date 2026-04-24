@@ -6,14 +6,54 @@
 
 ## 1. The Task
 
-Multi-turn conversational music recommendation. Per turn the system must output:
+### Goal — *dynamic* music recommendations, delivered agent-style
+This is **not** static list-building. The system must act like a **conversational agent** that produces **dynamic recommendations** whose ranking is shaped by:
+- **Retrieved-item ranking** from the RecSys module
+- **Nuanced user preferences** extracted from dialog + profile
+- **NLU** over the turn and conversation history
+- **Exploration through dialogue** — asking, offering, refining
+- **LLM-generated signals / rationales** that justify and personalize the picks
 
+> "Music-CRS focuses on the evolving landscape of music discovery, where static recommendation lists are being replaced by dynamic, conversational interactions. As users increasingly interact with AI through natural language, there is a critical need for systems that can seamlessly integrate Natural Language Understanding (NLU) with high-precision Recommender Systems (RecSys). This challenge aims to push the boundaries of how AI understands nuanced user preferences, explores musical tastes through dialogue, and provides contextually relevant track recommendations." — `music-crs-baselines/readme.md:3`
+
+### Main task
+**The system must understand the user's preferences** — from (a) the conversation history (previous turns in the current session) and (b) the user's profile — and return a relevant ranked list of tracks plus a grounded natural-language response.
+
+### Per-turn I/O
+Per turn the system outputs:
 1. **A ranked list of up to 20 track IDs** — the "recommendation"
-2. **A natural-language response** — explaining the recommendation to the user
+2. **A natural-language response** — explaining / personalizing the recommendation
 
-Evaluated on **8 turns per session**. Two-stage pipeline pattern: retrieve candidates → LLM generates the response.
+Evaluated on **8 turns per session** (macro-averaged).
 
-> "Music-CRS focuses on the evolving landscape of music discovery, where static recommendation lists are being replaced by dynamic, conversational interactions." — `music-crs-baselines/readme.md`
+---
+
+## 1.5 Baseline System Architecture (2-Stage Pipeline)
+
+From `music-crs-baselines/readme.md:29–42`. The official baseline is a **two-stage pipeline**:
+
+1. **RecSys** — retrieves candidate tracks matching user preferences
+2. **LLM** — generates a natural-language response explaining the recommendations
+
+### Core components
+
+| Component | Description | Module |
+|---|---|---|
+| **LLM** | Generates natural language responses (baseline: Llama-3.2-1B-Instruct) | `mcrs/lm_modules/` |
+| **RecSys** | Retrieves relevant tracks via BM25 (sparse) or BERT (dense) | `mcrs/retrieval_modules/` |
+| **User DB** | Stores user profiles (`user_id, age_group, gender, country_name`) | `mcrs/db_user/user_profile.py` |
+| **Item DB** | Track metadata (`track_name, artist_name, album_name, release_date, tag_list, …`) | `mcrs/db_item/music_catalog.py` |
+
+Additional module folders exist but are **empty stubs** in the baseline (opportunities to fill):
+- `mcrs/rerankers/` — no reranker abstraction yet (tip #1 below)
+- `mcrs/query_rewriters/` — no query rewrite stage yet
+- `mcrs/embedders/` — custom embedders
+
+### Pipeline per turn (`mcrs/crs_baseline.py`)
+1. Compose system prompt from `system_prompts/` (roleplay + response_generation ± personalization with user profile)
+2. Concatenate full chat history + current turn → retrieval query
+3. RecSys returns **top-20** track IDs
+4. LLM generates response conditioned on system prompt + chat history + **top-1** track metadata (hard-coded in baseline)
 
 ---
 
@@ -199,23 +239,93 @@ Common fields across configs in `music-crs-baselines/config/`:
 
 ---
 
-## 9. Tips Directory (`music-crs-baselines/tips/`)
+## 9. Official Tips (`music-crs-baselines/tips/`)
 
-### `add_reranker.md` — Two-Stage Ranking
-- **Embedding-based rerank**: cross-modal signal fusion using pre-computed user/track embeddings
-- **LLM-based rerank**: judge top-k with an LLM ("Rank these tracks by relevance to: {query}")
-- Suggested pattern: retrieve top-100 → rerank to top-20
+Three tip docs ship with the baseline. All three are reproduced below **in full** so this note is self-contained.
 
-### `improve_item_representation.md` — Richer Track Reps
-- Add fields to `corpus_types`: genres, mood, popularity scores
-- Audio features via **CLAP** (text+audio alignment)
-- Stronger encoders: Qwen2.5-Embedding, Contriever, E5, BGE, ColBERT
+### Tip 1 — Add Reranker Module (`tips/add_reranker.md`)
+> Refine initial retrieval results with a second-stage ranker.
 
-### `use_genrec_semantic_ids.md` — Generative Retrieval
-- Hierarchical semantic IDs (e.g., `jazz/smooth/piano/0042`)
-- Train LLM to emit track IDs directly (retrieve-then-generate → unified generation)
-- Unified architecture + complex intent modeling
-- See `documents/research/recent_papers_ideas.md §3` for concrete methods (TIGER, Text2Tracks, GRID, LETTER, LIGER, LC-Rec)
+**Option A: Embedding-based reranking**
+- Use user embeddings for personalization
+  - Compute user profile from listening history
+  - Score candidates by user-item similarity
+- Cross-modal reranking: combine multiple signals (text relevance + audio similarity + user preference)
+
+**Option B: LLM-based reranking**
+- Use LLM to judge relevance of top-k candidates
+- Prompt: `"Rank these tracks by relevance to: {user_query}"`
+- Models suggested: **Llama-3-8B, Qwen-7B, or specialized rankers**
+
+**Suggested integration** (from the tip doc):
+```python
+# Add to CRS pipeline after retrieval
+retrieval_items = self.retrieval.text_to_item_retrieval(query, topk=100)
+
+# Rerank top candidates
+if self.reranker:
+    retrieval_items = self.reranker.rerank(
+        query=query,
+        candidates=retrieval_items[:50],
+        user_profile=user_profile,
+        topk=20
+    )
+```
+
+**Pattern**: retrieve top-100 → rerank to top-20. Hooks into the currently-empty `mcrs/rerankers/` module.
+
+**Resources**: `talkpl-ai/TalkPlayData-2-User-Embeddings`, `TalkPlayData-2-Track-Metadata`, `TalkPlayData-2-Track-Embeddings`.
+
+---
+
+### Tip 2 — Improve Item Representation (`tips/improve_item_representation.md`)
+
+**2.1 Add more track information**
+
+*Option A — more text fields*: the baseline only uses `track_name, artist_name, album_name`. Add: **genre tags, mood labels, release year, popularity scores**. Edit `corpus_types` in the config to include `tag_list`.
+
+*Option B — audio features*: instead of text only, use the **actual sound**. Try **CLAP** (text+audio aligned model). Helps find songs that *sound* similar, not just described similarly.
+
+Implementation hints from the tip doc:
+- Change `_stringify_metadata()` to include more fields
+- Add code to extract audio features
+- Combine text and audio together
+
+**2.2 Use a better retrieval model**
+
+Replace the basic BM25 / BERT with stronger text encoders:
+
+- **Qwen2.5-Embedding** — multilingual
+- **Contriever** — strong zero-shot retrieval
+- **E5** / **BGE** — currently SOTA for text embeddings
+- **ColBERT** — late-interaction, finer-grained matching
+
+**Resources**: `talkpl-ai/TalkPlayData-2-Track-Metadata`, `talkpl-ai/TalkPlayData-2-Track-Embeddings`.
+
+---
+
+### Tip 3 — Generative Retrieval / Semantic IDs (`tips/use_genrec_semantic_ids.md`)
+
+> Replace embedding similarity with **end-to-end generation**: instead of retrieve-then-generate, directly generate track identifiers.
+
+**Semantic IDs approach**:
+- Assign **hierarchical semantic IDs** to tracks (e.g., `jazz/smooth/piano/0042`)
+- Train an LLM to generate relevant track IDs given the user query
+- A single model replaces both retrieval and generation stages
+
+**Benefits**:
+- Unified architecture
+- Can model complex user intent
+- Leverages LLM reasoning capabilities
+
+**Implementation steps** (from the tip doc):
+1. Create a semantic ID system for tracks
+2. Fine-tune an LLM to generate track IDs
+3. Optionally use collaborative filtering for ID assignments
+
+**Concrete methods** for this path: see `documents/research/recent_papers_ideas.md §3` — TIGER (foundational), Text2Tracks (Spotify, music analogue), GRID (practitioner's handbook), LETTER (CF + text SIDs), LIGER (hybrid gen+dense), LC-Rec (LLaMA/Qwen recipe), IDGenRec (textual IDs), Joint-SIDs (for search+rec dual use).
+
+**Resources**: `talkpl-ai/TalkPlayData-2-Track-Metadata`, `talkpl-ai/TalkPlayData-2-Track-Embeddings`.
 
 ---
 
