@@ -70,6 +70,8 @@ def main(args):
     print("Removing cache directory for preventing memory issues...")
     os.system("rm -rf cache")
     config = OmegaConf.load(f"config/{args.tid}.yaml")
+    device = args.device or config.device
+    attn_implementation = args.attn_implementation or config.attn_implementation
     music_crs = load_crs_baseline(
         lm_type=config.lm_type,
         retrieval_type=config.retrieval_type,
@@ -79,8 +81,8 @@ def main(args):
         user_split_types=config.user_split_types,
         corpus_types=config.corpus_types,
         cache_dir=config.cache_dir,
-        device=config.device,
-        attn_implementation=config.attn_implementation,
+        device=device,
+        attn_implementation=attn_implementation,
         dtype=torch.bfloat16
     )
     db = load_dataset(config.test_dataset_name, split="test")
@@ -146,6 +148,19 @@ if __name__ == "__main__":
         type=str,
         default="./exp/inference",
         help="Base directory for saving results (currently not used, results saved to exp/inference/)"
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Override config.device (e.g. 'cuda' on Colab, 'mps' on M-series Mac, 'cpu'). Defaults to config value."
+    )
+    parser.add_argument(
+        "--attn_implementation",
+        type=str,
+        default=None,
+        choices=[None, "eager", "sdpa", "flash_attention_2"],
+        help="Override config.attn_implementation. On CUDA use 'sdpa' (or 'flash_attention_2' once pip-installed) for ~40x less attention memory; on MPS stay on 'eager'. Defaults to config value."
     )
     args = parser.parse_args()
     main(args)
