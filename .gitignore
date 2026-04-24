@@ -34,3 +34,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Research papers (kept on disk, not in repo)
+documents/research/*.pdf
