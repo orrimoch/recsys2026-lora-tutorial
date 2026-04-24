@@ -46,6 +46,7 @@ class CRS_BASELINE:
         reranker_model_path: Optional[str] = None,
         retrieval_topk: int = 20,
         response_max_new_tokens: int = 64,
+        top_n_for_prompt: int = 1,
         response_reranker_type: Optional[str] = None,
         response_reranker_model_path: Optional[str] = None,
         response_n_candidates: int = 3,
@@ -88,6 +89,12 @@ class CRS_BASELINE:
         # returns exactly 20. Submission format fixed at 20 tids.
         self.retrieval_topk = retrieval_topk
         self.response_max_new_tokens = response_max_new_tokens
+        # Top-N tracks passed to the LM prompt as "recommended tracks". Default
+        # 1 (same as 021 champion). Setting >1 decouples retrieval's top-1 from
+        # the LM's cited track — the LM can pick the one that best matches the
+        # query rather than being forced to describe whatever the reranker
+        # bumped to rank 1. See exp 028 post-mortem on the coupling hypothesis.
+        self.top_n_for_prompt = max(1, int(top_n_for_prompt))
         # Response reranker (exp 026+): sample K responses and pick the best via
         # a reward model trained on train goal_progress_assessments.
         self.response_reranker_type = response_reranker_type
@@ -247,7 +254,27 @@ class CRS_BASELINE:
                     retrieval_inputs, batch_retrieval_items, topk=20,
                 )
 
-        recommend_items = [self.item_db.id_to_metadata(items[0]) for items in batch_retrieval_items]
+        # Build the "recommend_item(s)" string passed to the LM. When
+        # top_n_for_prompt=1 this is identical to 021 champion (just
+        # id_to_metadata of the top-1). When >1, concatenate the top-N
+        # tracks into a multi-line "Candidate tracks" block so the LM can
+        # pick the best match for its response.
+        def _format_recommend_items(tids: list[str], n: int) -> str:
+            if n <= 1:
+                return self.item_db.id_to_metadata(tids[0])
+            lines = []
+            for rank, tid in enumerate(tids[:n], start=1):
+                try:
+                    meta = self.item_db.id_to_metadata(tid)
+                except Exception:
+                    meta = f"track_id: {tid}"
+                lines.append(f"Candidate {rank}: {meta}")
+            return "\n".join(lines)
+
+        recommend_items = [
+            _format_recommend_items(items, self.top_n_for_prompt)
+            for items in batch_retrieval_items
+        ]
 
         # Stage 2: Batch response generation.
         if self.response_reranker is not None and hasattr(self.lm, 'batch_response_generation_multi'):

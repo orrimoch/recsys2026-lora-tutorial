@@ -77,6 +77,7 @@ def main(args):
     reranker_model_path = config.get("reranker_model_path", None)
     retrieval_topk = int(config.get("retrieval_topk", 20))
     response_max_new_tokens = int(config.get("response_max_new_tokens", 64))
+    top_n_for_prompt = int(config.get("top_n_for_prompt", 1))
     response_reranker_type = config.get("response_reranker_type", None)
     response_reranker_model_path = config.get("response_reranker_model_path", None)
     response_n_candidates = int(config.get("response_n_candidates", 3))
@@ -100,6 +101,7 @@ def main(args):
         reranker_model_path=reranker_model_path,
         retrieval_topk=retrieval_topk,
         response_max_new_tokens=response_max_new_tokens,
+        top_n_for_prompt=top_n_for_prompt,
         response_reranker_type=response_reranker_type,
         response_reranker_model_path=response_reranker_model_path,
         response_n_candidates=response_n_candidates,
