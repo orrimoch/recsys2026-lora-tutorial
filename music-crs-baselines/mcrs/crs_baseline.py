@@ -39,6 +39,7 @@ class CRS_BASELINE:
         device="cuda",
         attn_implementation="eager",
         dtype=torch.bfloat16,
+        response_prompt_name: str = "response_generation",
     ):
         """Initialize the CRS baseline components.
 
@@ -69,10 +70,19 @@ class CRS_BASELINE:
         self.item_db = MusicCatalogDB(self.item_db_name, self.track_split_types, self.corpus_types)
         self.user_db = UserProfileDB(self.user_db_name, self.user_split_types)
         self.prompts_dir = os.path.join(os.path.dirname(__file__), "system_prompts")
+        # response_prompt_name is config-overrideable so we can A/B test prompt
+        # variants (stock vs persona vs few-shot) without editing code. All
+        # variants must live under system_prompts/{name}.txt.
+        self.response_prompt_name = response_prompt_name
+        response_prompt_path = f"{self.prompts_dir}/{self.response_prompt_name}.txt"
+        if not os.path.isfile(response_prompt_path):
+            raise FileNotFoundError(
+                f"response prompt '{self.response_prompt_name}' not found at {response_prompt_path}"
+            )
         self.role_prompt = {
             "role_play": open(f"{self.prompts_dir}/roleplay.txt", "r", encoding="utf-8").read(),
             "personalization": open(f"{self.prompts_dir}/personalization.txt", "r", encoding="utf-8").read(),
-            "response_generation": open(f"{self.prompts_dir}/response_generation.txt", "r", encoding="utf-8").read(),
+            "response_generation": open(response_prompt_path, "r", encoding="utf-8").read(),
         }
         self.session_memory = []
 

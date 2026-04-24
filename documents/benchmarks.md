@@ -30,14 +30,24 @@ First champion set 2026-04-24 — Wave 2's `020-two-step-wrrf-lyrics-qwen15b-dev
 
 ## B-target — Public Blind-A leaderboard top-1
 
-Source: last-known leaderboard snapshot (see `.claude/memory/project_blind_a_state.md` — update when new data available).
+Updated 2026-04-24 from the live CodaBench leaderboard captured after Exp 021 shipped.
 
-| Metric | Value (approximate) |
-|---|---|
-| nDCG@20 | ~0.21–0.23 |
-| CatDiv | ~0.03 |
-| LexDiv | ~0.75 |
-| LLM-judge | ~3.85 |
-| composite | ~0.40 |
+**#1 Chris Deotte (2026-04-24 04:14) — composite 0.57.**
+
+| Metric | #1 value | #2 (greenwolf) | #3 (yonghyunk1m) | Our 021 (rank 9/9) |
+|---|---|---|---|---|
+| composite | 0.57 | 0.56 | 0.53 | **0.33** |
+| nDCG@20 | 0.44 | 0.44 | 0.38 | **0.19** |
+| CatDiv | 0.03 | 0.03 | 0.03 | 0.03 |
+| LexDiv | 0.82 | 0.83 | 0.79 | **0.67** |
+| LLM judge | 4.55 | 4.45 | 4.50 | **3.15** |
+
+Gap decomposition (us → #1, 0.33 → 0.57, Δ = 0.24):
+- nDCG@20: 52% of gap — **biggest lever, 0.25 raw headroom**
+- LLM judge: 44% of gap — 1.40 raw headroom
+- LexDiv: 6% of gap — 0.15 raw headroom
+- CatDiv: 0% — everyone tied at 0.03 (blind-set artifact, 80 rows → narrow catalog)
+
+Note: the leader this season has nDCG@20 = 0.44, substantially higher than prior-branch leaderboard's ~0.23. Retrieval-side work has new leverage; prior branch's "LLM is the only lever" intuition is OUTDATED.
 
 Note: CatDiv appears low on blind (~0.03) because the blind set is only 80 rows — most teams recommend from a small slice of popular catalog. This is a blind-set artifact, not a signal that CatDiv doesn't matter on dev (where catalog is spread across 1000 sessions × 8 turns = 8000 recommendations).

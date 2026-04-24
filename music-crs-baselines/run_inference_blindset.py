@@ -72,6 +72,7 @@ def main(args):
     config = OmegaConf.load(f"config/{args.tid}.yaml")
     device = args.device or config.device
     attn_implementation = args.attn_implementation or config.attn_implementation
+    response_prompt_name = config.get("response_prompt_name", "response_generation")
     music_crs = load_crs_baseline(
         lm_type=config.lm_type,
         retrieval_type=config.retrieval_type,
@@ -83,7 +84,8 @@ def main(args):
         cache_dir=config.cache_dir,
         device=device,
         attn_implementation=attn_implementation,
-        dtype=torch.bfloat16
+        dtype=torch.bfloat16,
+        response_prompt_name=response_prompt_name,
     )
     db = load_dataset(config.test_dataset_name, split="test")
     # Prepare all batch data at once

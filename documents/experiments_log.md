@@ -6,7 +6,36 @@ New entries go at the TOP (newest first) so the most recent work is visible with
 
 ---
 
-## Entry template (copy when starting a new experiment)
+### Exp 021-two-step-wrrf-lyrics-qwen15b-blindsetA — First Blind-A ship, stock response prompt — 2026-04-24 18:00
+
+- **Hypothesis**: ship Wave 2's dev-champion (020) stack (wRRF retrieval + Qwen 2.5-1.5B response) to Blind-A to (a) get the first Gemini LLM-judge data point on the fresh-model branch, (b) establish a local→blind calibration anchor, (c) enter the leaderboard so subsequent experiments can be ranked on real composite deltas.
+- **Axis**: first blind — no delta against a prior blind baseline; all 4 blind metric axes are new data points.
+- **Config**: `music-crs-baselines/config/021-two-step-wrrf-lyrics-qwen15b-blindsetA.yaml`
+- **Code**: git sha `f74baed` (fresh-model branch). Identical retrieval+LM stack to 020; only the `test_dataset_name` differs. Response prompt: **stock `system_prompts/response_generation.txt`** (contains the "apologize on mismatch" directive — a known dead-end from prior branch).
+- **Shipped result** (Blind-A, 80 rows, Gemini-scored):
+  - **Composite 0.33**, rank **9 / 9** (CodaBench id 695336)
+  - nDCG@20 = 0.19
+  - CatDiv = 0.03 (blind-set artifact — 80 rows draw from a narrow catalog slice, affects everyone identically)
+  - LexDiv = 0.67
+  - LLM judge = **3.15** (of 5)
+  - Gap to #1 (Chris Deotte, composite 0.57): **Δ +0.24 composite**; decomposes as +0.125 from nDCG@20 (+0.25 raw), +0.015 from LexDiv (+0.15 raw), +0.105 from LLM (+1.40 raw), 0 from CatDiv.
+- **Local → Blind calibration point #1**:
+  - Local (dev, 020): composite_retrieval 0.1261, nDCG@20 0.0995, LexDiv 0.3217
+  - Blind (A, 021): composite 0.33, nDCG@20 0.19, LexDiv 0.67, LLM 3.15
+  - Blind nDCG@20 is ~2× dev nDCG@20 (0.19 vs 0.0995) — this is a dataset artifact (80 shorter single-turn Blind-A queries vs 8000 multi-turn dev). Expected per prior-branch calibration.
+  - Blind LexDiv is ~2× dev LexDiv — same single-turn vs multi-turn effect (multi-turn responses dilute bigram novelty).
+- **Lessons**:
+  1. **Retrieval is the biggest gap vs #1, not LLM judge.** nDCG@20 contributes 52% of the 0.24 composite gap; LLM judge contributes 44%; LexDiv 6%. Prior-branch intuition ("LLM dominates") is outdated — this season's leader has nDCG@20 = 0.44, more than 2× ours. Retrieval-side work has been under-invested relative to its new leverage.
+  2. **LLM 3.15 on stock prompt + Qwen 1.5B is consistent with prior-branch priors.** Prior branch v3 (Qwen 3B + custom-prompt-no-persona) scored 2.70; v10 (3B + persona+word-ban) scored 3.25. Our 3.15 sits between them — Qwen 1.5B with a more neutral prompt is roughly equivalent to 3B with a basic custom prompt. The persona+word-ban axis hasn't been activated yet, leaving ~+0.40 LLM on the table (prior-branch calibrated).
+  3. **Bigger model is NOT automatically the next move.** Prior branch v6 (Qwen 7B + rigid few-shot) regressed LLM by −0.45 vs v5 (3B). Model size only helps when the prompt permits variety. Rewrite prompt first, then revisit model size.
+  4. **CatDiv 0.03 is noise.** Every top-9 team scored 0.03 — the 80-row Blind-A forces everyone into near-identical catalog slices. Stop optimising for CatDiv on blind; focus on the three moving axes.
+- **Verdict**: shipped, **rank 9 / 9 — worst on leaderboard (of the 9 scored teams visible)**. Establishes the blind calibration anchor. Retained as the "stock-prompt blind baseline" for computing Δ on future prompt-engineering experiments.
+- **Suggests next**:
+  1. **Exp 022 — persona prompt + word-ban** (next experiment; prior branch +0.40 LLM = +0.03 composite). Near-free effort. Single axis change: same retrieval, same LM, different response prompt file. Ideal attribution test.
+  2. **Exp 023 — Qwen 1.5B → 3B** with the persona prompt from 022. Only try AFTER 022 lands, to decouple prompt effect from model-size effect.
+  3. **Exp 024 — retrieval lift via cross-encoder rerank** (BGE-reranker-v2-m3) on top of the wRRF-top-40 candidates → top-20 output. Targets the 52% nDCG@20 gap. Parallelisable with 022 since retrieval and prompt are independent axes.
+
+### Exp template (copy when starting a new experiment)
 
 ```markdown
 ### Exp NNN-{track}-{change} — {one-line headline} — YYYY-MM-DD
