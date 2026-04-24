@@ -186,14 +186,22 @@ class DENSE_PRECOMPUTED:
 
         # Qwen3-Embedding expects left-padding for last-token pooling.
         self._tokenizer = AutoTokenizer.from_pretrained(DEFAULT_ENCODER, padding_side="left")
-        self._encoder = AutoModel.from_pretrained(DEFAULT_ENCODER, torch_dtype=torch.float32)
-        if torch.backends.mps.is_available():
+        # Device pick: CUDA > MPS > CPU. bf16 on accelerators (half the memory,
+        # safe for encoder forward pass — we L2-normalise immediately after).
+        # fp32 on CPU (bf16 is slow on CPU).
+        if torch.cuda.is_available():
+            self._device = "cuda"
+            encoder_dtype = torch.bfloat16
+        elif torch.backends.mps.is_available():
             self._device = "mps"
+            encoder_dtype = torch.bfloat16
         else:
             self._device = "cpu"
+            encoder_dtype = torch.float32
+        self._encoder = AutoModel.from_pretrained(DEFAULT_ENCODER, torch_dtype=encoder_dtype)
         self._encoder = self._encoder.to(self._device)
         self._encoder.eval()
-        print(f"[dense] loaded {DEFAULT_ENCODER} on {self._device}")
+        print(f"[dense] loaded {DEFAULT_ENCODER} on {self._device} dtype={encoder_dtype}")
         return self._encoder, self._tokenizer
 
     def _encode_queries(self, queries: list[str]) -> np.ndarray:
