@@ -21,3 +21,4 @@ chat history that BM25 drowns on but the Blind-A set doesn't).
 | 025-wrrf-cfbpr-qwen15b-blindsetA | 42 | 200 | no | 1600 | 0.0187 | 0.0936 | 0.1278 | 0.1517 | 0.0791 |
 | 021-two-step-wrrf-lyrics-qwen15b-blindsetA | 42 | 200 | yes | 200 | 0.02 | 0.0578 | 0.069 | 0.0634 | 0.0408 |
 | 025-wrrf-cfbpr-qwen15b-blindsetA | 42 | 200 | yes | 200 | 0.02 | 0.0574 | 0.0725 | 0.0635 | 0.0426 |
+| 021-two-step-wrrf-lyrics-qwen15b-blindsetA | 42 | 200 | no | 1600 | 0.0138 | 0.0471 | 0.0591 | 0.242 | 0.0537 |
