@@ -82,6 +82,7 @@ def load_train_holdout(size: int, seed: int) -> list[dict[str, Any]]:
 def build_query_gold_pairs(
     holdout: list[dict], item_db: MusicCatalogDB,
     first_turn_only: bool = False,
+    query_preprocessing_mode: str = "raw",
 ) -> list[dict[str, Any]]:
     """For each music turn in each held-out session, build one
     (user_query, chat_history, gold_tid) eval pair.
@@ -118,9 +119,10 @@ def build_query_gold_pairs(
             if not prior_idx:
                 continue
             prior = df.loc[prior_idx]
-            # Format same as inference
+            # Format same as inference (CRS_BASELINE.batch_chat).
             history_lines = []
             user_query = None
+            session_memory_for_query: list[dict] = []
             for _, t in prior.iterrows():
                 role = "assistant" if t["role"] == "music" else t["role"]
                 content = t["content"]
@@ -130,9 +132,24 @@ def build_query_gold_pairs(
                     except Exception:
                         content = str(content)
                 history_lines.append(f"{role}: {content}")
+                # Mirror the actual session_memory shape that CRS_BASELINE
+                # builds, so build_retrieval_query() sees the same input.
+                session_memory_for_query.append({"role": t["role"], "content": content})
                 if t["role"] == "user" and t["turn_number"] == turn_n:
                     user_query = t["content"]
-            retrieval_input = "\n".join(history_lines)
+            # Pull goal_text for last_user_with_goal mode.
+            goal_text = None
+            cg = sess.get("conversation_goal") or {}
+            if cg:
+                goal_text = (cg.get("listener_goal") or "").strip() or None
+            # Use the SAME preprocessing helper that CRS_BASELINE uses at
+            # inference, so offline metric and online behaviour match.
+            from mcrs.crs_baseline import build_retrieval_query  # noqa: E402
+            retrieval_input = build_retrieval_query(
+                session_memory_for_query,
+                mode=query_preprocessing_mode,
+                goal_text=goal_text,
+            )
             pairs.append({
                 "session_id": sess["session_id"],
                 "user_id": sess.get("user_id"),
@@ -147,11 +164,16 @@ def build_query_gold_pairs(
 def run_tier1(
     tid: str, holdout_size: int = 200, seed: int = 42, topk_batch: int = 20,
     first_turn_only: bool = False,
+    query_preprocessing_mode: Optional[str] = None,
 ) -> dict[str, float]:
     """Run retrieval-only offline eval for the given config."""
     cfg = OmegaConf.load(BASELINES_DIR / "config" / f"{tid}.yaml")
+    # CLI override > yaml > 'raw' default.
+    if query_preprocessing_mode is None:
+        query_preprocessing_mode = str(cfg.get("query_preprocessing_mode", "raw"))
     print(f"[offline-eval] config: {tid}")
     print(f"[offline-eval] retrieval_type={cfg.retrieval_type}  corpus_types={list(cfg.corpus_types)}")
+    print(f"[offline-eval] query_preprocessing_mode={query_preprocessing_mode}")
 
     # Paths referenced in the yaml resolve against music-crs-baselines/ (same
     # as during actual inference). Temporarily chdir there so cache_dir like
@@ -166,8 +188,12 @@ def run_tier1(
             cfg.item_db_name, list(cfg.track_split_types), list(cfg.corpus_types),
         )
         print(f"[offline-eval] building eval pairs from {len(holdout)} sessions "
-              f"(first_turn_only={first_turn_only})")
-        pairs = build_query_gold_pairs(holdout, item_db, first_turn_only=first_turn_only)
+              f"(first_turn_only={first_turn_only}, mode={query_preprocessing_mode})")
+        pairs = build_query_gold_pairs(
+            holdout, item_db,
+            first_turn_only=first_turn_only,
+            query_preprocessing_mode=query_preprocessing_mode,
+        )
         print(f"[offline-eval] built {len(pairs)} (query, gold_tid) pairs")
 
         print(f"[offline-eval] loading retrieval: {cfg.retrieval_type}")
@@ -217,6 +243,7 @@ def run_tier1(
         "holdout_size": holdout_size,
         "seed": seed,
         "first_turn_only": first_turn_only,
+        "query_preprocessing_mode": query_preprocessing_mode,
     }
 
     print("\n=== Tier-1 offline eval result ===")
@@ -271,11 +298,18 @@ def main() -> int:
                    help="Only use turn=1 music gold tracks. Mirrors Blind-A's "
                         "single-turn distribution for more predictive offline/online "
                         "calibration. Default False (all turns, noisier queries).")
+    p.add_argument("--query-preprocessing-mode", default=None,
+                   choices=[None, "raw", "last_user", "last_user_with_goal"],
+                   help="Override config's query_preprocessing_mode. 'raw' = "
+                        "021 baseline (multi-turn dump with role prefixes). "
+                        "'last_user' = strip prefixes + use only last user turn. "
+                        "'last_user_with_goal' = also append listener_goal.")
     args = p.parse_args()
 
     scores = run_tier1(
         args.tid, holdout_size=args.holdout_size, seed=args.seed,
         first_turn_only=args.first_turn_only,
+        query_preprocessing_mode=args.query_preprocessing_mode,
     )
     if not args.no_log:
         append_log_row(args.tid, scores)

@@ -8,6 +8,48 @@ from mcrs.retrieval_modules import load_retrieval_module
 from mcrs.rerankers import load_reranker_module
 from mcrs.response_rerankers import load_response_reranker_module
 
+
+def build_retrieval_query(
+    session_memory: list[dict],
+    mode: str = "raw",
+    goal_text: Optional[str] = None,
+) -> str:
+    """Format the conversation history for the retriever.
+
+    Modes:
+      'raw'              : 021-champion behaviour. Newline-joined "role: content"
+                           across ALL turns including assistant text + expanded
+                           music-turn metadata. Heavy noise on multi-turn data.
+      'last_user'        : Just the last user turn's content (no role prefix).
+                           Strips assistant text, prior music metadata, and the
+                           role labels. Best for dense encoder (avoids 512-token
+                           truncation hiding the actual query) and for BM25
+                           (no spurious 'user'/'music'/'assistant' tokens).
+      'last_user_with_goal': last_user + ' || goal: <listener_goal>' when
+                           goal_text is provided. Adds light context useful
+                           when the user query is short.
+
+    Returns the formatted query string.
+    """
+    if mode == "raw":
+        return "\n".join(
+            f"{t.get('role','')}: {t.get('content','')}" for t in session_memory
+        )
+    # Last user turn — find it from the END of session_memory.
+    last_user = ""
+    for t in reversed(session_memory):
+        if t.get("role") == "user":
+            last_user = str(t.get("content", "")).strip()
+            break
+    if not last_user:
+        # Fallback to raw if there's no user turn (shouldn't happen on inference).
+        return "\n".join(
+            f"{t.get('role','')}: {t.get('content','')}" for t in session_memory
+        )
+    if mode == "last_user_with_goal" and goal_text:
+        return f"{last_user} || goal: {goal_text}"
+    return last_user
+
 class CRS_BASELINE:
     """
     Conversational Recommender System (CRS) baseline that wires together an LLM module and an item retrieval module over a music catalog and user profiles.
@@ -47,6 +89,7 @@ class CRS_BASELINE:
         retrieval_topk: int = 20,
         response_max_new_tokens: int = 64,
         top_n_for_prompt: int = 1,
+        query_preprocessing_mode: str = "raw",
         response_reranker_type: Optional[str] = None,
         response_reranker_model_path: Optional[str] = None,
         response_n_candidates: int = 3,
@@ -95,6 +138,14 @@ class CRS_BASELINE:
         # query rather than being forced to describe whatever the reranker
         # bumped to rank 1. See exp 028 post-mortem on the coupling hypothesis.
         self.top_n_for_prompt = max(1, int(top_n_for_prompt))
+        # query_preprocessing_mode controls how session_memory is formatted
+        # before being sent to the retriever. 'raw' (default) preserves 021
+        # champion behaviour. 'last_user' / 'last_user_with_goal' clean the
+        # query — strip role prefixes + drop multi-turn assistant/music noise.
+        # See build_retrieval_query() above for the modes.
+        if query_preprocessing_mode not in ("raw", "last_user", "last_user_with_goal"):
+            raise ValueError(f"unknown query_preprocessing_mode: {query_preprocessing_mode!r}")
+        self.query_preprocessing_mode = query_preprocessing_mode
         # Response reranker (exp 026+): sample K responses and pick the best via
         # a reward model trained on train goal_progress_assessments.
         self.response_reranker_type = response_reranker_type
@@ -206,7 +257,13 @@ class CRS_BASELINE:
             session_memory.append({"role": "user", "content": user_query})
 
             sys_prompts.append(self._get_system_prompt(user_id))
-            retrieval_input = "\n".join([f"{conversation['role']}: {conversation['content']}" for conversation in session_memory])
+            cg = data.get('conversation_goal') or {}
+            goal_text = (cg.get('listener_goal') or "").strip() or None
+            retrieval_input = build_retrieval_query(
+                session_memory,
+                mode=self.query_preprocessing_mode,
+                goal_text=goal_text,
+            )
             retrieval_inputs.append(retrieval_input)
             session_memories.append(session_memory)
             user_ids.append(user_id)

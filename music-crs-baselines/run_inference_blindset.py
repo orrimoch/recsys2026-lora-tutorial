@@ -78,6 +78,7 @@ def main(args):
     retrieval_topk = int(config.get("retrieval_topk", 20))
     response_max_new_tokens = int(config.get("response_max_new_tokens", 64))
     top_n_for_prompt = int(config.get("top_n_for_prompt", 1))
+    query_preprocessing_mode = str(config.get("query_preprocessing_mode", "raw"))
     response_reranker_type = config.get("response_reranker_type", None)
     response_reranker_model_path = config.get("response_reranker_model_path", None)
     response_n_candidates = int(config.get("response_n_candidates", 3))
@@ -102,6 +103,7 @@ def main(args):
         retrieval_topk=retrieval_topk,
         response_max_new_tokens=response_max_new_tokens,
         top_n_for_prompt=top_n_for_prompt,
+        query_preprocessing_mode=query_preprocessing_mode,
         response_reranker_type=response_reranker_type,
         response_reranker_model_path=response_reranker_model_path,
         response_n_candidates=response_n_candidates,
