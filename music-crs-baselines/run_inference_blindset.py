@@ -133,6 +133,19 @@ def main(args):
             'user_id': user_id,
             'turn_number': turn_number
         })
+
+    # Length-bucket: sort by total input character length so similar-length
+    # sequences batch together, eliminating left-padding waste. Output order
+    # doesn't matter — session_id+user_id+turn_number identify each row.
+    # Blind has only 80 rows, but the principle still helps for the rare
+    # long single-turn outlier.
+    def _est_len(item):
+        history_chars = sum(len(t.get('content', '') or '') for t in item['session_memory'])
+        return history_chars + len(item.get('user_query', '') or '')
+    paired = sorted(zip(batch_data, metadata), key=lambda bm: _est_len(bm[0]))
+    batch_data = [b for b, _ in paired]
+    metadata = [m for _, m in paired]
+
     inference_results = []
     for i in tqdm(range(0, len(batch_data), args.batch_size), desc="Batch inference"):
         batch = batch_data[i:i+args.batch_size]

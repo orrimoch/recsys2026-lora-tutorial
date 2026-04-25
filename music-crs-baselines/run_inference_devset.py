@@ -126,6 +126,19 @@ def main(args):
                 'user_id': user_id,
                 'turn_number': target_turn_number
             })
+
+    # Length-bucket: sort by total input character length so similar-length
+    # sequences batch together. Eliminates left-padding waste — without this,
+    # a single 8-turn conversation in a batch forces the other 15 short queries
+    # to pay the long-prefill cost. Output order doesn't matter for scoring;
+    # session_id+user_id+turn_number in metadata identify each row.
+    def _est_len(item):
+        history_chars = sum(len(t.get('content', '') or '') for t in item['session_memory'])
+        return history_chars + len(item.get('user_query', '') or '')
+    paired = sorted(zip(batch_data, metadata), key=lambda bm: _est_len(bm[0]))
+    batch_data = [b for b, _ in paired]
+    metadata = [m for _, m in paired]
+
     inference_results = []
     for i in tqdm(range(0, len(batch_data), args.batch_size), desc="Batch inference"):
         batch = batch_data[i:i+args.batch_size]

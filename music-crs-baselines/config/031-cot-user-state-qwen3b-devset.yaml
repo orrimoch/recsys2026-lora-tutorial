@@ -36,4 +36,4 @@ cache_dir: "../experiments/cache"
 device: "mps"
 attn_implementation: "eager"
 response_prompt_name: "response_generation_cot_user_state"
-response_max_new_tokens: 192
+response_max_new_tokens: 128
