@@ -1,0 +1,40 @@
+# Exp 031 — sibling of 029 swapping the LM only: Qwen 2.5-0.5B-Instruct.
+# SAME retrieval (wRRF BM25+metadata+lyrics), SAME CoT user-state prompt
+# (response_generation_cot_user_state.txt), SAME max_new_tokens budget.
+#
+# Smallest practical Qwen 2.5 instruct variant. Tests the LOWER bound
+# of the model-size axis under the new CoT-equipped pipeline:
+#
+#   029: Qwen 2.5-1.5B (champion model, ~67% format compliance smoke)
+#   031: Qwen 2.5-0.5B (this — expected lower compliance, fastest run)
+#   030: Qwen 2.5-7B   (struggling with OOM at batch >4)
+#
+# Risk: 0.5B is well below the threshold where models reliably follow
+# multi-block structured instructions. Format-compliance likely drops
+# below 50%. But the parser's fallback path (strip <user_state> if
+# present, return rest; if no tags at all, return raw) means we still
+# get a usable response either way. The question this run answers:
+# does CoT help even when the model only partially follows the format,
+# or is the structure-following the necessary mechanism?
+#
+# Memory: 0.5B @ bf16 ≈ 1 GB weights. Batch 32 fits trivially on any
+# Colab GPU including T4 16GB. Run time ~5 min on A100.
+
+lm_type: "Qwen/Qwen2.5-0.5B-Instruct"
+retrieval_type: "wrrf_bm25_dense_lyrics_v1"
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Dataset"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "mps"
+attn_implementation: "eager"
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 192
