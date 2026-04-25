@@ -1,4 +1,5 @@
 import os
+import re
 import torch
 from typing import Optional, Any, List, Dict
 from mcrs.db_item import MusicCatalogDB
@@ -7,6 +8,41 @@ from mcrs.lm_modules import load_lm_module
 from mcrs.retrieval_modules import load_retrieval_module
 from mcrs.rerankers import load_reranker_module
 from mcrs.response_rerankers import load_response_reranker_module
+
+
+_RESPONSE_TAG_RE = re.compile(
+    r"<response>\s*(.*?)\s*</response>", re.DOTALL | re.IGNORECASE
+)
+_USER_STATE_BLOCK_RE = re.compile(
+    r"<user_state>.*?</user_state>", re.DOTALL | re.IGNORECASE
+)
+
+
+def extract_cot_response(raw: str) -> str:
+    """Strip the CoT envelope from a CoT-prompt LM output.
+
+    The CoT prompts (response_generation_cot_*) instruct the model to emit
+    a structured <user_state>...</user_state> block followed by the
+    user-facing <response>...</response>. Only the latter goes to Gemini.
+
+    Strategy:
+      1. Prefer the contents of <response>...</response> if both tags exist.
+      2. Fallback: drop any <user_state>...</user_state> block and return
+         the rest, stripped. Handles partial generations where the model
+         produced the user_state but ran out of tokens before closing
+         <response>, OR forgot the response tags entirely.
+      3. Final fallback: the original string. Never returns empty unless
+         the model itself produced empty output.
+    """
+    if not raw:
+        return raw
+    m = _RESPONSE_TAG_RE.search(raw)
+    if m:
+        return m.group(1).strip()
+    cleaned = _USER_STATE_BLOCK_RE.sub("", raw).strip()
+    # Drop a stray opening <response> tag if the model never closed it.
+    cleaned = re.sub(r"</?response>", "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned or raw.strip()
 
 
 def build_retrieval_query(
@@ -371,6 +407,14 @@ class CRS_BASELINE:
         else:
             responses = [self.lm.response_generation(sys_prompts[i], session_memories[i], recommend_items[i])
                         for i in range(len(batch_data))]
+
+        # CoT prompts ask the LM to emit <user_state>...</user_state> then
+        # <response>...</response>. Gemini scores predicted_response, so
+        # strip the user_state envelope before returning. Triggered by
+        # naming convention: response_prompt_name starts with
+        # 'response_generation_cot_'.
+        if self.response_prompt_name.startswith("response_generation_cot_"):
+            responses = [extract_cot_response(r) for r in responses]
 
         # Prepare results
         results = []
