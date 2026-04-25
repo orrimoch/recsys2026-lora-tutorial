@@ -1,0 +1,39 @@
+# Exp 031 — sibling of 029/030 swapping the LM only: Qwen 2.5-3B-Instruct.
+# SAME retrieval (wRRF BM25+metadata+lyrics), SAME CoT user-state prompt
+# (response_generation_cot_user_state.txt), SAME max_new_tokens budget.
+#
+# Three-way pair test under the new CoT-equipped pipeline:
+#   029: Qwen 2.5-1.5B (champion, ~67% format compliance smoke)
+#   031: Qwen 2.5-3B   (this — practical sweet spot, expected ~85%)
+#   030: Qwen 2.5-7B   (slow at batch 4 due to OOM)
+#
+# 3B is the practical sweet spot: faster than 7B (no OOM at batch 16),
+# better format-compliance than 1.5B. The relevant Blind-A risk for 3B
+# is exp 024's regression: Qwen 3B + STOCK prompt + max_new_tokens=192
+# scored composite 0.33→0.29, LLM 3.15→3.00 — failure mode was
+# AI-speak filler ("fantastic", "perfectly captures") that Gemini hates.
+# The new CoT prompt explicitly bans those words, so this run tests
+# whether the prompt's word-bans are sufficient to neutralise the prior
+# 3B regression.
+#
+# Memory: 3B @ bf16 ≈ 6 GB weights + KV cache. Batch 16 fits A100 40GB
+# with plenty of headroom; batch 32 should also fit if you want faster.
+
+lm_type: "Qwen/Qwen2.5-3B-Instruct"
+retrieval_type: "wrrf_bm25_dense_lyrics_v1"
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Dataset"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "mps"
+attn_implementation: "eager"
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 192
