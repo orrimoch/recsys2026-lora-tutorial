@@ -69,6 +69,16 @@ def main(args):
     """
     print("Removing cache directory for preventing memory issues...")
     os.system("rm -rf cache")
+    # Defensive: reclaim any leaked CUDA memory from prior subprocesses
+    # before allocating. Colab subprocess exits don't always free GPU
+    # cleanly; this gives us back what PyTorch can reach.
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        try:
+            free_b, total_b = torch.cuda.mem_get_info()
+            print(f"[startup] CUDA free: {free_b/1024**3:.2f}/{total_b/1024**3:.2f} GiB")
+        except Exception:
+            pass
     config = OmegaConf.load(f"config/{args.tid}.yaml")
     device = args.device or config.device
     attn_implementation = args.attn_implementation or config.attn_implementation
