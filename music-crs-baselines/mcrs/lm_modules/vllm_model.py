@@ -9,6 +9,7 @@ Lazy-imported by the lm_modules factory only when `use_vllm: true` is
 set in the yaml config — keeps non-vLLM runs from paying vLLM's
 ~30-second cold start and dependency footprint.
 """
+import os
 from typing import Optional, List, Dict
 import torch
 
@@ -74,6 +75,14 @@ class VLLM_MODEL:
             torch.float16: "float16",
             torch.float32: "float32",
         }.get(dtype, "auto")
+
+        # gpu_memory_utilization can be overridden via env var, useful when
+        # Colab has leaked GPU memory from prior failed runs. Lower it (e.g.
+        # 0.5) to fit in less free memory; or restart the Colab runtime.
+        env_util = os.environ.get("VLLM_GPU_MEM_UTIL")
+        if env_util:
+            gpu_memory_utilization = float(env_util)
+            print(f"[VLLM_MODEL] gpu_memory_utilization overridden via env to {gpu_memory_utilization}")
 
         # max_model_len = max input + max output. Default 2304 = our 2048
         # input cap + 256 generation budget (covers max_new_tokens=192 in
