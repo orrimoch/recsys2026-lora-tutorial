@@ -130,6 +130,7 @@ class CRS_BASELINE:
         response_reranker_model_path: Optional[str] = None,
         response_n_candidates: int = 3,
         response_temperatures: Optional[List[float]] = None,
+        use_vllm: bool = False,
     ):
         """Initialize the CRS baseline components.
 
@@ -155,7 +156,11 @@ class CRS_BASELINE:
         self.device = device
         self.dtype = dtype
         self.attn_implementation = attn_implementation
-        self.lm = load_lm_module(self.lm_type, self.device, self.attn_implementation, self.dtype)
+        self.use_vllm = use_vllm
+        self.lm = load_lm_module(
+            self.lm_type, self.device, self.attn_implementation, self.dtype,
+            use_vllm=self.use_vllm,
+        )
         self.retrieval = load_retrieval_module(self.retrieval_type, self.item_db_name, self.track_split_types, self.corpus_types, self.cache_dir)
         self.reranker_type = reranker_type
         self.reranker_model_path = reranker_model_path

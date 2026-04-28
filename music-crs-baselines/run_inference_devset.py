@@ -84,6 +84,7 @@ def main(args):
     response_n_candidates = int(config.get("response_n_candidates", 3))
     _rt = config.get("response_temperatures", None)
     response_temperatures = [float(x) for x in _rt] if _rt is not None else None
+    use_vllm = bool(config.get("use_vllm", False))
     music_crs = load_crs_baseline(
         lm_type=config.lm_type,
         retrieval_type=config.retrieval_type,
@@ -107,6 +108,7 @@ def main(args):
         response_reranker_model_path=response_reranker_model_path,
         response_n_candidates=response_n_candidates,
         response_temperatures=response_temperatures,
+        use_vllm=use_vllm,
     )
     db = load_dataset(config.test_dataset_name, split="test")
     # Prepare all batch data at once

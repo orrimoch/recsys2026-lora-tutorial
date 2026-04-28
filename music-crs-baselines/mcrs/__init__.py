@@ -26,6 +26,7 @@ def load_crs_baseline(
     response_reranker_model_path: Optional[str] = None,
     response_n_candidates: int = 3,
     response_temperatures: Optional[List[float]] = None,
+    use_vllm: bool = False,
 ):
     return CRS_BASELINE(
         lm_type,
@@ -50,4 +51,5 @@ def load_crs_baseline(
         response_reranker_model_path,
         response_n_candidates,
         response_temperatures,
+        use_vllm,
     )
