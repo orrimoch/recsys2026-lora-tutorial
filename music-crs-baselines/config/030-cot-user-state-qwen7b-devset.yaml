@@ -35,3 +35,10 @@ device: "mps"
 attn_implementation: "eager"
 response_prompt_name: "response_generation_cot_user_state"
 response_max_new_tokens: 128
+# vLLM-backed inference: ~5-10x throughput vs vanilla HF generate via
+# PagedAttention + continuous batching + Flash Attention 2 internally.
+# 7B at bf16 fits comfortably in vLLM on A100 40GB:
+#   weights ~14 GB + KV cache pool ~22 GB (gpu_memory_utilization=0.9).
+# This makes the 030 7B run actually viable end-to-end (~10-15 min for
+# 8000 rows on A100 vs the prior ~100+ min that pushed us to drop batch).
+use_vllm: true
