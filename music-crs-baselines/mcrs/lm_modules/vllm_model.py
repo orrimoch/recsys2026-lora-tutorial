@@ -53,7 +53,7 @@ class VLLM_MODEL:
         attn_implementation: str = "flash_attention_2",
         dtype: torch.dtype = torch.bfloat16,
         max_model_len: int = 2304,
-        gpu_memory_utilization: float = 0.9,
+        gpu_memory_utilization: float = 0.7,
     ):
         # vLLM is CUDA-only in practice (CPU mode exists but is too slow
         # for our workload). Fail fast on MPS/CPU rather than silently
