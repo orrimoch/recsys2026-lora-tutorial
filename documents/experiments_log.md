@@ -6,6 +6,40 @@ New entries go at the TOP (newest first) so the most recent work is visible with
 
 ---
 
+### Exp 029-cot-user-state-qwen15b-blindsetA — Inline CoT user-state extraction prompt — 2026-04-28
+
+- **Hypothesis CoT-1**: structuring the response prompt to first emit a `<user_state>` block (mood / intent / energy / sonic_pref / era_pref / familiarity inferred from conversation history + user profile) before the response prose lifts Personalization on the Gemini judge axis. Single-axis change vs 021 champion: response prompt only (`response_generation_cot_user_state.txt`); same retrieval (wRRF), same LM (Qwen 2.5-1.5B), same `max_new_tokens` budget (128 vs 021's 64 — needed to fit the user_state block + response).
+- **Pre-validation**: dev-set sibling (`029-cot-user-state-qwen15b-devset`) ran first per fresh-model no-Blind-A-without-gate policy. Local M4 smoke (3 train queries) confirmed: (a) parser cleanly strips `<user_state>` block from `predicted_response`, (b) 1.5B follows the structured format on 2/3 samples after few-shot priming, (c) responses ground in the recommended track (no hallucinated tracks like the pre-few-shot draft). Dev-set integration completed end-to-end on 8000 rows. User explicitly overrode the no-Blind-A policy because CoT user-state extraction is a meaningfully different mechanism than the 7 prior rejected experiments.
+- **Config**: `music-crs-baselines/config/029-cot-user-state-qwen15b-blindsetA.yaml`
+- **Code**: git sha `e13f79f` (fresh-model branch). 80-row Blind-A inference via `run_inference_blindset.py` on Colab T4 (vanilla HF generate, batch 32, sdpa).
+- **Shipped result** (Blind-A, 80 rows, Gemini-scored):
+  - **Composite 0.25** (Δ −0.08 vs 021's 0.33) ❌
+  - nDCG@20 = 0.14 (Δ −0.05; within ±0.05 Blind-A noise floor — retrieval stack unchanged, drift is noise)
+  - CatDiv = 0.03 (blind-set artifact — tied with everyone)
+  - LexDiv = 0.80 (Δ +0.13 vs 021's 0.67) ✅ — confirms the CoT prompt did make responses meaningfully more lexically diverse
+  - LLM judge = **2.25** (Δ −0.90 vs 021's 3.15) ❌❌ — second-largest single-experiment LLM regression on fresh-model branch (only beaten by exp 028's −1.05)
+- **Verdict**: REJECTED. CoT-1 falsified.
+- **Pattern recognition — striking near-replication of exp 022 (persona+word-ban)**:
+
+  | Metric | 022 (persona) | 029 (CoT) | Delta |
+  |---|---|---|---|
+  | composite | 0.24 | 0.25 | +0.01 |
+  | nDCG@20 | 0.14 | 0.14 | 0 |
+  | LexDiv | 0.80 | 0.80 | 0 |
+  | LLM | 2.15 | 2.25 | +0.10 |
+
+  Two completely different prompt mechanisms (10-directive persona vs structured `<user_state>` CoT) produce essentially identical Gemini-judged outputs on Qwen 1.5B. This is now a **named pattern: "structural-directive collapse on 1.5B"**. Mechanism: any structural prompt directive (persona rules, structured tags, chain-of-thought scaffolding, top-N candidate format from exp 028) makes 1.5B's output more lexically diverse but less grounded in the recommended track; Gemini's judge punishes the grounding loss harder than the diversity gain repays (~−0.9 to −1.05 LLM each time).
+- **Implications**:
+  1. **Prompt-engineering on 1.5B is dead.** 4 independent prompt experiments (022 persona, 028 top-3 candidates, 029 CoT user-state, plus one more under the same general pattern) have all confirmed the same failure mode. Further prompt tweaks on 1.5B have very low expected value.
+  2. **The 030 Blind-A sibling (7B + same CoT prompt) should NOT ship** without first establishing whether the failure mechanism is prompt-bound or model-bound. Given exp 024's 3B+stock regression and prior-branch 7B+few-shot regression (−0.45 LLM), the regression-prior on 030 is high. Saving the submission slot for Blind-B or a Gemini-proxy-validated experiment.
+  3. **The path forward is fundamentally different mechanisms**, not more prompt iteration:
+     - **B1 offline eval** (already exists at `scripts/offline_eval.py`) — use to pre-validate retrieval changes
+     - **Gemini-proxy classifier** trained on the now 8 × 80 = 640 scored Blind-A responses — predicts judge score, lets us pre-filter before shipping
+     - **E1 LoRA distill from 021's own responses** — only generation-side training path that stays aligned with what Gemini already likes (since 021 IS the high-water mark for Gemini's preference)
+- **Submissions remaining for this Blind-A cycle**: 8 of 8 used (counting against the 3/week budget rolling). Effectively budget-constrained until the next reset; reserve any further slots for a Gemini-proxy-validated candidate.
+
+---
+
 ### Exp 021-two-step-wrrf-lyrics-qwen15b-blindsetA — First Blind-A ship, stock response prompt — 2026-04-24 18:00
 
 - **Hypothesis**: ship Wave 2's dev-champion (020) stack (wRRF retrieval + Qwen 2.5-1.5B response) to Blind-A to (a) get the first Gemini LLM-judge data point on the fresh-model branch, (b) establish a local→blind calibration anchor, (c) enter the leaderboard so subsequent experiments can be ranked on real composite deltas.
