@@ -1,0 +1,39 @@
+# Exp 030 Blind-A — sibling of 029 Blind-A, swap LM only: 1.5B -> 7B.
+# Same retrieval (wRRF BM25+metadata+lyrics), same CoT user-state prompt,
+# same response_max_new_tokens=128. Only lm_type changes.
+#
+# Pair-test on Blind-A (80 rows scored by Gemini):
+#   029 Blind-A: Qwen 1.5B + CoT  -> measures CoT effect on champion model
+#   030 Blind-A: Qwen 7B + CoT    -> measures whether bigger + CoT compounds
+#
+# Risk being tested: prior-branch 7B + few-shot regressed Gemini judge
+# by -0.45. Failure mode was AI-speak filler ("fantastic", "perfectly
+# captures") that the judge punished. The CoT prompt explicitly bans
+# those words. If 030 Blind-A still regresses, the bigger-model penalty
+# is structural (not prompt-fixable) and 1.5B remains production. If it
+# beats 029, the 7B+CoT combo unlocks the bigger-model path.
+#
+# Inference: vanilla HF generate (NOT vLLM) — 80 rows is too small for
+# vLLM's per-batch throughput advantage to repay its setup overhead and
+# the dependency/CUDA headaches we hit on the 030 devset attempts.
+# Batch 8 + sdpa fits A100 40GB comfortably (7B ~14 GB weights + KV
+# cache + activations ~22 GB total).
+
+lm_type: "Qwen/Qwen2.5-7B-Instruct"
+retrieval_type: "wrrf_bm25_dense_lyrics_v1"
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "mps"
+attn_implementation: "eager"
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 128
