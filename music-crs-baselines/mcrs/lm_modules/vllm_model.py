@@ -84,6 +84,21 @@ class VLLM_MODEL:
             gpu_memory_utilization = float(env_util)
             print(f"[VLLM_MODEL] gpu_memory_utilization overridden via env to {gpu_memory_utilization}")
 
+        # Reclaim any cached GPU memory from prior allocations in this
+        # process before vLLM probes free memory. Defensive against
+        # vLLM's import-time CUDA init leaving allocations cached.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            try:
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+            free_b, total_b = torch.cuda.mem_get_info()
+            free_gb = free_b / (1024**3)
+            total_gb = total_b / (1024**3)
+            print(f"[VLLM_MODEL] CUDA free before LLM init: {free_gb:.2f}/{total_gb:.2f} GiB "
+                  f"(target = {gpu_memory_utilization*total_gb:.2f} GiB)")
+
         # max_model_len = max input + max output. Default 2304 = our 2048
         # input cap + 256 generation budget (covers max_new_tokens=192 in
         # 029/030/031 plus headroom).
