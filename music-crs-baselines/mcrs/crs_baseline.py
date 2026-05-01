@@ -131,6 +131,35 @@ class CRS_BASELINE:
         response_n_candidates: int = 3,
         response_temperatures: Optional[List[float]] = None,
         use_vllm: bool = False,
+        # ---- W4 P0 #3: LoRA adapter on top of lm_type ---------------------
+        # When set (HF repo id or local dir from W4 KTO / W5 S-DPO / W6 RGRPO),
+        # the LM is wrapped with PEFT and the trained adapter is loaded.
+        # Works on both LLAMA_MODEL and VLLM_MODEL paths.
+        lora_path: Optional[str] = None,
+        lora_max_rank: int = 32,
+        # ---- W1 StateTracker integration (opt-in, default OFF) -----------
+        # When use_state_tracker=True, a per-turn user-state extractor runs
+        # before retrieval. Extracted state is threaded into batch results
+        # under the `extracted_state` key so downstream consumers (W2 CMQR,
+        # W4 responder prompt envelope) can read it. Default OFF — exp 021
+        # path stays bit-exact when the flag is absent.
+        use_state_tracker: bool = False,
+        state_tracker_prompt_name: str = "state_extraction",
+        state_tracker_max_new_tokens: int = 96,
+        # ---- W2 CMQR multi-query rewriter (opt-in, default OFF) ----------
+        # When use_cmqr=True, the inner retriever is wrapped by CMQR_REWRITER:
+        # for each query, emit N rewrites (injecting StateTracker fields),
+        # call the inner retriever per rewrite, RRF-fuse the N ranked lists,
+        # return top-`retrieval_topk`. Reuses self.lm (no extra weight load).
+        # Cache stores rewrites by (session_id, turn_number) at
+        # `{cache_dir}/cmqr/`. Implies use_state_tracker=True so rewrites can
+        # actually inject state fields; raises if the flag is missing.
+        use_cmqr: bool = False,
+        cmqr_prompt_name: str = "cmqr_rewrites",
+        cmqr_n_rewrites: int = 4,
+        cmqr_topk_per_rewrite: int = 50,
+        cmqr_rrf_k: int = 60,
+        cmqr_max_new_tokens: int = 96,
     ):
         """Initialize the CRS baseline components.
 
@@ -160,6 +189,8 @@ class CRS_BASELINE:
         self.lm = load_lm_module(
             self.lm_type, self.device, self.attn_implementation, self.dtype,
             use_vllm=self.use_vllm,
+            lora_path=lora_path,
+            lora_max_rank=int(lora_max_rank),
         )
         self.retrieval = load_retrieval_module(self.retrieval_type, self.item_db_name, self.track_split_types, self.corpus_types, self.cache_dir)
         self.reranker_type = reranker_type
@@ -213,6 +244,72 @@ class CRS_BASELINE:
             "response_generation": open(response_prompt_path, "r", encoding="utf-8").read(),
         }
         self.session_memory = []
+
+        # StateTracker — opt-in via config (Gap 1). The tracker reuses self.lm
+        # so no extra weights are loaded. Cache lives at experiments/cache/state/
+        # by default to survive the `rm -rf cache` in run_inference_devset.py:71.
+        self.use_state_tracker = bool(use_state_tracker)
+        self.state_tracker = None
+        if self.use_state_tracker:
+            from mcrs.query_rewriters.state_tracker import StateTracker
+            state_prompt_path = f"{self.prompts_dir}/{state_tracker_prompt_name}.txt"
+            if not os.path.isfile(state_prompt_path):
+                raise FileNotFoundError(
+                    f"state_tracker prompt '{state_tracker_prompt_name}' not found at {state_prompt_path}"
+                )
+            # cache_dir at the BASELINES level is `./cache` (transient) but the
+            # 021 yaml ships `cache_dir: "../experiments/cache"` already; we
+            # honour whatever the caller passed.
+            self.state_tracker = StateTracker(
+                lm=self.lm,
+                prompt_path=state_prompt_path,
+                cache_dir=self.cache_dir,
+                max_new_tokens=int(state_tracker_max_new_tokens),
+            )
+
+        # CMQR — opt-in via config (W2). Wraps self.retrieval transparently:
+        # downstream code calls self.retrieval.batch_text_to_item_retrieval(...)
+        # and gets RRF-fused rewrites without knowing CMQR is in the path.
+        # Requires StateTracker to be on (otherwise rewrites can't inject
+        # state fields and degrade to vanilla query-expansion).
+        self.use_cmqr = bool(use_cmqr)
+        self.cmqr = None
+        if self.use_cmqr:
+            if not self.use_state_tracker:
+                raise ValueError(
+                    "use_cmqr=True requires use_state_tracker=True — CMQR injects "
+                    "user_state fields into rewrites and needs the tracker to fill them."
+                )
+            from mcrs.query_rewriters.cmqr import CMQR_REWRITER
+            cmqr_prompt_path = f"{self.prompts_dir}/{cmqr_prompt_name}.txt"
+            if not os.path.isfile(cmqr_prompt_path):
+                raise FileNotFoundError(
+                    f"cmqr prompt '{cmqr_prompt_name}' not found at {cmqr_prompt_path}"
+                )
+            # Wrap the existing retriever; CMQR keeps it as `self.inner` and
+            # exposes the same batch_text_to_item_retrieval interface.
+            self.cmqr = CMQR_REWRITER(
+                lm=self.lm,
+                inner_retriever=self.retrieval,
+                prompt_path=cmqr_prompt_path,
+                cache_dir=self.cache_dir,
+                n_rewrites=int(cmqr_n_rewrites),
+                topk_per_rewrite=int(cmqr_topk_per_rewrite),
+                rrf_k=int(cmqr_rrf_k),
+                max_new_tokens=int(cmqr_max_new_tokens),
+            )
+            # Replace self.retrieval so the rest of the pipeline is unchanged.
+            self._inner_retrieval = self.retrieval  # keep a handle for diagnostics
+            self.retrieval = self.cmqr
+
+        # A6 catalog-membership guard — always-on safety net for any future
+        # path that emits track_ids (W4-W6 trained responders may hallucinate).
+        # No-op for W2 (retrieval-only outputs are catalog-bounded by construction).
+        # Build the valid set once from item_db; ~50k strings, negligible memory.
+        try:
+            self._valid_catalog: Optional[set] = set(self.item_db.metadata_dict.keys())
+        except (AttributeError, KeyError):
+            self._valid_catalog = None  # graceful: skip filter if db lacks the dict
 
     def _reset_session_memory(self):
         """Clear all messages stored in the current session memory.
@@ -290,6 +387,7 @@ class CRS_BASELINE:
         goal_categories: list[Optional[str]] = []
         goal_specificities: list[Optional[str]] = []
         user_profiles_raw: list[Any] = []
+        extracted_states: list[Optional[dict]] = []
 
         for data in batch_data:
             user_query = data['user_query']
@@ -315,6 +413,41 @@ class CRS_BASELINE:
             goal_specificities.append(cg.get('specificity'))
             user_profiles_raw.append(data.get('user_profile_raw'))
 
+            # StateTracker (opt-in, Gap 1). Extract user_state BEFORE retrieval
+            # so W2 CMQR can use it. Per-turn — caches inside StateTracker.
+            # Falls back to None on any exception so this can never break the
+            # production path; loud-warns so failures are visible in logs.
+            state: Optional[dict] = None
+            if self.use_state_tracker and self.state_tracker is not None:
+                sid = data.get('session_id') or ""
+                tn = int(data.get('turn_number') or 0)
+                # If session_id/turn_number aren't set on the batch row, skip
+                # extraction silently — the inference scripts always set them.
+                if sid and tn > 0:
+                    history_text = "\n".join(
+                        f"{t.get('role','')}: {t.get('content','')}"
+                        for t in session_memory[:-1]  # exclude the appended user query
+                    )
+                    try:
+                        state = self.state_tracker.extract(sid, tn, user_query, history_text)
+                    except Exception as e:
+                        # Never let state extraction kill the pipeline.
+                        print(f"[CRS_BASELINE] state_tracker failed on "
+                              f"session={sid[:8]} turn={tn}: {e!r}")
+                        state = None
+            extracted_states.append(state)
+
+        # If CMQR is wrapping the retriever, hand it the per-query context
+        # (session_id, turn_number, extracted_state) so it can cache by
+        # (session, turn) and inject state fields into rewrites. The set is
+        # ephemeral — only valid for the next batch_text_to_item_retrieval call.
+        if self.use_cmqr and self.cmqr is not None:
+            self.cmqr.set_batch_context(
+                session_ids=[d.get("session_id") for d in batch_data],
+                turn_numbers=[int(d.get("turn_number") or 0) for d in batch_data],
+                extracted_states=extracted_states,
+            )
+
         # Stage 1: Batch retrieval. Pull retrieval_topk (default 20; 40 when
         # a reranker is configured) candidates per query. user_ids thread
         # through so cf-bpr-style user-aware retrievers can use them.
@@ -331,6 +464,9 @@ class CRS_BASELINE:
                 )
         else:
             batch_retrieval_items = [self.retrieval.text_to_item_retrieval(inp, topk=stage1_topk) for inp in retrieval_inputs]
+        # Capture the pre-rerank pool — A6 backfill source if catalog filter
+        # has to drop hallucinated UUIDs after rerank.
+        batch_retrieval_pool = [list(items) for items in batch_retrieval_items]
 
         # Stage 1b: Rerank (optional). Post-retrieval reranker scores each
         # candidate and keeps the top-20 for submission. The rerank() call
@@ -351,6 +487,35 @@ class CRS_BASELINE:
                 batch_retrieval_items = self.reranker.rerank(
                     retrieval_inputs, batch_retrieval_items, topk=20,
                 )
+
+        # Stage 1c: A6 catalog-membership filter + A7 dedupe. Hard guard for
+        # any track_id that snuck in from a hallucinating model (W4-W6 trained
+        # responders are the threat surface; W2 retrievers are catalog-bounded
+        # by construction so this is a no-op here). Drops invalid IDs and
+        # backfills from the pre-rerank pool to keep len(items) ≥ 20.
+        if self._valid_catalog is not None:
+            filtered = []
+            for items, pool in zip(batch_retrieval_items, batch_retrieval_pool):
+                # Dedupe-keep-first → catalog-filter → backfill from pool.
+                seen: set = set()
+                kept: list = []
+                for tid in items:
+                    if tid in seen or tid not in self._valid_catalog:
+                        continue
+                    kept.append(tid)
+                    seen.add(tid)
+                # Backfill from the pre-rerank pool until len == 20 (or pool
+                # is exhausted). Pool ids are also filtered+deduped on insert.
+                if len(kept) < 20:
+                    for tid in pool:
+                        if len(kept) >= 20:
+                            break
+                        if tid in seen or tid not in self._valid_catalog:
+                            continue
+                        kept.append(tid)
+                        seen.add(tid)
+                filtered.append(kept[:20])
+            batch_retrieval_items = filtered
 
         # Build the "recommend_item(s)" string passed to the LM. When
         # top_n_for_prompt=1 this is identical to 021 champion (just
@@ -424,12 +589,44 @@ class CRS_BASELINE:
         # Prepare results
         results = []
         for i, data in enumerate(batch_data):
-            results.append({
+            row = {
                 "user_id": data.get('user_id'),
                 "user_query": data['user_query'],
                 "retrieval_items": batch_retrieval_items[i],
                 "recommend_item": recommend_items[i],
                 "response": responses[i],
-            })
+            }
+            # Side-channel: extracted user_state. Only present when
+            # use_state_tracker=True; absent on the default exp 021 path.
+            if self.use_state_tracker:
+                state = extracted_states[i]
+                row["extracted_state"] = state
+                # Surface the fallback flag explicitly so downstream consumers
+                # (CMQR, responder envelope) can downweight on stale state.
+                from mcrs.query_rewriters.state_tracker import StateTracker
+                row["state_was_fallback"] = StateTracker.was_fallback(state)
+            results.append(row)
 
         return results
+
+    def save_caches(self) -> None:
+        """Persist any in-memory caches that components have built up.
+
+        Currently saves:
+          - ProRank score cache (~32 MB at full devset; ~800k entries) —
+            critical because batch_chat builds it up purely in memory
+            and the inference driver process exits before any save would
+            happen otherwise. Per W3 review P0 #1.
+          - StateTracker / CMQR caches are already file-backed (each
+            extraction writes its own JSON), so no explicit save needed.
+
+        Safe to call from a try/finally block; never raises.
+        """
+        try:
+            if self.reranker is not None and hasattr(self.reranker, "save_cache"):
+                self.reranker.save_cache()
+                print(f"[CRS_BASELINE] saved reranker cache")
+        except Exception as e:  # noqa: BLE001
+            # Never let cache-save failure crash the run; the predictions
+            # are already on disk by the time this is called.
+            print(f"[CRS_BASELINE] save_caches: reranker save failed: {e!r}")

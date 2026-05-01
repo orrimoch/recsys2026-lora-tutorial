@@ -1,0 +1,43 @@
+You expand a music conversational query into 4 short alternative phrasings to maximise retrieval coverage. Output ONLY the rewrites in the format below; no preamble, no commentary.
+
+CRITICAL RULES
+- Emit EXACTLY 4 numbered rewrites: lines starting `1.`, `2.`, `3.`, `4.`.
+- Each rewrite is 4-12 words. No more, no less.
+- Each rewrite injects 1-2 fields from the user_state JSON when given (mood, intent, energy, sonic_pref, era_pref, familiarity). The first rewrite should be the most literal restatement of the user query; rewrites 2-4 inject progressively more state context.
+- Rewrites must be DIVERSE: different phrasings, different state fields injected, different word choices. Don't paraphrase the same way 4 times.
+- Do NOT invent track names, artist names, or specific songs. Use mood/genre/era language only.
+- Output nothing before `1.` and nothing after rewrite 4.
+
+EXAMPLE INPUT
+user query: "I'm winding down, want something dreamy and slow."
+user_state:
+  mood: reflective, calm
+  intent: deepen
+  energy: low
+  sonic_pref: dreamy folk, layered vocals
+  era_pref: 2010s
+  familiarity: familiar
+
+EXAMPLE OUTPUT
+1. dreamy slow songs for winding down at night
+2. calm reflective folk tracks with layered vocals
+3. low-energy 2010s indie with atmospheric texture
+4. mellow familiar music for deepening focus
+
+EXAMPLE INPUT
+user query: "Suggest hard rock with powerful emotional vocals."
+user_state:
+  mood: energetic, intense
+  intent: discover
+  energy: high
+  sonic_pref: hard rock, melodic
+  era_pref: mid-2000s
+  familiarity: unfamiliar
+
+EXAMPLE OUTPUT
+1. hard rock with powerful emotional vocals
+2. mid-2000s melodic hard rock with intense delivery
+3. high-energy rock songs with cathartic vocals
+4. unfamiliar post-grunge tracks with strong feeling
+
+Now produce 4 rewrites for the actual query and state below. Begin output with `1.`.

@@ -86,6 +86,21 @@ def main(args):
     _rt = config.get("response_temperatures", None)
     response_temperatures = [float(x) for x in _rt] if _rt is not None else None
     use_vllm = bool(config.get("use_vllm", False))
+    # W4 P0 #3: LoRA adapter for the responder
+    lora_path = config.get("lora_path", None)
+    lora_max_rank = int(config.get("lora_max_rank", 32))
+    # W1 StateTracker (Gap 1) — opt-in via config; default OFF preserves the
+    # exp 021/022/...028/029/030 paths bit-exact.
+    use_state_tracker = bool(config.get("use_state_tracker", False))
+    state_tracker_prompt_name = str(config.get("state_tracker_prompt_name", "state_extraction"))
+    state_tracker_max_new_tokens = int(config.get("state_tracker_max_new_tokens", 96))
+    # W2 CMQR — opt-in; mirror run_inference_devset.py
+    use_cmqr = bool(config.get("use_cmqr", False))
+    cmqr_prompt_name = str(config.get("cmqr_prompt_name", "cmqr_rewrites"))
+    cmqr_n_rewrites = int(config.get("cmqr_n_rewrites", 4))
+    cmqr_topk_per_rewrite = int(config.get("cmqr_topk_per_rewrite", 50))
+    cmqr_rrf_k = int(config.get("cmqr_rrf_k", 60))
+    cmqr_max_new_tokens = int(config.get("cmqr_max_new_tokens", 96))
     music_crs = load_crs_baseline(
         lm_type=config.lm_type,
         retrieval_type=config.retrieval_type,
@@ -110,6 +125,17 @@ def main(args):
         response_n_candidates=response_n_candidates,
         response_temperatures=response_temperatures,
         use_vllm=use_vllm,
+        lora_path=lora_path,
+        lora_max_rank=lora_max_rank,
+        use_state_tracker=use_state_tracker,
+        state_tracker_prompt_name=state_tracker_prompt_name,
+        state_tracker_max_new_tokens=state_tracker_max_new_tokens,
+        use_cmqr=use_cmqr,
+        cmqr_prompt_name=cmqr_prompt_name,
+        cmqr_n_rewrites=cmqr_n_rewrites,
+        cmqr_topk_per_rewrite=cmqr_topk_per_rewrite,
+        cmqr_rrf_k=cmqr_rrf_k,
+        cmqr_max_new_tokens=cmqr_max_new_tokens,
     )
     db = load_dataset(config.test_dataset_name, split="test")
     # Prepare all batch data at once
@@ -129,6 +155,10 @@ def main(args):
             'session_memory': chat_history,
             'conversation_goal': item.get('conversation_goal'),
             'user_profile_raw': item.get('user_profile'),
+            # Plumbed through for StateTracker (Gap 1). No-op when
+            # use_state_tracker=False.
+            'session_id': session_id,
+            'turn_number': turn_number,
         })
         metadata.append({
             'session_id': session_id,
@@ -149,18 +179,26 @@ def main(args):
     metadata = [m for _, m in paired]
 
     inference_results = []
-    for i in tqdm(range(0, len(batch_data), args.batch_size), desc="Batch inference"):
-        batch = batch_data[i:i+args.batch_size]
-        batch_metadata = metadata[i:i+args.batch_size]
-        results = music_crs.batch_chat(batch)
-        for j, result in enumerate(results):
-            inference_results.append({
-                "session_id": batch_metadata[j]['session_id'],
-                "user_id": batch_metadata[j]['user_id'],
-                "turn_number": batch_metadata[j]['turn_number'],
-                "predicted_track_ids": result['retrieval_items'],
-                "predicted_response": result["response"]
-            })
+    # try/finally for cache durability — W3 review P0 #1.
+    SAVE_EVERY_N = 50
+    try:
+        for i in tqdm(range(0, len(batch_data), args.batch_size), desc="Batch inference"):
+            batch = batch_data[i:i+args.batch_size]
+            batch_metadata = metadata[i:i+args.batch_size]
+            results = music_crs.batch_chat(batch)
+            for j, result in enumerate(results):
+                inference_results.append({
+                    "session_id": batch_metadata[j]['session_id'],
+                    "user_id": batch_metadata[j]['user_id'],
+                    "turn_number": batch_metadata[j]['turn_number'],
+                    "predicted_track_ids": result['retrieval_items'],
+                    "predicted_response": result["response"]
+                })
+            batch_idx = i // args.batch_size
+            if batch_idx > 0 and batch_idx % SAVE_EVERY_N == 0:
+                music_crs.save_caches()
+    finally:
+        music_crs.save_caches()
     os.makedirs(f"exp/inference/{args.eval_dataset}", exist_ok=True)
     with open(f"exp/inference/{args.eval_dataset}/{args.tid}.json", "w", encoding="utf-8") as f:
         json.dump(inference_results, f, ensure_ascii=False)

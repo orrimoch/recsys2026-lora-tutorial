@@ -1,7 +1,22 @@
+from typing import Optional
+
 from .llama import LLAMA_MODEL
 
 
-def load_lm_module(lm_type, device, attn_implementation, dtype, use_vllm: bool = False):
+def load_lm_module(
+    lm_type,
+    device,
+    attn_implementation,
+    dtype,
+    use_vllm: bool = False,
+    # W4 review P0 #3: PEFT/LoRA adapter on top of the base model. Set this
+    # to a HF repo id or local dir from a KTO/DPO/GRPO run to load the
+    # adapter at inference. Both backends support it:
+    #   LLAMA_MODEL — wraps with PeftModel.from_pretrained after base load.
+    #   VLLM_MODEL  — vLLM's enable_lora=True + per-request LoRARequest.
+    lora_path: Optional[str] = None,
+    lora_max_rank: int = 32,
+):
     """Load the LM backend.
 
     use_vllm=True routes to VLLM_MODEL — ~5-10x throughput on batched
@@ -23,6 +38,13 @@ def load_lm_module(lm_type, device, attn_implementation, dtype, use_vllm: bool =
         return VLLM_MODEL(
             model_name=lm_type, device=device,
             attn_implementation=attn_implementation, dtype=dtype,
+            lora_path=lora_path, lora_max_rank=lora_max_rank,
         )
-    # LLAMA_MODEL uses AutoTokenizer/AutoModelForCausalLM — works with any causal LM
-    return LLAMA_MODEL(model_name=lm_type, device=device, attn_implementation=attn_implementation, dtype=dtype)
+    # LLAMA_MODEL uses AutoTokenizer/AutoModelForCausalLM — works with any causal LM.
+    # LoRA support: if lora_path is set, wrap the loaded model with PeftModel.
+    lm = LLAMA_MODEL(model_name=lm_type, device=device, attn_implementation=attn_implementation, dtype=dtype)
+    if lora_path:
+        from peft import PeftModel
+        lm.lm = PeftModel.from_pretrained(lm.lm, lora_path).eval()
+        print(f"[LLAMA_MODEL] loaded LoRA adapter from {lora_path}")
+    return lm

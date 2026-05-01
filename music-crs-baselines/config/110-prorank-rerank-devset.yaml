@@ -1,0 +1,65 @@
+# W3 — CMQR + StateTracker + wRRF top-100 → ProRank rerank → Qwen-1.5B responder.
+#
+# Composition (RecSys_Challenge_Plan §A1+§A2+§A3+§A5):
+#   1. StateTracker extracts JSON user_state per turn.
+#   2. CMQR emits N=4 rewrites injecting state fields, calls wRRF per rewrite.
+#   3. RRF-fuses 4 lists with k=60 → top-100 (cmqr_topk_per_rewrite=50, retrieval_topk=100).
+#   4. ProRank reranks top-100 → top-20 via last-token-logit-diff scoring on
+#      Qwen-2.5-0.5B-Instruct. Inference-only — paper-equivalent base SLM
+#      without the GRPO warmup step.
+#   5. Frozen Qwen-1.5B responder (matches exp 021 champion bit-exact).
+#
+# W3 gate (plan §4): dev nDCG@10 ≥ 0.0934 (champion 0.0784 + 0.015).
+# Cut-path: if ProRank under-performs, flip reranker_type to bge_reranker_v2_m3
+# (already in repo, no training required).
+#
+# Catalog filter (A6) + post-fusion dedupe (A7) auto-on.
+
+lm_type: "Qwen/Qwen2.5-1.5B-Instruct"
+retrieval_type: "wrrf_bm25_dense_lyrics_v1"
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Dataset"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+# Pull top-100 from CMQR per plan §A3. ProRank shrinks to 20 for submission.
+retrieval_topk: 100
+
+# A5 ProRank reranker (W3 lever).
+reranker_type: "pro_rank"
+# reranker_model_path: leave unset for inference-only baseline. Set to a LoRA
+# adapter path (from colab/20_train_prorank_dev.ipynb) to use the trained
+# policy.
+
+# Frozen exp-021 responder path — keep generation params identical so any
+# ΔnDCG is attributable to the reranker, not LM behaviour.
+response_prompt_name: "response_generation"
+response_max_new_tokens: 64
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw"
+
+# vLLM on Colab A100 for ~5-10x throughput.
+use_vllm: true
+
+# W1 StateTracker (required by CMQR for state injection).
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+# W2 CMQR.
+use_cmqr: true
+cmqr_prompt_name: "cmqr_rewrites"
+cmqr_n_rewrites: 4
+cmqr_topk_per_rewrite: 50
+cmqr_rrf_k: 60
+cmqr_max_new_tokens: 96

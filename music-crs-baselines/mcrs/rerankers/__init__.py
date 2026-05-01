@@ -52,4 +52,18 @@ def load_reranker_module(
             cache_dir=cache_dir,
             model_path=model_path,
         )
+    if reranker_type == "pro_rank":
+        # W3 default reranker — last-token-logit-diff scoring over Qwen-0.5B.
+        # `model_path` (optional) loads a LoRA adapter on top of the base model
+        # for the trained ProRank policy. Without it, runs inference-only on
+        # the base-Qwen-0.5B (paper-equivalent inference behaviour minus the
+        # GRPO policy warmup).
+        from .pro_rank import ProRankReranker
+        return ProRankReranker(
+            item_db_name=item_db_name,
+            track_split_types=track_split_types,
+            corpus_types=corpus_types,
+            cache_dir=cache_dir,
+            model_path=model_path,
+        )
     raise ValueError(f"Unsupported reranker type: {reranker_type}")

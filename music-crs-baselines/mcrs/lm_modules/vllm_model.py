@@ -54,6 +54,15 @@ class VLLM_MODEL:
         dtype: torch.dtype = torch.bfloat16,
         max_model_len: int = 2304,
         gpu_memory_utilization: float = 0.7,
+        # W4 review P0 #3 fix: LoRA adapter support. When `lora_path` is
+        # set (a HF repo id or local dir containing adapter_config.json +
+        # adapter_model.safetensors), vLLM is initialized with
+        # enable_lora=True and every generation call uses a LoRARequest
+        # pointing to the adapter. Allows lm_type to remain the BASE model
+        # while the trained adapter is loaded on top — matches the W4 KTO
+        # output (LoRA r=32 adapter on Qwen-7B base).
+        lora_path: Optional[str] = None,
+        lora_max_rank: int = 32,
     ):
         # vLLM is CUDA-only in practice (CPU mode exists but is too slow
         # for our workload). Fail fast on MPS/CPU rather than silently
@@ -102,7 +111,10 @@ class VLLM_MODEL:
         # max_model_len = max input + max output. Default 2304 = our 2048
         # input cap + 256 generation budget (covers max_new_tokens=192 in
         # 029/030/031 plus headroom).
-        self.lm = LLM(
+        # W4 P0 #3: enable_lora=True + max_lora_rank when an adapter is set.
+        self.lora_path = lora_path
+        self._lora_request = None
+        llm_kwargs = dict(
             model=model_name,
             dtype=dtype_str,
             max_model_len=max_model_len,
@@ -110,6 +122,22 @@ class VLLM_MODEL:
             enforce_eager=False,
             trust_remote_code=False,
         )
+        if lora_path:
+            from vllm.lora.request import LoRARequest
+            llm_kwargs["enable_lora"] = True
+            llm_kwargs["max_lora_rank"] = int(lora_max_rank)
+            print(f"[VLLM_MODEL] enable_lora=True (max_rank={lora_max_rank}); "
+                  f"adapter will load from: {lora_path}")
+            # Build a single static LoRARequest used for every generation call.
+            # lora_int_id must be a unique int across the vLLM engine; 1 is
+            # fine here since we only ever load one adapter.
+            self._lora_request = LoRARequest(
+                lora_name="b1-kto-adapter",
+                lora_int_id=1,
+                lora_path=lora_path,
+            )
+
+        self.lm = LLM(**llm_kwargs)
         self.tokenizer = self.lm.get_tokenizer()
         self._max_input_tokens = max_model_len - 256  # leave room for gen
 
@@ -141,7 +169,11 @@ class VLLM_MODEL:
             self._build_messages(sp, ch, rec)
             for sp, ch, rec in zip(sys_prompts, chat_histories, recommend_items)
         ]
-        outputs = self.lm.chat(message_batches, sampling, use_tqdm=False)
+        # W4 P0 #3: forward the static LoRARequest if an adapter is loaded.
+        chat_kwargs = {"sampling_params": sampling, "use_tqdm": False}
+        if self._lora_request is not None:
+            chat_kwargs["lora_request"] = self._lora_request
+        outputs = self.lm.chat(message_batches, **chat_kwargs)
         return [o.outputs[0].text for o in outputs]
 
     def batch_response_generation_multi(
@@ -171,7 +203,11 @@ class VLLM_MODEL:
                 top_p=0.9 if temp > 0 else 1.0,
                 max_tokens=max_new_tokens,
             )
-            outs = self.lm.chat(message_batches, sampling, use_tqdm=False)
+            # W4 P0 #3: forward LoRARequest on the multi-candidate path too.
+            chat_kwargs = {"sampling_params": sampling, "use_tqdm": False}
+            if self._lora_request is not None:
+                chat_kwargs["lora_request"] = self._lora_request
+            outs = self.lm.chat(message_batches, **chat_kwargs)
             for i, o in enumerate(outs):
                 results[i].append(o.outputs[0].text)
         return results

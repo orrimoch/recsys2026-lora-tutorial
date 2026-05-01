@@ -1,0 +1,58 @@
+# W2 — CMQR + StateTracker + wRRF retrieval, Qwen-1.5B responder (frozen).
+#
+# Composition (RecSys_Challenge_Plan §A1+§A2+§A3):
+#   1. StateTracker extracts JSON user_state per turn (Qwen-1.5B, cached).
+#   2. CMQR emits N=4 rewrites injecting state fields, calls wRRF per rewrite.
+#   3. RRF-fuses the 4 ranked lists with k=60, returns top-100.
+#   4. (No reranker yet — A5 ProRank lands in W3.)
+#   5. Frozen Qwen-1.5B responder (matches exp 021 champion path bit-exact).
+#
+# W2 gate (plan §4): dev nDCG@10 ≥ champion +0.005 vs exp-021 anchor (0.0784).
+# Target: ≥ 0.0834. Champion exp-021 also hit nDCG@20 ~0.0995, lift target ~+0.005.
+#
+# Catalog filter (A6) + post-fusion dedupe (A7) are always-on safety nets.
+
+lm_type: "Qwen/Qwen2.5-1.5B-Instruct"
+retrieval_type: "wrrf_bm25_dense_lyrics_v1"
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Dataset"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"  # Colab A100 — for dev MPS smoke override on CLI: --device mps
+attn_implementation: "sdpa"
+
+# Pull top-100 from CMQR per plan §A3 (was 20 in exp 021). Larger candidate
+# pool so future A5 reranker (W3) has signal; for W2 we just need the top-20
+# slice for nDCG, but the wider pool tests RRF fusion math on real data.
+retrieval_topk: 100
+
+# Frozen exp-021 responder path — keep generation params identical so any
+# ΔnDCG is attributable to the retriever (CMQR), not LM behaviour.
+response_prompt_name: "response_generation"
+response_max_new_tokens: 64
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw"
+
+# vLLM on Colab A100 for ~5-10x throughput (~5 min full devset vs ~30 min).
+use_vllm: true
+
+# W1 StateTracker (Gap 1 — required by CMQR for state injection).
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+# W2 CMQR (this config's reason for existing).
+use_cmqr: true
+cmqr_prompt_name: "cmqr_rewrites"
+cmqr_n_rewrites: 4
+cmqr_topk_per_rewrite: 50  # plan §A2 default — 4 rewrites × 50 = 200 candidates pre-fusion
+cmqr_rrf_k: 60             # plan §A2 default — RRF standard
+cmqr_max_new_tokens: 96    # 4 rewrites × ~10 tokens each + framing

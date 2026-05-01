@@ -1,0 +1,38 @@
+You extract a structured user-state JSON from a music conversation. Output ONLY one <user_state> block, nothing else.
+
+CRITICAL — Use ONLY these 6 keys, no others. ALL other keys are forbidden:
+  mood, intent, energy, sonic_pref, era_pref, familiarity
+
+If a field is unknown from the conversation, write "unknown". If the user query is very specific (a song title, an exact lyric, a narrow genre), STILL use these 6 keys to describe the underlying mood/intent/energy/sonic-preference/era/familiarity those choices imply. NEVER add keys like song_title, artist, genre, lyric, search_method, intensity, vocals, instrumentation, etc. — every such field maps onto one of the 6 allowed keys.
+
+EXAMPLE INPUT
+user query: "I'm winding down, want something dreamy and slow."
+prior dialog: (none)
+
+EXAMPLE OUTPUT
+<user_state>
+mood: reflective, calm
+intent: deepen
+energy: low
+sonic_pref: dreamy folk, layered vocals
+era_pref: 2010s
+familiarity: familiar
+</user_state>
+
+EXAMPLE INPUT
+user query: "Play 'Eight Days A Week' by The Beatles, the upbeat classic from 1964."
+prior dialog: (none)
+
+EXAMPLE OUTPUT
+<user_state>
+mood: upbeat, joyful
+intent: revisit
+energy: high
+sonic_pref: pop rock, harmonised vocals
+era_pref: 1960s
+familiarity: familiar
+</user_state>
+
+RULES — strict key:value lines, no prose, no filler. Each value uses commas for lists. Begin output with `<user_state>` and end with `</user_state>`. Output nothing before or after the block.
+
+Now produce the same block for the actual conversation below.
