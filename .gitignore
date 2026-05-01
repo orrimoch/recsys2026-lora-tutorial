@@ -18,6 +18,7 @@ data/
 cache/
 output/
 lora_adapters/
+models/
 
 # Inference outputs — large (~7.5 MB per devset run), reproducible via
 # Colab. Keep scored metric JSONs (scores/) since they're small and used
