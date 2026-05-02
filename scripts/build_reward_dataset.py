@@ -102,9 +102,14 @@ def history_summary(df, turn_n: int, item_db: _LightCatalogDB) -> str:
     return "\n".join(lines)
 
 
-def build(n_sessions: int, seed: int, out_path: str, split_val: float) -> None:
-    print(f"[reward-data] loading train split")
-    tr = load_dataset("talkpl-ai/TalkPlayData-Challenge-Dataset", split="train")
+def build(n_sessions: int, seed: int, out_path: str, split_val: float, hf_split: str = "train") -> None:
+    # W7 P1 fix: parameterize the HF split so build_train_plus_dev.py can
+    # also build from `split="test"` (the dev set) without duplicating logic.
+    # Default preserves W1-W5 callers (train-only). When called with
+    # hf_split="test", split_val should be 0 (no inner train/val split — the
+    # whole dev set is one slice for the W7 retrain pass).
+    print(f"[reward-data] loading {hf_split} split")
+    tr = load_dataset("talkpl-ai/TalkPlayData-Challenge-Dataset", split=hf_split)
     rng = random.Random(seed)
     if n_sessions < len(tr):
         indices = rng.sample(range(len(tr)), n_sessions)
@@ -207,13 +212,17 @@ def main() -> int:
                    help="Max train sessions (default: 15000 = all).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out", type=str, default=str(REPO_ROOT / "data" / "reward_train.parquet"))
+    p.add_argument("--hf-split", type=str, default="train",
+                   choices=["train", "test"],
+                   help="Which HF split to read. 'train' for W1-W5 (default); "
+                        "'test' for the dev set (W7 train+dev retrain).")
     p.add_argument("--split-val", type=float, default=0.1,
                    help="Fraction of sessions held out for validation (default 0.1).")
     args = p.parse_args()
     # No chdir needed — the script no longer imports from mcrs. The previous
     # chdir was to let mcrs-relative cache paths resolve, but we've removed
     # all mcrs dependencies from this build step.
-    build(args.n_sessions, args.seed, args.out, args.split_val)
+    build(args.n_sessions, args.seed, args.out, args.split_val, hf_split=args.hf_split)
     return 0
 
 
