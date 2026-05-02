@@ -118,15 +118,22 @@ def extract_user_state(envelope_wrapped: str) -> dict[str, str]:
 # History extraction from text_a
 # ---------------------------------------------------------------------------
 
-_HISTORY_RE = re.compile(r"^Prior dialog:\s*(.+?)$", re.MULTILINE)
+# W6 review P0-4 fix: real `Prior dialog:` content from
+# build_reward_dataset.py:88-102 spans multiple lines (newline-joined
+# `role: content`). The previous lazy-non-greedy regex with MULTILINE only
+# matched the FIRST line. Use DOTALL + `\Z` end-of-string anchor so we
+# capture every line of history; collapse newlines to spaces for r_rule.
+_HISTORY_RE = re.compile(r"Prior dialog:\s*(.+)\Z", re.DOTALL)
 
 
 def extract_history_text(text_a: str) -> str:
-    """Pull the `Prior dialog: ...` line from build_reward_dataset.py text_a.
+    """Pull the full `Prior dialog: ...` block from build_reward_dataset.py text_a.
 
-    Returns "" when no such line exists. `r_rule` uses this as the
+    Returns "" when no such marker exists. `r_rule` uses this as the
     history-grounding sub-score: any ≥5-char history token appearing in
-    the response. Empty input is fine — sub-score becomes 0.
+    the response. Multi-line history (real shape — see W6 review P0-4) is
+    collapsed to a single line so the token-match is per-token, not
+    per-line.
     """
     m = _HISTORY_RE.search(text_a or "")
     if not m:
@@ -177,6 +184,7 @@ def build_grpo_dataset(
     envelope_df: pd.DataFrame,
     retrieval_df: pd.DataFrame,
     seed: int = 42,
+    system_prompt: "str | None" = None,
 ) -> tuple[pd.DataFrame, dict]:
     """Join envelope-augmented POS rows with frozen-retriever output.
 
@@ -186,11 +194,20 @@ def build_grpo_dataset(
         retrieval_df: data/trl/grpo_retrieval.parquet (notebook 32 output)
             keyed by (session_id, turn_number) with frozen retriever output.
         seed: unused today; accepted for symmetry with build_sdpo_dataset.
+        system_prompt: optional. When provided, `prompt` column is emitted
+            as a conversational list-of-message-dicts
+            (`[{"role":"system",...}, {"role":"user", text_a + rationales}]`)
+            so TRL `GRPOTrainer` auto-applies the tokenizer chat template
+            (matching the chat-templated W4/W5 init AND the eval-time
+            generation path — fixes W6 review P0-3 train/inference
+            distribution mismatch). When None, emits the legacy flat-string
+            prompt for back-compat.
 
     Returns:
         (out_df, stats). out_df has columns:
             prompt, gold_track_id, predicted_track_ids, top1_meta_json,
             user_state_json, history_text, session_id, turn_number, split.
+        `prompt` is `str` when system_prompt is None, else `list[dict]`.
         stats has counters used by the colab notebook to surface bad joins
         early (low recall, missing retrieval rows, envelope parse fail).
     """
@@ -230,10 +247,19 @@ def build_grpo_dataset(
         history_text = extract_history_text(text_a)
         rationales_block = format_rationales_block(rationales)
 
-        # Final prompt: text_a (Recommended-track + Prior dialog) + rationales block.
-        # The chat-template wrap (system prompt + user role) is applied INSIDE the
-        # colab notebook by the tokenizer's apply_chat_template — same path as W4/W5.
-        prompt = f"{text_a}\n{rationales_block}"
+        # Final prompt body: text_a (Recommended-track + Prior dialog) + rationales block.
+        prompt_body = f"{text_a}\n{rationales_block}"
+        # When a system_prompt is supplied, emit conversational form so TRL
+        # auto-applies the chat template at training time (same shape the
+        # W4/W5 init was trained on AND what the eval cell feeds at gen).
+        # Otherwise fall back to the legacy flat string for back-compat.
+        if system_prompt is not None:
+            prompt = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt_body},
+            ]
+        else:
+            prompt = prompt_body
 
         top1_meta = {
             "track_name": str(row["top1_track_name"] or ""),
@@ -274,6 +300,16 @@ def main(argv=None) -> int:
                    help="path to data/trl/grpo_retrieval.parquet (notebook 32 cell)")
     p.add_argument("--out", default=str(DEFAULT_OUT))
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--system-prompt-path", default=None,
+        help=(
+            "optional path to a system-prompt text file (e.g. roleplay.txt + "
+            "response_generation_cot_user_state.txt concatenated). When set, "
+            "the `prompt` column is emitted as conversational message-list "
+            "form so TRL auto-applies the chat template at training time "
+            "(W6 review P0-3 fix). Recommended for W6."
+        ),
+    )
     args = p.parse_args(argv)
 
     env_path = Path(args.envelope)
@@ -287,13 +323,24 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 1
 
+    system_prompt = None
+    if args.system_prompt_path:
+        sp_path = Path(args.system_prompt_path)
+        if not sp_path.exists():
+            print(f"ERROR: system-prompt file not found at {sp_path}.", file=sys.stderr)
+            return 1
+        system_prompt = sp_path.read_text(encoding="utf-8")
+        print(f"[grpo] system prompt loaded ({len(system_prompt):,} chars)")
+
     print(f"[grpo] loading envelope:  {env_path}")
     env_df = pd.read_parquet(env_path)
     print(f"[grpo] loading retrieval: {ret_path}")
     ret_df = pd.read_parquet(ret_path)
     print(f"[grpo] envelope rows: {len(env_df):,}  retrieval rows: {len(ret_df):,}")
 
-    out_df, stats = build_grpo_dataset(env_df, ret_df, seed=args.seed)
+    out_df, stats = build_grpo_dataset(
+        env_df, ret_df, seed=args.seed, system_prompt=system_prompt,
+    )
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

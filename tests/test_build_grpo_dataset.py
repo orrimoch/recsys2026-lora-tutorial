@@ -75,6 +75,57 @@ class TestRationalesBlock:
 # Envelope state extraction (Task 3)
 # ---------------------------------------------------------------------------
 
+class TestExtractHistory:
+    """W6 review P0-4 regression: real `Prior dialog:` is multi-line.
+
+    `scripts/build_reward_dataset.py:88-102` (`history_summary`) joins
+    `role: content` lines with `\\n`, so text_a contains multi-line history
+    after `Prior dialog:`. The original `_HISTORY_RE` with MULTILINE+lazy
+    `(.+?)` only captured the FIRST line — everything after was dropped,
+    silently weakening the r_rule history-grounding sub-score.
+
+    Fix: regex must read everything from `Prior dialog:` to end-of-text,
+    collapsing internal newlines to single spaces.
+    """
+    def test_single_line_history_captured(self):
+        from build_grpo_dataset import extract_history_text
+        text_a = (
+            "User query: foo\n"
+            "Goal category: bar\n"
+            "Prior dialog: looking for chill tracks"
+        )
+        out = extract_history_text(text_a)
+        assert "looking for chill tracks" in out
+
+    def test_multi_line_history_fully_captured(self):
+        from build_grpo_dataset import extract_history_text
+        text_a = (
+            "User query: more upbeat\n"
+            "Goal category: discovery\n"
+            "Prior dialog: user: I want chill folk\n"
+            "assistant: How about Bon Iver?\n"
+            "user: yes please"
+        )
+        out = extract_history_text(text_a)
+        # Every history token from the multi-line block must survive.
+        assert "user: I want chill folk" in out
+        assert "assistant: How about Bon Iver?" in out
+        assert "yes please" in out
+
+    def test_returns_empty_when_no_history_marker(self):
+        from build_grpo_dataset import extract_history_text
+        out = extract_history_text("User query: foo\nGoal category: bar")
+        assert out == ""
+
+    def test_collapses_internal_newlines_to_spaces(self):
+        from build_grpo_dataset import extract_history_text
+        text_a = "User query: q\nPrior dialog: line1\nline2\nline3"
+        out = extract_history_text(text_a)
+        # Result is on one line — no embedded newlines, content all there.
+        assert "\n" not in out
+        assert "line1" in out and "line2" in out and "line3" in out
+
+
 class TestExtractUserState:
     def test_extracts_known_keys(self):
         from build_grpo_dataset import extract_user_state
@@ -303,11 +354,69 @@ class TestBuildGrpoDataset:
         from build_grpo_dataset import build_grpo_dataset
         out1, _ = build_grpo_dataset(envelope_df, retrieval_df, seed=42)
         out2, _ = build_grpo_dataset(envelope_df, retrieval_df, seed=42)
-        cols = ["session_id", "turn_number", "prompt", "gold_track_id"]
+        cols = ["session_id", "turn_number", "gold_track_id"]
         pd.testing.assert_frame_equal(
             out1[cols].sort_values(cols).reset_index(drop=True),
             out2[cols].sort_values(cols).reset_index(drop=True),
         )
+
+
+class TestConversationalPrompt:
+    """W6 review P0-3 regression: training and eval distributions must match.
+
+    Without a system prompt at training time, the policy learns one prompt
+    distribution while eval (cell 14) feeds chat-templated [system, user]
+    messages — train/inference mismatch. TRL `GRPOTrainer` auto-applies
+    apply_chat_template ONLY when prompts arrive as conversational
+    list-of-message-dicts. We support both forms:
+      - flat string (back-compat): `system_prompt=None`
+      - conversational list[dict]: `system_prompt="..."` → auto-templated by TRL.
+    """
+    def test_flat_prompt_when_no_system_prompt(self, envelope_df, retrieval_df):
+        from build_grpo_dataset import build_grpo_dataset
+        out, _ = build_grpo_dataset(envelope_df, retrieval_df, system_prompt=None)
+        sess_a = out[out["session_id"] == "sess_a"].iloc[0]
+        # Back-compat: prompt is a plain string.
+        assert isinstance(sess_a["prompt"], str)
+        assert "<reranker_rationales>" in sess_a["prompt"]
+
+    def test_conversational_prompt_with_system_prompt(self, envelope_df, retrieval_df):
+        from build_grpo_dataset import build_grpo_dataset
+        out, _ = build_grpo_dataset(
+            envelope_df, retrieval_df,
+            system_prompt="You are a helpful music assistant.",
+        )
+        sess_a = out[out["session_id"] == "sess_a"].iloc[0]
+        # Conversational form: list of message dicts so TRL applies chat template.
+        msgs = sess_a["prompt"]
+        # parquet roundtrip turns nested lists into numpy arrays — accept either.
+        msgs = list(msgs)
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        assert msgs[0]["content"] == "You are a helpful music assistant."
+        assert msgs[1]["role"] == "user"
+        # User content carries the full text_a + rationales block.
+        assert "Recommended track: Holocene" in msgs[1]["content"]
+        assert "<reranker_rationales>" in msgs[1]["content"]
+        assert "1. matches reflective mood" in msgs[1]["content"]
+
+    def test_conversational_prompt_parquet_roundtrip(
+        self, envelope_df, retrieval_df, tmp_path,
+    ):
+        from build_grpo_dataset import build_grpo_dataset
+        out, _ = build_grpo_dataset(
+            envelope_df, retrieval_df,
+            system_prompt="SYS",
+        )
+        p = tmp_path / "grpo_conv.parquet"
+        out.to_parquet(p, index=False)
+        re_read = pd.read_parquet(p)
+        sess_a = re_read[re_read["session_id"] == "sess_a"].iloc[0]
+        # After parquet roundtrip, msgs may come back as a numpy array of dicts —
+        # convert to list-of-dicts for downstream TRL Dataset.from_pandas.
+        msgs = [dict(m) for m in sess_a["prompt"]]
+        assert msgs[0]["role"] == "system"
+        assert msgs[1]["role"] == "user"
 
 
 # ---------------------------------------------------------------------------
