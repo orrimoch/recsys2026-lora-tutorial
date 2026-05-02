@@ -245,37 +245,161 @@ def r_format(text: str) -> float:
 def r_judge_stub(*args, **kwargs) -> float:
     """Placeholder for the local distilled cross-encoder judge.
 
-    The real implementation loads music-crs-baselines/mcrs/response_rerankers/
-    reward_reranker.py and scores (context, response). Returns 0.0 here so callers
-    can compose without forcing a model load during the W1 correlation study.
+    Returns 0.0 unconditionally — kept as a back-compat fallback for tests
+    and pre-judge code paths. Real callers should use `DistilledJudge`
+    (below) once a checkpoint is trained via `scripts/train_distilled_judge.py`.
     """
     return 0.0
+
+
+class DistilledJudge:
+    """Lazy-loading runtime wrapper around a trained distilled cross-encoder.
+
+    Replaces `r_judge_stub` in the W6/W7 GRPO reward closure (Option B
+    refactor). The model is a regression cross-encoder trained on
+    `data/reward_calibration_anchors.parquet` to predict a [0,1]-normalized
+    judge score. See `scripts/train_distilled_judge.py` for training.
+
+    Lazy load: the model is NOT pulled from Hub until the first `score()`
+    call. This keeps test imports cheap and lets the W6 reward closure
+    instantiate the judge at trainer-init time without an immediate Hub
+    download.
+
+    Graceful degradation: when `checkpoint=None`, `score()` returns 0.0 —
+    same behavior as the legacy stub. Lets all 297 existing tests pass
+    without a checkpoint installed and lets pre-W7 code paths use the same
+    interface as post-W7 code.
+    """
+
+    def __init__(
+        self,
+        checkpoint: "str | None" = None,
+        max_length: int = 512,
+        device: "str | None" = None,
+    ) -> None:
+        self.checkpoint = checkpoint
+        self.max_length = int(max_length)
+        self._device = device
+        self._model = None
+        self._tokenizer = None
+        # Score cache — keyed by (context, response) hash. GRPO rollouts
+        # often see the same (prompt, completion) twice during evaluation;
+        # deduping there saves ~30-50% of judge-forward-pass time.
+        self._cache: dict[int, float] = {}
+
+    def _ensure_loaded(self) -> bool:
+        """Load model + tokenizer on first call. Returns False if no checkpoint
+        was configured (graceful no-op path)."""
+        if self.checkpoint is None:
+            return False
+        if self._model is not None:
+            return True
+        try:
+            import torch
+            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        except ImportError:
+            # Test environment without torch installed — silently degrade.
+            return False
+        if self._device is None:
+            self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._tokenizer = AutoTokenizer.from_pretrained(self.checkpoint)
+        self._model = AutoModelForSequenceClassification.from_pretrained(
+            self.checkpoint,
+        ).to(self._device).eval()
+        return True
+
+    def score(self, context: str, response: str) -> float:
+        """Score a single (context, response) pair, returning a float in [0, 1].
+
+        When no checkpoint is configured (or torch is unavailable), returns
+        0.0 — preserves stub semantics for back-compat.
+        """
+        if not self._ensure_loaded():
+            return 0.0
+        key = hash((context, response))
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        import torch  # safe — _ensure_loaded already imported it
+        with torch.no_grad():
+            enc = self._tokenizer(
+                context, response,
+                truncation=True, padding=True,
+                max_length=self.max_length, return_tensors="pt",
+            ).to(self._device)
+            logits = self._model(**enc).logits  # (1, 1) regression head
+            raw = float(logits.squeeze().cpu().item())
+        # Clamp to [0, 1] in case the regression head over/under-shoots.
+        raw = max(0.0, min(1.0, raw))
+        self._cache[key] = raw
+        return raw
+
+    def score_batch(
+        self, contexts: "list[str]", responses: "list[str]",
+        batch_size: int = 16,
+    ) -> "list[float]":
+        """Batched score for a list of (context, response) pairs.
+
+        Same back-compat: returns a list of 0.0s when no checkpoint is
+        configured. Useful for the W6 reward closure which receives a list
+        of completions per group.
+        """
+        if not self._ensure_loaded():
+            return [0.0] * len(contexts)
+        out: list[float] = []
+        import torch
+        for start in range(0, len(contexts), batch_size):
+            batch_ctx = contexts[start:start + batch_size]
+            batch_resp = responses[start:start + batch_size]
+            with torch.no_grad():
+                enc = self._tokenizer(
+                    batch_ctx, batch_resp,
+                    truncation=True, padding=True,
+                    max_length=self.max_length, return_tensors="pt",
+                ).to(self._device)
+                logits = self._model(**enc).logits  # (B, 1)
+                vals = logits.squeeze(-1).cpu().tolist()
+            for v in vals:
+                v = max(0.0, min(1.0, float(v)))
+                out.append(v)
+        return out
 
 
 # ---------------------------------------------------------------------------
 # Composition
 # ---------------------------------------------------------------------------
 
-# Weights from RecSys_Challenge_Plan §6.1, REVISED post-W1 (Option B).
+# Weights — Option B refactor (W6 review follow-up, 2026-05-02).
 #
-# Original (pre-W1):  R_retr=0.50  R_judge=0.20  R_rule=0.20  R_format=0.05  R_user_prof=0.05
-# Revised (Option B): R_retr=0.70  R_judge=0.10  R_rule=0.15  R_format=0.05  R_user_prof=0.00
+# v0 (pre-W1):       R_retr=0.50  R_judge=0.20  R_rule=0.20  R_format=0.05  R_user_prof=0.05
+# v1 (Option A, W1): R_retr=0.70  R_judge=0.10  R_rule=0.15  R_format=0.05  R_user_prof=0.00
+# v2 (Option B, NOW): R_retr=0.40 R_judge=0.30 R_rule=0.15 R_format=0.10 R_user_prof=0.05
 #
-# Rationale (see data/reward_gate_results.json):
-#   - W1 gate empirically falsified that R_rule predicts GPA labels on gold data
-#     (Spearman 0.012, AUC 0.507 — random). R_rule mass-shifted to R_retr.
-#   - R_user_prof had mean 0.009 on gold data — gold assistants never mention
-#     user country/age/gender. Term dropped (kept callable for future analysis).
-#   - R_judge weight kept low (0.10) with trust-gating until cross-encoder
-#     calibrated against an external signal (Blind-B scores, future Gemini API).
-#   - R_retr weight raised to 0.70 because Source B sanity confirmed it IS the
-#     leaderboard nDCG term (Spearman = 1.0) and Source C confirmed nDCG term
-#     dominates the leaderboard composite (max delta 0.005).
-W_RETR = 0.70
-W_JUDGE = 0.10
+# Rationale for Option B:
+#   - **R_retr 0.70 → 0.40**: in W6 GRPO with a frozen retriever, R_retr is
+#     constant per row → cancels in advantage normalization → 0 gradient.
+#     Halving its weight reclaims room for terms that DO move during rollouts.
+#     Still significant for offline eval / leaderboard alignment.
+#   - **R_judge 0.10 → 0.30**: with the distilled cross-encoder judge now
+#     trainable from data/reward_calibration_anchors.parquet (210k anchors),
+#     R_judge becomes the closest-available proxy for the actual Gemini judge
+#     used on Blind-A/B. This is the largest semantically-rich gradient term.
+#   - **R_rule 0.15 → 0.15**: unchanged. W1 found AUC 0.51 vs Gemini (random),
+#     but it's free, mechanical, and discriminates well-formed-vs-degraded
+#     responses (Source D). Useful as a regularizer, not a primary signal.
+#   - **R_format 0.05 → 0.10**: raised to keep envelope-fluency anchored
+#     after W4 KTO. Format compliance is the gate that lets the responder
+#     emit parseable structured output for the Personalization mention.
+#   - **R_user_prof 0.00 → 0.05**: recovered. Personalization is one of the
+#     two Gemini-judge axes per project_blind_judge_gemini memory; W1 found
+#     gold assistants don't mention user_profile (mean 0.009), but W6's
+#     ON-POLICY rollouts CAN learn to mention it once we reward it. Small
+#     weight (0.05) so the model doesn't degenerate into name-checking.
+W_RETR = 0.40
+W_JUDGE = 0.30
 W_RULE = 0.15
-W_FORMAT = 0.05
-W_USER_PROF = 0.00
+W_FORMAT = 0.10
+W_USER_PROF = 0.05
 
 
 def compose_r_turn(
@@ -290,11 +414,17 @@ def compose_r_turn(
     judge_score: Optional[float] = None,
     judge_trust: float = 1.0,
     include_format: bool = True,
+    group_responses: Optional[Sequence[str]] = None,
 ) -> dict[str, float]:
     """Compute R_turn and components.
 
     Hard guards (return R_turn=0.0):
         - any predicted_track_id ∉ valid_catalog (if valid_catalog provided)
+
+    `group_responses` (W6-review Option B): when provided with > 1 element,
+    adds a small intra-rollout diversity bonus computed via
+    `lex_div_distinct2`. This wires the conversation-data signal that
+    `compose_r_session` codified but never reached training. Cap: +0.05.
 
     Returns dict with all sub-scores so callers can analyse component-wise.
     """
@@ -323,6 +453,20 @@ def compose_r_turn(
             + W_USER_PROF * rp
         )
 
+    # Intra-rollout diversity bonus (Option B refactor: wires
+    # compose_r_session.lex_div into per-prompt training signal). Only
+    # fires when caller passes > 1 peer responses (G > 1 in GRPO).
+    r_lex_div_group = 0.0
+    if group_responses is not None and len(group_responses) > 1:
+        r_lex_div_group = min(lex_div_distinct2(list(group_responses)), 1.0)
+        # Additive bonus capped at +0.05 — keeps the diversity signal a
+        # tie-breaker, NOT a primary objective. Prevents the responder from
+        # learning "diverge wildly across rollouts to maximize lex_div".
+        # Hard-zero rows (broken format / catalog) still get 0 — bonus is
+        # only added on top of a non-zero base r_turn.
+        if r_turn > 0.0:
+            r_turn = r_turn + 0.05 * r_lex_div_group
+
     return {
         "r_turn": r_turn,
         "r_retr": rr,
@@ -330,6 +474,7 @@ def compose_r_turn(
         "r_user_prof": rp,
         "r_format": rf,
         "r_judge": rj,
+        "r_lex_div_group": r_lex_div_group,
         "catalog_ok": float(catalog_ok),
     }
 

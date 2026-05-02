@@ -322,14 +322,132 @@ class TestComposeRSession:
 # ---------------------------------------------------------------------------
 
 class TestWeights:
-    def test_weights_match_option_b(self):
-        # Plan §6.1 Option B revision (W1 fallback).
-        assert rf.W_RETR == 0.70
-        assert rf.W_JUDGE == 0.10
+    def test_weights_match_option_b_v2(self):
+        # W6-review Option B refactor: redirected mass from R_retr (which
+        # has 0 gradient under frozen retriever) to R_judge (now trainable
+        # via DistilledJudge) and recovered R_user_prof for Personalization.
+        assert rf.W_RETR == 0.40
+        assert rf.W_JUDGE == 0.30
         assert rf.W_RULE == 0.15
-        assert rf.W_FORMAT == 0.05
-        assert rf.W_USER_PROF == 0.00
+        assert rf.W_FORMAT == 0.10
+        assert rf.W_USER_PROF == 0.05
 
     def test_weights_sum_to_one(self):
         total = rf.W_RETR + rf.W_JUDGE + rf.W_RULE + rf.W_FORMAT + rf.W_USER_PROF
         assert abs(total - 1.0) < 1e-9
+
+
+class TestGroupResponsesBonus:
+    """W6-review Option B refactor: compose_r_turn accepts an optional
+    `group_responses` kwarg so the reward closure can pass the G peer
+    rollouts of the same prompt and get a diversity bonus.
+
+    This is the conversation-data signal we couldn't extract before —
+    `compose_r_session.lex_div_distinct2` was defined but never wired into
+    training. Now wired as a small additive bonus (max +0.05 to r_turn).
+    """
+    def test_no_group_responses_no_bonus(self):
+        comps = rf.compose_r_turn(
+            predicted_track_ids=["a"], gold_track_id="a",
+            response_text="<user_state>mood: calm</user_state><response>x</response>",
+        )
+        # Without group_responses, no bonus key OR key is 0.0.
+        assert comps.get("r_lex_div_group", 0.0) == 0.0
+
+    def test_high_diversity_yields_bonus(self):
+        envelope = lambda body: f"<user_state>mood: calm</user_state><response>{body}</response>"
+        diverse_group = [
+            envelope("Holocene by Bon Iver leans into a layered arrangement"),
+            envelope("Skinny Love builds slowly with sparse instrumentation"),
+            envelope("Re: Stacks features stripped-back acoustic guitar"),
+            envelope("Wash your house in flooding atmospheric layers"),
+        ]
+        comps = rf.compose_r_turn(
+            predicted_track_ids=["a"], gold_track_id="a",
+            response_text=diverse_group[0],
+            group_responses=diverse_group,
+        )
+        assert comps["r_lex_div_group"] > 0.5  # very diverse → close to 1.0
+        # Bonus is added on top of the base r_turn (which is non-zero
+        # because format passes and r_rule fires on at least envelope-mention).
+
+    def test_identical_group_low_diversity(self):
+        # When all 4 rollouts produced the same text, the joined token
+        # stream's distinct-2 ratio is low (most bigrams repeat). Verify
+        # the bonus stays bounded — never exceeds the [0,1] clamp on
+        # r_lex_div_group, and the additive bonus to r_turn is at most 0.05.
+        envelope = "<user_state>mood: calm</user_state><response>same text always</response>"
+        comps = rf.compose_r_turn(
+            predicted_track_ids=["a"], gold_track_id="a",
+            response_text=envelope,
+            group_responses=[envelope] * 4,
+        )
+        # r_lex_div_group is the raw lex_div (capped at 1.0).
+        assert 0.0 <= comps["r_lex_div_group"] <= 1.0
+        # Identical responses → diversity should be much less than half.
+        assert comps["r_lex_div_group"] < 0.5
+
+    def test_singleton_group_no_bonus(self):
+        # group_responses with 1 element → no peers → no bonus.
+        envelope = "<user_state>mood: calm</user_state><response>only one</response>"
+        comps = rf.compose_r_turn(
+            predicted_track_ids=["a"], gold_track_id="a",
+            response_text=envelope,
+            group_responses=[envelope],
+        )
+        assert comps.get("r_lex_div_group", 0.0) == 0.0
+
+
+class TestDistilledJudge:
+    """W6-review Option B: DistilledJudge replaces r_judge_stub.
+
+    Tests the back-compat (no-checkpoint) path because GPU/torch isn't
+    available in CI. The actual model-load path is exercised by
+    integration runs after a checkpoint is trained on Colab.
+    """
+
+    def test_no_checkpoint_returns_zero(self):
+        judge = rf.DistilledJudge(checkpoint=None)
+        assert judge.score("any context", "any response") == 0.0
+
+    def test_no_checkpoint_batch_returns_zeros(self):
+        judge = rf.DistilledJudge(checkpoint=None)
+        scores = judge.score_batch(["c1", "c2", "c3"], ["r1", "r2", "r3"])
+        assert scores == [0.0, 0.0, 0.0]
+
+    def test_score_returns_float_in_unit_interval(self):
+        # With no checkpoint: 0.0 (a valid float in [0, 1]).
+        judge = rf.DistilledJudge()
+        s = judge.score("ctx", "resp")
+        assert isinstance(s, float)
+        assert 0.0 <= s <= 1.0
+
+    def test_score_batch_length_matches_input(self):
+        judge = rf.DistilledJudge()
+        ctxs = ["a"] * 5
+        resps = ["b"] * 5
+        out = judge.score_batch(ctxs, resps)
+        assert len(out) == len(ctxs)
+
+    def test_cache_does_not_explode_no_checkpoint(self):
+        # Sanity: repeated calls don't allocate the cache when degrading.
+        judge = rf.DistilledJudge()
+        for _ in range(50):
+            judge.score("x", "y")
+        assert len(judge._cache) == 0  # cache only populated when model loads
+
+    def test_compose_r_turn_accepts_distilled_judge_score(self):
+        # Wire-through smoke: the closure pattern in colab/32 cell 11 will
+        # call judge.score(ctx, completion) and pass the result into
+        # compose_r_turn(judge_score=...). Verify compose_r_turn handles a
+        # plain float (back-compat) and that the weight refactor is intact.
+        judge = rf.DistilledJudge()
+        score = judge.score("ctx", "resp")
+        comps = rf.compose_r_turn(
+            predicted_track_ids=["a"], gold_track_id="a",
+            response_text="<user_state>mood: calm</user_state><response>x</response>",
+            judge_score=score,
+        )
+        assert "r_turn" in comps
+        assert comps["r_judge"] == 0.0  # no checkpoint → judge contributes 0
+

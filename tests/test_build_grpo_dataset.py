@@ -474,7 +474,10 @@ class TestRewardFnCompat:
         )
         assert "r_turn" in comps
         assert comps["r_retr"] == 1.0
-        assert comps["r_turn"] >= 0.70
+        # Option B weights: 0.40·R_retr + 0.30·R_judge + 0.15·R_rule + 0.10·R_format + 0.05·R_user_prof.
+        # R_retr=1.0 alone contributes 0.40 to the floor; rule/format add more.
+        # Threshold 0.50 accommodates the new weights (was 0.70 under v1 weights).
+        assert comps["r_turn"] >= 0.50
 
 
 class TestMainCli:

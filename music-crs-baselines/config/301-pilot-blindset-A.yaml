@@ -1,0 +1,58 @@
+# Pilot Blind-A submission config — uses the W6-pilot merged 7B (or any
+# W4/W5/W6 merged repo via lm_type) over the full Component-A pipeline.
+#
+# Per the corrected timeline (`project_blind_judge_gemini` memory): Blind-A
+# remains the live Gemini-judge signal source until 2026-06-23 (Blind-B
+# release). We submit Blind-A predictions weekly to:
+#   1. Get real Gemini-aligned scores back from CodaBench.
+#   2. Calibrate the distilled-judge cross-encoder (replace W1's anchor-only
+#      target with actual Gemini judgments on our own outputs).
+#   3. Validate that the Component-B refactor (Option B) is converging the
+#      right way before spending Blind-B slots after Jun 23.
+#
+# To use:
+#   1. Run colab/31p_pilot_grpo_with_judge.ipynb (PASS gate) → produces
+#      orrimoch/recsys2026-b3-grpo-pilot-{date}-merged.
+#   2. Replace `PLACEHOLDER` below with that merged_hub_model.
+#   3. Run inference: `python run_inference_blindset.py --tid 301-pilot-blindset-A --eval_dataset blindset_A`.
+#   4. Validate + package with --split blindA.
+lm_type: "orrimoch/recsys2026-b3-grpo-pilot-PLACEHOLDER-merged"
+lora_path: null
+lora_max_rank: 32
+
+retrieval_type: "wrrf_bm25_dense_lyrics_v1"
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+retrieval_topk: 100
+reranker_type: "pro_rank"
+
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 320
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw"
+
+use_vllm: true
+
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+use_cmqr: true
+cmqr_prompt_name: "cmqr_rewrites"
+cmqr_n_rewrites: 4
+cmqr_topk_per_rewrite: 50
+cmqr_rrf_k: 60
+cmqr_max_new_tokens: 96

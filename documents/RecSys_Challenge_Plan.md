@@ -12,9 +12,9 @@ score = 0.50 · nDCG@20  +  0.10 · CatDiv  +  0.10 · LexDiv  +  0.30 · (LLM_j
 
 `LLM_judge` = closed Google **Gemini** scoring `predicted_response`. CatDiv and LexDiv are saturated; **the headroom is in nDCG@20 (~0.50 weight) and Gemini-judge (~0.30 weight)**.
 
-**Today: 2026-05-01. Timeline:**
-- Apr 10 → Jun 30: Blind-A active (8/8 used; exhausted since exp 029 was rejected on Apr 28).
-- **Jun 15: Blind-B opens** (fresh budget — our real shot).
+**Today: 2026-05-02. Timeline:**
+- Apr 10 → **Jun 23: Blind-A active**. The earlier "8/8 used; exhausted" claim was a misread: per-team weekly cap is the operational limit (3/week per `scripts/validate_prediction.py:172`), NOT a hard team budget. Blind-A is a live Gemini-judge signal source we should USE — submit W4-W7 dry-runs against it for cheap calibration before Blind-B opens.
+- **Jun 23: Blind-B releases.**
 - Jun 30: Challenge ends. Jul 9: Final code submission. Jul 20: Paper.
 
 **Current champion:** exp 021 (`wRRF[BM25 4-field + dense-metadata-Qwen3 + dense-lyrics-Qwen3]` + Qwen-2.5-1.5B-Instruct + stock prompt). Composite ~0.33, nDCG@20 ~0.19, Gemini judge ~3.15. Every Blind-A variant since (022–029) regressed because Qwen-1.5B exhibits **structural-directive collapse** — any prompt structure trades grounding for diversity, Gemini punishes by ~−0.9 to −1.05.
