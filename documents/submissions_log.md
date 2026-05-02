@@ -16,6 +16,8 @@ line, so put the date first if there could be ambiguity.
 
 (none yet — log starts post deep-review fix wave 2026-05-02)
 
-<!-- Example row (uncomment and fill on each upload):
-2026-05-09 [blindA] tid=301-pilot-blindset-A stage=W6-pilot score=3.20 ndcg20=0.21
+<!-- Example row format (do NOT include a real date — the validator's
+_DATE_RE does not understand HTML comments and would count it against
+the weekly cap):
+YYYY-MM-DD [blindA] tid=301-pilot-blindset-A stage=W6-pilot score=3.20 ndcg20=0.21
 -->

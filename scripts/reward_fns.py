@@ -332,10 +332,14 @@ class DistilledJudge:
         When no checkpoint is configured (or torch is unavailable), returns
         0.0 — preserves stub semantics for back-compat.
 
-        Deep-review P1-2 fix: the regression head is trained with MSE on
-        [0,1] targets without an explicit sigmoid in the model. We apply
-        torch.sigmoid here to map the unbounded logit through a smooth
-        boundary, then clamp as a safety net.
+        Calibration note (sanity-pass P1 finding): the regression head is
+        trained with `problem_type="regression"` + MSE loss DIRECTLY against
+        [0,1] labels — there is no sigmoid in the loss path. The head's
+        raw logits are already calibrated to the [0,1] range. Applying
+        sigmoid at inference would squash a calibrated 0.0 → 0.5, 1.0 →
+        0.731, collapsing the dynamic range ~3×. So we DO NOT apply
+        sigmoid; the [0,1] clamp is the safety net for occasional out-of-
+        band predictions.
         """
         if not self._ensure_loaded():
             return 0.0
@@ -351,9 +355,9 @@ class DistilledJudge:
                 max_length=self.max_length, return_tensors="pt",
             ).to(self._device)
             logits = self._model(**enc).logits  # (1, 1) regression head
-            # P1-2: smooth squash via sigmoid before the safety clamp.
-            raw = float(torch.sigmoid(logits.squeeze()).cpu().item())
-        # Clamp as a final safety net; should be a no-op after sigmoid.
+            # No sigmoid — see calibration note in the docstring.
+            raw = float(logits.squeeze().cpu().item())
+        # Clamp [0, 1] as the safety net for occasional out-of-band logits.
         raw = max(0.0, min(1.0, raw))
         self._cache[key] = raw
         return raw
@@ -382,8 +386,9 @@ class DistilledJudge:
                     max_length=self.max_length, return_tensors="pt",
                 ).to(self._device)
                 logits = self._model(**enc).logits  # (B, 1)
-                # P1-2: sigmoid → [0, 1] before clamp.
-                vals = torch.sigmoid(logits.squeeze(-1)).cpu().tolist()
+                # No sigmoid — model is regression-trained against [0,1] labels
+                # directly; sigmoid at inference would collapse calibration.
+                vals = logits.squeeze(-1).cpu().tolist()
             for v in vals:
                 v = max(0.0, min(1.0, float(v)))
                 out.append(v)
