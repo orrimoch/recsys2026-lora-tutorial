@@ -399,26 +399,29 @@ class DistilledJudge:
 # Composition
 # ---------------------------------------------------------------------------
 
-# Weights — Option B refactor v3 (post deep-review, 2026-05-02).
+# Weights — Option B refactor v4 (gap-analysis Step 3 user_profile pipe).
 #
 # v0 (pre-W1):       R_retr=0.50  R_judge=0.20  R_rule=0.20  R_format=0.05  R_user_prof=0.05
 # v1 (Option A, W1): R_retr=0.70  R_judge=0.10  R_rule=0.15  R_format=0.05  R_user_prof=0.00
 # v2 (Option B):     R_retr=0.40  R_judge=0.30  R_rule=0.15  R_format=0.10  R_user_prof=0.05
-# v3 (NOW, P1-6 fix): R_retr=0.40 R_judge=0.30 R_rule=0.20 R_format=0.10 R_user_prof=0.00
+# v3 (P1-6 honesty): R_retr=0.40  R_judge=0.30  R_rule=0.20  R_format=0.10  R_user_prof=0.00
+# v4 (NOW):          R_retr=0.40  R_judge=0.30  R_rule=0.15  R_format=0.10  R_user_prof=0.05
 #
-# Rationale for v3 (deep-review P1-6 honesty fix):
-#   - W_USER_PROF 0.05 → 0.00: the data path doesn't exist. build_reward_dataset
-#     does NOT propagate `country_name`/`age_group`/`gender`, so build_grpo_dataset
-#     can't emit a user_profile column, so the reward closure can't pass it. The
-#     0.05 weight in v2 was permanently dead. Honest fix: drop to 0.00 and shift
-#     the 0.05 to W_RULE (next-most-discriminating mechanical term per W1).
-#     Re-add to 0.05+ only after a follow-up commit pipes user_profile end-to-end.
-#   - Other v2 rationales unchanged (see git history for full v0/v1/v2 notes).
+# Rationale for v4 (gap-analysis Step 3):
+#   - W_USER_PROF 0.00 → 0.05 RESTORED. The data path is now wired end-to-end
+#     (`build_reward_dataset.py` looks up user from User-Metadata DB and emits
+#     `user_profile_json`; `build_grpo_dataset.py` carries it through;
+#     reward closures in colab/31p/32/33 JSON-decode and pass it). With the
+#     data piped, R_user_prof can carry actual Personalization gradient
+#     (one of the two Gemini judge axes per project_blind_judge_gemini).
+#   - W_RULE 0.20 → 0.15: shift the 0.05 back from rule (where v3 parked it)
+#     to user_prof. Rule is mechanical regex with AUC 0.51 vs Gemini (W1);
+#     under-weighting it slightly is a feature, not a regression.
 W_RETR = 0.40
 W_JUDGE = 0.30
-W_RULE = 0.20
+W_RULE = 0.15
 W_FORMAT = 0.10
-W_USER_PROF = 0.00
+W_USER_PROF = 0.05
 
 
 def compose_r_turn(

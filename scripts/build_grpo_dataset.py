@@ -156,6 +156,10 @@ def extract_history_text(text_a: str) -> str:
 # ---------------------------------------------------------------------------
 
 ENVELOPE_REQUIRED = {"text_a", "text_b", "label", "session_id", "turn_number"}
+# `user_profile_json` is OPTIONAL in the envelope schema for back-compat with
+# parquets built before gap-analysis Step 3. When present, build_grpo_dataset
+# carries it through; when absent, downstream emits empty JSON ("{}") and
+# r_user_prof contributes 0.
 RETRIEVAL_REQUIRED = {
     "session_id", "turn_number",
     "gold_track_id", "predicted_track_ids",
@@ -290,12 +294,19 @@ def build_grpo_dataset(
         if gold and gold in predicted:
             stats["gold_in_predicted"] += 1
 
+        # Carry user_profile_json from envelope when present (gap-analysis
+        # Step 3). When absent (older parquets), emit empty JSON so the
+        # reward closure's json.loads doesn't crash and r_user_prof gets 0.
+        user_profile_json = row.get("user_profile_json")
+        if user_profile_json is None or pd.isna(user_profile_json):
+            user_profile_json = "{}"
         out_rows.append({
             "prompt": prompt,
             "gold_track_id": gold,
             "predicted_track_ids": predicted,
             "top1_meta_json": json.dumps(top1_meta, ensure_ascii=False),
             "user_state_json": json.dumps(user_state, ensure_ascii=False),
+            "user_profile_json": str(user_profile_json),
             "history_text": history_text,
             "session_id": row["session_id"],
             "turn_number": int(row["turn_number"]),

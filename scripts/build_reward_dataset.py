@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import random
 import sys
@@ -48,6 +49,31 @@ class _LightCatalogDB:
         ds = load_dataset(dataset_name)
         concat = concatenate_datasets([ds[s] for s in split_types])
         self.metadata_dict = {item["track_id"]: item for item in concat}
+
+
+class _LightUserDB:
+    """Minimal user-profile lookup, mirrors `mcrs/db_user/user_profile.py`.
+
+    Lives here (not imported from mcrs) so build_reward_dataset.py keeps its
+    minimal-deps property (datasets + pandas + tqdm; no mcrs cascade).
+    Schema: {user_id, age_group, gender, country_name}.
+
+    Used by gap-analysis Step 3 to pipe user_profile through the reward
+    pipeline so W_USER_PROF can be re-enabled at training time.
+    """
+    PROFILE_KEYS = ("country_name", "age_group", "gender")
+
+    def __init__(self, dataset_name: str, split_types: list[str]) -> None:
+        ds = load_dataset(dataset_name)
+        concat = concatenate_datasets([ds[s] for s in split_types])
+        self.user_profiles = {item["user_id"]: item for item in concat}
+
+    def lookup(self, user_id: str) -> dict:
+        """Return {country_name, age_group, gender} dict for `user_id`.
+        Missing user → all empty strings (graceful degradation; r_user_prof
+        treats empty strings as "no signal" and contributes 0)."""
+        prof = self.user_profiles.get(user_id, {})
+        return {k: str(prof.get(k) or "") for k in self.PROFILE_KEYS}
 
 
 LABEL_POS = "MOVES_TOWARD_GOAL"
@@ -124,6 +150,14 @@ def build(n_sessions: int, seed: int, out_path: str, split_val: float, hf_split:
         ["all_tracks"],
     )
 
+    # Step 3 of gap-analysis follow-up: load user_db so we can emit
+    # user_profile_json per row → unblocks R_user_prof at training.
+    print(f"[reward-data] loading user_db")
+    user_db = _LightUserDB(
+        "talkpl-ai/TalkPlayData-Challenge-User-Metadata",
+        ["all_users"],
+    )
+
     rows = []
     skipped_none = 0
     skipped_missing = 0
@@ -176,6 +210,7 @@ def build(n_sessions: int, seed: int, out_path: str, split_val: float, hf_split:
             ]
             text_a = "\n".join(p for p in text_a_parts if p)
 
+            user_profile = user_db.lookup(sess["user_id"])
             rows.append({
                 "text_a": text_a,
                 "text_b": response,
@@ -184,6 +219,10 @@ def build(n_sessions: int, seed: int, out_path: str, split_val: float, hf_split:
                 "user_id": sess["user_id"],
                 "turn_number": tn,
                 "goal_category": goal_category,
+                # W_USER_PROF re-enable (gap-analysis Step 3). JSON-encoded
+                # so the augment_envelope strict-equality column check
+                # passes through unchanged and downstream builders carry it.
+                "user_profile_json": json.dumps(user_profile, ensure_ascii=False),
             })
 
     df_out = pd.DataFrame(rows)

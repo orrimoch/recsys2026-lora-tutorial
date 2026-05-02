@@ -322,16 +322,16 @@ class TestComposeRSession:
 # ---------------------------------------------------------------------------
 
 class TestWeights:
-    def test_weights_match_option_b_v3(self):
-        # W1-W8 review P1-6 honesty fix: drop W_USER_PROF to 0.0 since the
-        # data path (user_profile from User-Metadata DB) is not piped through
-        # build_reward_dataset → build_grpo_dataset → reward closure. Re-add
-        # to W_RULE since it's the next-most-discriminating term per W1.
+    def test_weights_match_option_b_v4(self):
+        # Gap-analysis Step 3: data path piped end-to-end (build_reward_dataset
+        # extracts user_profile_json from User-Metadata DB, build_grpo_dataset
+        # carries through, reward closures pass user_profile=). Restored
+        # W_USER_PROF=0.05 with W_RULE 0.20→0.15.
         assert rf.W_RETR == 0.40
         assert rf.W_JUDGE == 0.30
-        assert rf.W_RULE == 0.20
+        assert rf.W_RULE == 0.15
         assert rf.W_FORMAT == 0.10
-        assert rf.W_USER_PROF == 0.00
+        assert rf.W_USER_PROF == 0.05
 
     def test_weights_sum_to_one(self):
         total = rf.W_RETR + rf.W_JUDGE + rf.W_RULE + rf.W_FORMAT + rf.W_USER_PROF

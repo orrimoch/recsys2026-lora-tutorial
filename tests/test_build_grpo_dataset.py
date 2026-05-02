@@ -215,6 +215,7 @@ def envelope_df():
                           "Holocene by Bon Iver leans into a layered arrangement."),
             "label": 1, "session_id": "sess_a", "user_id": "u1",
             "turn_number": 1, "split": "train",
+            "user_profile_json": '{"country_name": "Norway", "age_group": "30s", "gender": "F"}',
         },
         {
             "text_a": ("User query: 90s grunge\n"
@@ -318,6 +319,40 @@ class TestBuildGrpoDataset:
         sess_a = out[out["session_id"] == "sess_a"].iloc[0]
         state = json.loads(sess_a["user_state_json"])
         assert state == {"mood": "reflective", "energy": "low"}
+
+    def test_user_profile_json_carried_through(self, envelope_df, retrieval_df):
+        """Gap-analysis Step 3: user_profile_json flows through the join.
+        When the envelope row has it, build_grpo_dataset preserves it
+        verbatim so the reward closure can JSON-decode and pass to r_user_prof.
+        """
+        from build_grpo_dataset import build_grpo_dataset
+        out, _ = build_grpo_dataset(envelope_df, retrieval_df)
+        sess_a = out[out["session_id"] == "sess_a"].iloc[0]
+        profile = json.loads(sess_a["user_profile_json"])
+        assert profile == {"country_name": "Norway", "age_group": "30s", "gender": "F"}
+
+    def test_user_profile_json_empty_when_absent(self, retrieval_df):
+        """Back-compat: older envelope parquets don't have user_profile_json.
+        build_grpo_dataset must emit an empty JSON object ('{}') so the
+        reward closure's json.loads doesn't crash and r_user_prof gets 0.
+        """
+        from build_grpo_dataset import build_grpo_dataset
+        # Envelope without user_profile_json column.
+        def env(state, response):
+            return f"<user_state>\n{state}\n</user_state>\n<response>\n{response}\n</response>"
+        legacy = pd.DataFrame([{
+            "text_a": ("User query: x\nGoal category: y\n"
+                       "Recommended track: T by A\nPrior dialog: hist"),
+            "text_b": env("mood: calm", "Some response."),
+            "label": 1, "session_id": "sess_a", "user_id": "u1",
+            "turn_number": 1, "split": "train",
+        }])
+        out, _ = build_grpo_dataset(legacy, retrieval_df)
+        if len(out):
+            row = out.iloc[0]
+            # Empty JSON object is valid + decodable.
+            profile = json.loads(row["user_profile_json"])
+            assert profile == {}
 
     def test_history_text_extracted_when_present(self, envelope_df, retrieval_df):
         from build_grpo_dataset import build_grpo_dataset
