@@ -322,19 +322,59 @@ class TestComposeRSession:
 # ---------------------------------------------------------------------------
 
 class TestWeights:
-    def test_weights_match_option_b_v2(self):
-        # W6-review Option B refactor: redirected mass from R_retr (which
-        # has 0 gradient under frozen retriever) to R_judge (now trainable
-        # via DistilledJudge) and recovered R_user_prof for Personalization.
+    def test_weights_match_option_b_v3(self):
+        # W1-W8 review P1-6 honesty fix: drop W_USER_PROF to 0.0 since the
+        # data path (user_profile from User-Metadata DB) is not piped through
+        # build_reward_dataset → build_grpo_dataset → reward closure. Re-add
+        # to W_RULE since it's the next-most-discriminating term per W1.
         assert rf.W_RETR == 0.40
         assert rf.W_JUDGE == 0.30
-        assert rf.W_RULE == 0.15
+        assert rf.W_RULE == 0.20
         assert rf.W_FORMAT == 0.10
-        assert rf.W_USER_PROF == 0.05
+        assert rf.W_USER_PROF == 0.00
 
     def test_weights_sum_to_one(self):
         total = rf.W_RETR + rf.W_JUDGE + rf.W_RULE + rf.W_FORMAT + rf.W_USER_PROF
         assert abs(total - 1.0) < 1e-9
+
+
+class TestRTurnClamp:
+    """W1-W8 review P0-3: r_turn must be clamped to [0, 1].
+
+    Without the clamp, the +0.05 lex_div bonus added on top of a maxed-out
+    base r_turn (R_retr=1, R_judge=1, R_rule=1, R_format=1, R_user_prof=1
+    with weights summing to 1.0) yields r_turn = 1.05, breaking the gate
+    threshold semantics in colab/32 cell 14 (Δ R_turn ≥ +0.03).
+    """
+    def test_r_turn_never_exceeds_one_under_max_bonus(self):
+        envelope = (
+            "<user_state>\nmood: calm\nenergy: low\n</user_state>\n"
+            "<response>"
+            "Holocene by Bon Iver leans into the layered arrangement, slow "
+            "tempo, calm mood, with a vibe that is both reflective and warm. "
+            "Want a sparser version next? It has groove and atmosphere."
+            "</response>"
+        )
+        # Maxed-out reward with peer rollouts that yield high diversity.
+        comps = rf.compose_r_turn(
+            predicted_track_ids=["a"], gold_track_id="a",
+            response_text=envelope,
+            top1_meta={"track_name": "Holocene", "artist_name": "Bon Iver"},
+            user_state={"mood": "calm", "energy": "low"},
+            user_profile={"country_name": "Japan", "age_group": "25-34", "gender": "F"},
+            history_text="winding down dreamy",
+            judge_score=1.0,  # max judge
+            judge_trust=1.0,
+            group_responses=[
+                "first wildly different rollout response",
+                "second alternate phrasing entirely",
+                "third unique response with novel terms",
+                "fourth distinct generation w/ varied tokens",
+            ],
+        )
+        assert comps["r_turn"] <= 1.0, (
+            f"r_turn must be clamped to [0,1] but got {comps['r_turn']:.4f}"
+        )
 
 
 class TestGroupResponsesBonus:
@@ -371,21 +411,25 @@ class TestGroupResponsesBonus:
         # Bonus is added on top of the base r_turn (which is non-zero
         # because format passes and r_rule fires on at least envelope-mention).
 
-    def test_identical_group_low_diversity(self):
-        # When all 4 rollouts produced the same text, the joined token
-        # stream's distinct-2 ratio is low (most bigrams repeat). Verify
-        # the bonus stays bounded — never exceeds the [0,1] clamp on
-        # r_lex_div_group, and the additive bonus to r_turn is at most 0.05.
+    def test_identical_group_zero_diversity(self):
+        """W1-W8 review P1-1: identical rollouts MUST give zero bonus.
+
+        Old implementation used `lex_div_distinct2` over the JOINED text
+        of all responses, which gave a non-zero floor (~0.013) even when
+        all rollouts were identical (because internal within-text bigrams
+        vary). New implementation uses pairwise across-rollout distinct-2
+        — identical rollouts → 0 bonus, divergent rollouts → high bonus.
+        """
         envelope = "<user_state>mood: calm</user_state><response>same text always</response>"
         comps = rf.compose_r_turn(
             predicted_track_ids=["a"], gold_track_id="a",
             response_text=envelope,
             group_responses=[envelope] * 4,
         )
-        # r_lex_div_group is the raw lex_div (capped at 1.0).
-        assert 0.0 <= comps["r_lex_div_group"] <= 1.0
-        # Identical responses → diversity should be much less than half.
-        assert comps["r_lex_div_group"] < 0.5
+        # 4 identical rollouts → all pairwise overlaps == 1.0 → diversity == 0.0.
+        assert comps["r_lex_div_group"] == 0.0, (
+            f"identical rollouts should give 0 bonus; got {comps['r_lex_div_group']:.4f}"
+        )
 
     def test_singleton_group_no_bonus(self):
         # group_responses with 1 element → no peers → no bonus.

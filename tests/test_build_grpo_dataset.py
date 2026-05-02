@@ -286,13 +286,24 @@ class TestBuildGrpoDataset:
         }
         assert expected.issubset(set(out.columns))
 
-    def test_prompt_contains_rationales_block(self, envelope_df, retrieval_df):
+    def test_prompt_omits_rationales_by_default(self, envelope_df, retrieval_df):
+        """Deep-review P0-2: rationales OFF by default to match inference path
+        (`mcrs.crs_baseline.batch_chat` does not inject rationales). Including
+        them at training alone creates a train/inference distribution mismatch."""
         from build_grpo_dataset import build_grpo_dataset
         out, _ = build_grpo_dataset(envelope_df, retrieval_df)
         sess_a = out[out["session_id"] == "sess_a"].iloc[0]
+        assert "<reranker_rationales>" not in sess_a["prompt"]
+        assert "Recommended track: Holocene by Bon Iver" in sess_a["prompt"]
+
+    def test_prompt_contains_rationales_when_opted_in(self, envelope_df, retrieval_df):
+        """Opt-in path: when an inference adapter eventually injects rationales,
+        the build script can opt back into the rationales block."""
+        from build_grpo_dataset import build_grpo_dataset
+        out, _ = build_grpo_dataset(envelope_df, retrieval_df, include_rationales=True)
+        sess_a = out[out["session_id"] == "sess_a"].iloc[0]
         assert "<reranker_rationales>" in sess_a["prompt"]
         assert "1. matches reflective mood" in sess_a["prompt"]
-        assert "Recommended track: Holocene by Bon Iver" in sess_a["prompt"]
 
     def test_top1_meta_json_roundtrip(self, envelope_df, retrieval_df):
         from build_grpo_dataset import build_grpo_dataset
@@ -376,15 +387,17 @@ class TestConversationalPrompt:
         from build_grpo_dataset import build_grpo_dataset
         out, _ = build_grpo_dataset(envelope_df, retrieval_df, system_prompt=None)
         sess_a = out[out["session_id"] == "sess_a"].iloc[0]
-        # Back-compat: prompt is a plain string.
+        # Back-compat: prompt is a plain string. Per P0-2 default
+        # (`include_rationales=False`), rationales are NOT in the prompt.
         assert isinstance(sess_a["prompt"], str)
-        assert "<reranker_rationales>" in sess_a["prompt"]
+        assert "Recommended track: Holocene" in sess_a["prompt"]
 
     def test_conversational_prompt_with_system_prompt(self, envelope_df, retrieval_df):
         from build_grpo_dataset import build_grpo_dataset
         out, _ = build_grpo_dataset(
             envelope_df, retrieval_df,
             system_prompt="You are a helpful music assistant.",
+            include_rationales=True,  # opt-in for the rationales-in-user-content path
         )
         sess_a = out[out["session_id"] == "sess_a"].iloc[0]
         # Conversational form: list of message dicts so TRL applies chat template.
@@ -395,7 +408,7 @@ class TestConversationalPrompt:
         assert msgs[0]["role"] == "system"
         assert msgs[0]["content"] == "You are a helpful music assistant."
         assert msgs[1]["role"] == "user"
-        # User content carries the full text_a + rationales block.
+        # User content carries the full text_a + rationales block (opt-in).
         assert "Recommended track: Holocene" in msgs[1]["content"]
         assert "<reranker_rationales>" in msgs[1]["content"]
         assert "1. matches reflective mood" in msgs[1]["content"]

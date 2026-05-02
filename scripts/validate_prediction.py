@@ -18,9 +18,14 @@ REQUIRED_FIELDS = (
 )
 
 # Expected row counts per split (plan §2.6 / §4).
+# Deep-review P1-8: blindA count is hardcoded; if the dataset host updates
+# size, validation rejects the submission. Override via env
+# `RECSYS_EXPECTED_BLINDA_ROWS=<n>` for ad-hoc cases. blindB is intentionally
+# absent (open count > 0 enforced below).
+import os as _os
 EXPECTED_ROWS = {
     "dev": 8000,      # 1000 sessions x 8 turns
-    "blindA": 80,     # 10 sessions x 8 turns
+    "blindA": int(_os.environ.get("RECSYS_EXPECTED_BLINDA_ROWS", 80)),
 }
 EXPECTED_TURNS_PER_SESSION = {
     "dev": 8,

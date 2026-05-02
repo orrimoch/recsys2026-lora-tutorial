@@ -123,7 +123,14 @@ def extract_user_state(envelope_wrapped: str) -> dict[str, str]:
 # `role: content`). The previous lazy-non-greedy regex with MULTILINE only
 # matched the FIRST line. Use DOTALL + `\Z` end-of-string anchor so we
 # capture every line of history; collapse newlines to spaces for r_rule.
-_HISTORY_RE = re.compile(r"Prior dialog:\s*(.+)\Z", re.DOTALL)
+#
+# Deep-review P1-5 fix: use `re.findall` and take the LAST match. Without
+# this, if a user_query contains the literal substring "Prior dialog:"
+# (rare but possible), the regex anchors there and over-captures. Anchoring
+# on the last occurrence guarantees we capture the field as written by
+# build_reward_dataset.py:170 (which always emits Prior dialog: as the
+# final field).
+_HISTORY_RE = re.compile(r"Prior dialog:\s*(.+?)(?=\nPrior dialog:|\Z)", re.DOTALL)
 
 
 def extract_history_text(text_a: str) -> str:
@@ -133,12 +140,15 @@ def extract_history_text(text_a: str) -> str:
     history-grounding sub-score: any ≥5-char history token appearing in
     the response. Multi-line history (real shape — see W6 review P0-4) is
     collapsed to a single line so the token-match is per-token, not
-    per-line.
+    per-line. When multiple "Prior dialog:" tokens exist, the LAST match
+    wins (deep-review P1-5).
     """
-    m = _HISTORY_RE.search(text_a or "")
-    if not m:
+    matches = _HISTORY_RE.findall(text_a or "")
+    if not matches:
         return ""
-    return " ".join(m.group(1).split())
+    # Take the LAST match — build_reward_dataset.py:170 emits Prior dialog
+    # as the trailing field, so the last match is always the actual history.
+    return " ".join(matches[-1].split())
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +195,7 @@ def build_grpo_dataset(
     retrieval_df: pd.DataFrame,
     seed: int = 42,
     system_prompt: "str | None" = None,
+    include_rationales: bool = False,
 ) -> tuple[pd.DataFrame, dict]:
     """Join envelope-augmented POS rows with frozen-retriever output.
 
@@ -245,10 +256,20 @@ def build_grpo_dataset(
             stats["envelope_parse_failures"] += 1
 
         history_text = extract_history_text(text_a)
-        rationales_block = format_rationales_block(rationales)
 
-        # Final prompt body: text_a (Recommended-track + Prior dialog) + rationales block.
-        prompt_body = f"{text_a}\n{rationales_block}"
+        # Deep-review P0-2 fix: rationales block is OFF by default. The
+        # plan §6.5 design (rationales in prompt) was only ever wired into
+        # W6 training, never into W4/W5 training, never into inference
+        # (`run_inference_blindset.py` → `crs_baseline.batch_chat` does not
+        # inject rationales). Including them at training time alone creates
+        # a train/inference distribution mismatch. Re-enable via
+        # `include_rationales=True` only when an inference-time adapter
+        # exists in mcrs/crs_baseline.py.
+        if include_rationales:
+            rationales_block = format_rationales_block(rationales)
+            prompt_body = f"{text_a}\n{rationales_block}"
+        else:
+            prompt_body = text_a
         # When a system_prompt is supplied, emit conversational form so TRL
         # auto-applies the chat template at training time (same shape the
         # W4/W5 init was trained on AND what the eval cell feeds at gen).
@@ -310,6 +331,16 @@ def main(argv=None) -> int:
             "(W6 review P0-3 fix). Recommended for W6."
         ),
     )
+    p.add_argument(
+        "--include-rationales", action="store_true", default=False,
+        help=(
+            "Include the <reranker_rationales> block in the prompt body. "
+            "OFF by default per deep-review P0-2 — the inference path does "
+            "NOT inject rationales, so adding them at training creates a "
+            "train/inference distribution mismatch. Enable only after "
+            "wiring rationales into mcrs.crs_baseline.batch_chat."
+        ),
+    )
     args = p.parse_args(argv)
 
     env_path = Path(args.envelope)
@@ -340,6 +371,7 @@ def main(argv=None) -> int:
 
     out_df, stats = build_grpo_dataset(
         env_df, ret_df, seed=args.seed, system_prompt=system_prompt,
+        include_rationales=args.include_rationales,
     )
 
     out_path = Path(args.out)

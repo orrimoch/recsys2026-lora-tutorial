@@ -308,11 +308,34 @@ class DistilledJudge:
         ).to(self._device).eval()
         return True
 
+    def warmup(self) -> bool:
+        """Force model load + a single forward pass.
+
+        Deep-review P1-4 fix: the trainer's first reward step would
+        otherwise eat the ~80MB cross-encoder Hub download. Call after
+        instantiation to amortize the load before training starts.
+
+        Returns True if the model loaded; False on no-checkpoint fallback.
+        """
+        if not self._ensure_loaded():
+            return False
+        # Single dummy forward to trigger CUDA/MPS allocation + first kernel.
+        try:
+            self.score("warmup-context", "warmup-response")
+        except Exception:
+            pass
+        return True
+
     def score(self, context: str, response: str) -> float:
         """Score a single (context, response) pair, returning a float in [0, 1].
 
         When no checkpoint is configured (or torch is unavailable), returns
         0.0 — preserves stub semantics for back-compat.
+
+        Deep-review P1-2 fix: the regression head is trained with MSE on
+        [0,1] targets without an explicit sigmoid in the model. We apply
+        torch.sigmoid here to map the unbounded logit through a smooth
+        boundary, then clamp as a safety net.
         """
         if not self._ensure_loaded():
             return 0.0
@@ -328,8 +351,9 @@ class DistilledJudge:
                 max_length=self.max_length, return_tensors="pt",
             ).to(self._device)
             logits = self._model(**enc).logits  # (1, 1) regression head
-            raw = float(logits.squeeze().cpu().item())
-        # Clamp to [0, 1] in case the regression head over/under-shoots.
+            # P1-2: smooth squash via sigmoid before the safety clamp.
+            raw = float(torch.sigmoid(logits.squeeze()).cpu().item())
+        # Clamp as a final safety net; should be a no-op after sigmoid.
         raw = max(0.0, min(1.0, raw))
         self._cache[key] = raw
         return raw
@@ -358,7 +382,8 @@ class DistilledJudge:
                     max_length=self.max_length, return_tensors="pt",
                 ).to(self._device)
                 logits = self._model(**enc).logits  # (B, 1)
-                vals = logits.squeeze(-1).cpu().tolist()
+                # P1-2: sigmoid → [0, 1] before clamp.
+                vals = torch.sigmoid(logits.squeeze(-1)).cpu().tolist()
             for v in vals:
                 v = max(0.0, min(1.0, float(v)))
                 out.append(v)
@@ -369,37 +394,26 @@ class DistilledJudge:
 # Composition
 # ---------------------------------------------------------------------------
 
-# Weights — Option B refactor (W6 review follow-up, 2026-05-02).
+# Weights — Option B refactor v3 (post deep-review, 2026-05-02).
 #
 # v0 (pre-W1):       R_retr=0.50  R_judge=0.20  R_rule=0.20  R_format=0.05  R_user_prof=0.05
 # v1 (Option A, W1): R_retr=0.70  R_judge=0.10  R_rule=0.15  R_format=0.05  R_user_prof=0.00
-# v2 (Option B, NOW): R_retr=0.40 R_judge=0.30 R_rule=0.15 R_format=0.10 R_user_prof=0.05
+# v2 (Option B):     R_retr=0.40  R_judge=0.30  R_rule=0.15  R_format=0.10  R_user_prof=0.05
+# v3 (NOW, P1-6 fix): R_retr=0.40 R_judge=0.30 R_rule=0.20 R_format=0.10 R_user_prof=0.00
 #
-# Rationale for Option B:
-#   - **R_retr 0.70 → 0.40**: in W6 GRPO with a frozen retriever, R_retr is
-#     constant per row → cancels in advantage normalization → 0 gradient.
-#     Halving its weight reclaims room for terms that DO move during rollouts.
-#     Still significant for offline eval / leaderboard alignment.
-#   - **R_judge 0.10 → 0.30**: with the distilled cross-encoder judge now
-#     trainable from data/reward_calibration_anchors.parquet (210k anchors),
-#     R_judge becomes the closest-available proxy for the actual Gemini judge
-#     used on Blind-A/B. This is the largest semantically-rich gradient term.
-#   - **R_rule 0.15 → 0.15**: unchanged. W1 found AUC 0.51 vs Gemini (random),
-#     but it's free, mechanical, and discriminates well-formed-vs-degraded
-#     responses (Source D). Useful as a regularizer, not a primary signal.
-#   - **R_format 0.05 → 0.10**: raised to keep envelope-fluency anchored
-#     after W4 KTO. Format compliance is the gate that lets the responder
-#     emit parseable structured output for the Personalization mention.
-#   - **R_user_prof 0.00 → 0.05**: recovered. Personalization is one of the
-#     two Gemini-judge axes per project_blind_judge_gemini memory; W1 found
-#     gold assistants don't mention user_profile (mean 0.009), but W6's
-#     ON-POLICY rollouts CAN learn to mention it once we reward it. Small
-#     weight (0.05) so the model doesn't degenerate into name-checking.
+# Rationale for v3 (deep-review P1-6 honesty fix):
+#   - W_USER_PROF 0.05 → 0.00: the data path doesn't exist. build_reward_dataset
+#     does NOT propagate `country_name`/`age_group`/`gender`, so build_grpo_dataset
+#     can't emit a user_profile column, so the reward closure can't pass it. The
+#     0.05 weight in v2 was permanently dead. Honest fix: drop to 0.00 and shift
+#     the 0.05 to W_RULE (next-most-discriminating mechanical term per W1).
+#     Re-add to 0.05+ only after a follow-up commit pipes user_profile end-to-end.
+#   - Other v2 rationales unchanged (see git history for full v0/v1/v2 notes).
 W_RETR = 0.40
 W_JUDGE = 0.30
-W_RULE = 0.15
+W_RULE = 0.20
 W_FORMAT = 0.10
-W_USER_PROF = 0.05
+W_USER_PROF = 0.00
 
 
 def compose_r_turn(
@@ -453,19 +467,30 @@ def compose_r_turn(
             + W_USER_PROF * rp
         )
 
-    # Intra-rollout diversity bonus (Option B refactor: wires
-    # compose_r_session.lex_div into per-prompt training signal). Only
-    # fires when caller passes > 1 peer responses (G > 1 in GRPO).
+    # Across-rollout diversity bonus (deep-review P1-1 fix).
+    #
+    # OLD (v2): used `lex_div_distinct2` over the JOINED text of all rollouts
+    # → identical rollouts gave a ~0.013 floor because within-text bigrams
+    # always vary. WRONG signal — we want "did this rollout differ from peers?",
+    # not "is the joined corpus diverse?".
+    #
+    # NEW (v3): pairwise Jaccard distance over per-rollout bigram sets,
+    # averaged. Identical rollouts → 0 (all pairwise sets equal → distance 0).
+    # Completely disjoint bigrams → 1. Symmetric, principled.
     r_lex_div_group = 0.0
     if group_responses is not None and len(group_responses) > 1:
-        r_lex_div_group = min(lex_div_distinct2(list(group_responses)), 1.0)
+        r_lex_div_group = min(lex_div_pairwise(list(group_responses)), 1.0)
         # Additive bonus capped at +0.05 — keeps the diversity signal a
-        # tie-breaker, NOT a primary objective. Prevents the responder from
-        # learning "diverge wildly across rollouts to maximize lex_div".
-        # Hard-zero rows (broken format / catalog) still get 0 — bonus is
-        # only added on top of a non-zero base r_turn.
+        # tie-breaker, NOT a primary objective. Hard-zero rows (broken format
+        # / catalog) still get 0 — bonus only added on top of non-zero base.
         if r_turn > 0.0:
             r_turn = r_turn + 0.05 * r_lex_div_group
+
+    # Deep-review P0-3 fix: clamp to [0, 1]. Without this, max base
+    # (0.40+0.30+0.20+0.10 = 1.00) plus +0.05 bonus = 1.05, breaking the
+    # gate threshold semantics in colab/32 cell 14 where Δ R_turn ≥ +0.03
+    # could be inflated by up to +0.05 of unclamped bonus.
+    r_turn = min(1.0, max(0.0, r_turn))
 
     return {
         "r_turn": r_turn,
@@ -509,6 +534,40 @@ def lex_div_distinct2(responses: Sequence[str]) -> float:
     if not bigrams:
         return 0.0
     return len(set(bigrams)) / len(bigrams)
+
+
+def lex_div_pairwise(responses: Sequence[str]) -> float:
+    """Pairwise across-rollout bigram distance (Jaccard), averaged.
+
+    For each pair of responses, compute 1 - |a ∩ b| / |a ∪ b| over their
+    bigram sets. Returns the mean across all pairs.
+
+    Used for the GRPO group_responses bonus (deep-review P1-1 fix). Unlike
+    `lex_div_distinct2`, this is zero when all rollouts are identical and
+    one when their bigram sets are disjoint — the right signal for "did
+    this rollout differ from peers?" in GRPO.
+    """
+    if len(responses) < 2:
+        return 0.0
+
+    def _bigrams(text: str) -> set:
+        toks = (text or "").split()
+        return set(zip(toks, toks[1:]))
+
+    sets = [_bigrams(r) for r in responses]
+    distances: list[float] = []
+    n = len(sets)
+    for i in range(n):
+        for j in range(i + 1, n):
+            union = sets[i] | sets[j]
+            if not union:
+                continue
+            intersection = sets[i] & sets[j]
+            jaccard = len(intersection) / len(union)
+            distances.append(1.0 - jaccard)
+    if not distances:
+        return 0.0
+    return sum(distances) / len(distances)
 
 
 def cat_div(track_ids_per_turn: Sequence[Sequence[str]], catalog_size: int) -> float:
