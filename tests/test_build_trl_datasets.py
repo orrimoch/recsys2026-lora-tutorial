@@ -189,6 +189,47 @@ class TestBuildDpoRandom:
         with pytest.raises(ValueError, match="POS.*NEG"):
             build_dpo_random(bad)
 
+    def test_no_cross_split_leakage(self, reward_df):
+        """A train-tagged DPO pair must NEVER source chosen/rejected text from
+        a val-split row. This is the no-leakage invariant — if it ever breaks,
+        a val response string is being shown to the model at training time.
+        """
+        out = build_dpo_random(reward_df, seed=42)
+        assert "split" in out.columns, "DPO output must carry split when input has one."
+        val_text_b = set(reward_df[reward_df["split"] == "val"]["text_b"].astype(str))
+        train_pairs = out[out["split"] == "train"]
+        leaked_chosen = set(train_pairs["chosen"]) & val_text_b
+        leaked_rejected = set(train_pairs["rejected"]) & val_text_b
+        assert not leaked_chosen, f"val text_b leaked into train chosen: {leaked_chosen!r}"
+        assert not leaked_rejected, f"val text_b leaked into train rejected: {leaked_rejected!r}"
+
+    def test_within_split_pairing_preserves_total_pair_count(self, reward_df):
+        """Sanity: for the fixture, train has 8 POS + 8 NEG and val has 2 POS +
+        2 NEG. Within-split pairing should produce 8 + 2 = 10 pairs total — same
+        as the old global-pool implementation. Catches the case where a fix
+        accidentally drops one side of a small split.
+        """
+        out = build_dpo_random(reward_df, seed=42)
+        assert len(out) == 10
+        assert (out["split"] == "train").sum() == 8
+        assert (out["split"] == "val").sum() == 2
+
+    def test_skips_one_sided_split_with_warning(self, capsys):
+        """A split with only POS (or only NEG) should be skipped with a warning,
+        not abort the whole build — provided at least one other split is usable.
+        """
+        df = pd.DataFrame({
+            "text_a": [f"q{i}" for i in range(8)],
+            "text_b": [f"r{i}" for i in range(8)],
+            "label":  [1, 0, 1, 0, 1, 0, 1, 1],  # val (last 2) is POS-only
+            "split":  ["train"] * 6 + ["val"] * 2,
+        })
+        out = build_dpo_random(df, seed=42)
+        captured = capsys.readouterr()
+        assert "skipping split='val'" in captured.err
+        assert (out["split"] == "train").any()
+        assert not (out["split"] == "val").any()
+
 
 # ---------------------------------------------------------------------------
 # build_grpo_prompts
@@ -217,6 +258,28 @@ class TestBuildGrpoPrompts:
         bad = pd.DataFrame({"foo": [1, 2]})
         with pytest.raises(ValueError, match="text_a"):
             build_grpo_prompts(bad)
+
+    def test_no_cross_split_leakage(self):
+        """A prompt that appears in train must NOT appear in val. Without this,
+        GRPO val rollouts could come from prompts the model already trained on.
+        Train-precedence: shared prompts stay in train, val keeps only unseen.
+        """
+        df = pd.DataFrame({
+            # "shared_q" appears in BOTH splits — the bug case.
+            "text_a": ["train_q1", "shared_q", "val_q1", "shared_q", "val_q2"],
+            "text_b": ["a", "b", "c", "d", "e"],
+            "label":  [1, 1, 1, 0, 0],
+            "split":  ["train", "train", "val", "val", "val"],
+        })
+        out = build_grpo_prompts(df)
+        train_prompts = set(out[out["split"] == "train"]["prompt"])
+        val_prompts = set(out[out["split"] == "val"]["prompt"])
+        assert train_prompts.isdisjoint(val_prompts), (
+            f"Cross-split leakage: {train_prompts & val_prompts!r} in both."
+        )
+        assert "shared_q" in train_prompts, "Shared prompt should stay in train."
+        assert "shared_q" not in val_prompts, "Shared prompt must be removed from val."
+        assert val_prompts == {"val_q1", "val_q2"}
 
 
 # ---------------------------------------------------------------------------

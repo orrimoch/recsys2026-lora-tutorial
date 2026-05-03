@@ -126,21 +126,20 @@ def build_kto(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def build_dpo_random(df: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
-    """Random POS↔NEG pairing → (prompt, chosen, rejected).
+def _pair_pos_neg(df: pd.DataFrame, seed: int) -> pd.DataFrame:
+    """Pair POS↔NEG within a single homogeneous slice → (prompt, chosen, rejected).
 
-    Each pair: prompt = POS row's text_a, chosen = POS text_b, rejected = NEG text_b.
-    The chosen row's prompt is used (NEG row's prompt is NOT used as the shared
-    prompt — DPO contract says one prompt with chosen+rejected for it).
-
-    Note: this is *vanilla DPO* (one rejected per pair). S-DPO with N hard
-    negatives (W5) requires a different builder — TODO for plan §6.3 B2.
+    Caller is responsible for slicing by split before calling — this function
+    samples only from the rows it receives, which is what guarantees
+    no-cross-split leakage in the parent `build_dpo_random`. Both the initial
+    sampling AND the degenerate-pair recovery draw from the same `neg` pool.
     """
-    pos = df[df["label"].astype(int) == 1].copy()
-    neg = df[df["label"].astype(int) == 0].copy()
+    pos = df[df["label"].astype(int) == 1]
+    neg = df[df["label"].astype(int) == 0]
     if pos.empty or neg.empty:
         raise ValueError(
-            f"DPO input needs both POS (n={len(pos)}) and NEG (n={len(neg)}) rows."
+            f"Slice has no POS or NEG rows: pos={len(pos)} neg={len(neg)}. "
+            f"DPO needs both within each split."
         )
     n = min(len(pos), len(neg))
     pos_sample = pos.sample(n=n, random_state=seed).reset_index(drop=True)
@@ -150,24 +149,69 @@ def build_dpo_random(df: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
         "chosen": pos_sample["text_b"].astype(str).values,
         "rejected": neg_sample["text_b"].astype(str).values,
     })
-    # Sanity: chosen and rejected must differ (otherwise the pair is degenerate).
     n_dup = int((out["chosen"] == out["rejected"]).sum())
     if n_dup > 0:
-        # Re-sample the offending rows from the broader NEG pool until distinct.
         rng = np.random.default_rng(seed + 7)
         for idx in out.index[out["chosen"] == out["rejected"]]:
-            tries = 0
-            while tries < 20:
-                replacement = neg.sample(n=1, random_state=int(rng.integers(0, 1_000_000))).iloc[0]
+            for _ in range(20):
+                replacement = neg.sample(
+                    n=1, random_state=int(rng.integers(0, 1_000_000))
+                ).iloc[0]
                 if replacement["text_b"] != out.loc[idx, "chosen"]:
                     out.loc[idx, "rejected"] = str(replacement["text_b"])
                     break
-                tries += 1
-    # Carry split if available — split by the POS row's session_id.
+    return out
+
+
+def build_dpo_random(df: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
+    """Random POS↔NEG pairing → (prompt, chosen, rejected).
+
+    Each pair: prompt = POS row's text_a, chosen = POS text_b, rejected = NEG text_b.
+    The chosen row's prompt is used (NEG row's prompt is NOT used as the shared
+    prompt — DPO contract says one prompt with chosen+rejected for it).
+
+    No-leakage discipline: when the input has a `split` column, pairing happens
+    INDEPENDENTLY within each split. A train-tagged pair's `rejected` text is
+    sourced only from train NEG rows (never val). Without this, a val response
+    string would appear in the train set's rejected position — silent leakage
+    that breaks the train-only / val-only invariant the upstream
+    `build_reward_dataset.py --split-val` was designed to enforce.
+
+    Splits with no POS or no NEG rows are skipped with a warning rather than
+    aborting the whole build (small val partitions can legitimately end up
+    one-sided after the by-session_id split).
+
+    Note: this is *vanilla DPO* (one rejected per pair). S-DPO with N hard
+    negatives (W5) requires a different builder — TODO for plan §6.3 B2.
+    """
+    if "label" not in df.columns:
+        raise ValueError(
+            f"DPO input must have label column. Got: {sorted(df.columns)}."
+        )
+
     if "split" in df.columns:
-        out["split"] = pos_sample["split"].astype(str).values
+        parts = []
+        for split_val, sub in df.groupby("split", sort=True):
+            try:
+                paired = _pair_pos_neg(sub, seed)
+            except ValueError as e:
+                print(
+                    f"[trl-data] WARNING: skipping split={split_val!r} for DPO ({e})",
+                    file=sys.stderr,
+                )
+                continue
+            paired["split"] = str(split_val)
+            parts.append(paired)
+        if not parts:
+            raise ValueError(
+                "DPO input had a `split` column but no split produced pairs "
+                "(every split was missing POS or NEG)."
+            )
+        out = pd.concat(parts, ignore_index=True)
+    else:
+        out = _pair_pos_neg(df, seed)
+
     _validate_schema(out, DPO_REQUIRED, "dpo")
-    # Final assertion: no degenerate pairs after recovery.
     n_dup_final = int((out["chosen"] == out["rejected"]).sum())
     if n_dup_final > 0:
         raise ValueError(f"{n_dup_final} DPO pairs have chosen == rejected after recovery.")
@@ -179,20 +223,48 @@ def build_grpo_prompts(df: pd.DataFrame) -> pd.DataFrame:
 
     GRPO is online RL: the policy generates completions and the reward function
     scores them. We just need a corpus of prompts to roll out from.
+
+    No-leakage discipline: when the input has a `split` column, dedup happens
+    per-split AND any prompt that appears in train is removed from val. This
+    prevents a prompt the model trained on from being treated as a held-out
+    val rollout source. Train-precedence (rather than val-precedence) keeps
+    the train slice complete; val ends up holding only strictly-unseen prompts.
     """
     if "text_a" not in df.columns:
         raise ValueError(f"GRPO input must have column 'text_a'. Got: {sorted(df.columns)}.")
-    unique = (
-        df["text_a"]
-        .astype(str)
-        .drop_duplicates()
-        .reset_index(drop=True)
-    )
-    out = pd.DataFrame({"prompt": unique.values})
+
     if "split" in df.columns:
-        # Map each unique prompt to its first-seen split.
-        first_seen = df.drop_duplicates(subset=["text_a"]).set_index("text_a")["split"]
-        out["split"] = out["prompt"].map(first_seen).fillna("train").astype(str).values
+        train_prompts = set(
+            df.loc[df["split"] == "train", "text_a"].astype(str)
+        )
+        train_uniq = (
+            df[df["split"] == "train"]
+            .drop_duplicates(subset=["text_a"])[["text_a", "split"]]
+            .reset_index(drop=True)
+        )
+        # All non-train rows: dedup within their own split and drop any prompt
+        # that already appears in train. Generalizes to "val" plus any other
+        # split label a future caller might introduce.
+        non_train = df[df["split"] != "train"].copy()
+        non_train = non_train[~non_train["text_a"].astype(str).isin(train_prompts)]
+        non_train_uniq = (
+            non_train.drop_duplicates(subset=["text_a"])[["text_a", "split"]]
+            .reset_index(drop=True)
+        )
+        combined = pd.concat([train_uniq, non_train_uniq], ignore_index=True)
+        out = pd.DataFrame({
+            "prompt": combined["text_a"].astype(str).values,
+            "split": combined["split"].astype(str).values,
+        })
+    else:
+        unique = (
+            df["text_a"]
+            .astype(str)
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+        out = pd.DataFrame({"prompt": unique.values})
+
     _validate_schema(out, GRPO_REQUIRED, "grpo")
     return out
 
