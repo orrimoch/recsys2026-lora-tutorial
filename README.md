@@ -216,7 +216,113 @@ recsys2026/
 
 ---
 
-## 8. Reproducibility — running the pilot
+## 8. Notebook execution flow
+
+The Colab notebooks chain together via `gate_result.json` contracts on Drive. Each notebook reads its predecessors' outputs from `Drive/recsys2026-cache/{stage}_runs/{run_name}/gate_result.json` (looking for the `merged_hub_model` field — a fully-merged Hub repo to start from) and writes its own gate result.
+
+### 8.1 Naming convention
+
+Two-digit prefix encodes `{wave}{step}`:
+
+| Decade | Wave | Notebooks |
+|---|---|---|
+| `0X` | Prototypes | `02_state_tracker_prototype` |
+| `1X` | W2 — query rewriter | `10_train_cmqr_dev` |
+| `2X` | W3 + W4-prep | `20_train_prorank_dev`, `22_extract_train_states` |
+| `3X` | W4-W7 — responder cascade | `30_train_responder_kto`, `31_train_responder_sdpo`, `31p_pilot_grpo_with_judge`, `32_train_responder_grpo`, `33_train_responder_grpo_train_plus_dev` |
+| `4X` | Blind-set inference | `40_run_blindset_B`, `41_run_blindset_A` |
+
+The `p` suffix on `31p` denotes the W6 PILOT (relaxed gate, ~1.5 hr) — a cheap direction check before committing to the full W6 in `32` (~5 hr).
+
+### 8.2 Cascade graph
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  30 — W4 KTO                                                        │
+│  Train Qwen-3B + LoRA → merge in-place → push merged repo to Hub    │
+│  Outputs:                                                           │
+│    • Hub: recsys2026-b1-kto-qwen3b-{date}-merged                    │
+│    • Drive: kto_runs/{run}/gate_result.json {merged_hub_model, ...} │
+│  Gate: format compliance ≥ 95% (strict r_format)                    │
+└─────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+       ┌──────────────────────┴──────────────────────┐
+       │                                             │
+       ▼                                             ▼
+┌──────────────────────┐               ┌─────────────────────────────┐
+│ 31 — W5 SDPO         │               │ 31p — W6 PILOT              │
+│ CONDITIONAL —        │               │ Distilled judge + short     │
+│ runs only if W4      │               │ GRPO (2k steps)             │
+│ format < 70%         │               │ Reads kto_runs/             │
+│                      │               │ Writes grpo_pilot_runs/     │
+│ Reads kto_runs/      │               │ Gate (relaxed):             │
+│ Writes sdpo_runs/    │               │   format ≥ 90%              │
+│                      │               │   Δ R_turn ≥ +0.015         │
+└──────────────────────┘               └─────────────────────────────┘
+                                                     │
+                                                     ▼
+                                       ┌─────────────────────────────┐
+                                       │ 32 — W6 GRPO (full)         │
+                                       │ 12k steps × G=4 rollouts    │
+                                       │ Reads sdpo_runs (or         │
+                                       │ kto_runs as fallback)       │
+                                       │ Writes grpo_runs/           │
+                                       │ Gate (strict):              │
+                                       │   format ≥ 95%              │
+                                       │   Δ R_turn ≥ +0.030         │
+                                       └─────────────────────────────┘
+                                                     │
+                                                     ▼
+                                       ┌─────────────────────────────┐
+                                       │ 33 — W7 train+dev retrain   │
+                                       │ Same recipe as W6, but on   │
+                                       │ train ∪ dev (no held-out)   │
+                                       │ Reads grpo_runs/            │
+                                       │ Writes grpo_final_runs/     │
+                                       └─────────────────────────────┘
+                                                     │
+                          ┌──────────────────────────┴───────────────┐
+                          ▼                                          ▼
+            ┌─────────────────────────┐              ┌──────────────────────────┐
+            │ 41 — Blind-A inference  │              │ 40 — Blind-B inference   │
+            │ Cascading lookup:       │              │ Reads grpo_final_runs/   │
+            │   W7 > W6 > 31p > W5 > W4│              │ Patches config 300      │
+            │ Patches config 301      │              │ Inference + zip          │
+            │ Inference (80 turns)    │              │ Drive-staged for upload  │
+            │ → prediction.json       │              │ → prediction.json        │
+            │ → blindset_A_*.zip      │              │ → blindset_B_*.zip       │
+            └─────────────────────────┘              └──────────────────────────┘
+```
+
+### 8.3 Critical handoffs
+
+Every B-stage notebook produces a `gate_result.json` that the next stage reads. The single load-bearing field is `merged_hub_model` — a fully-merged Qwen-3B Hub repo that the next stage `from_pretrained()`s as its starting base.
+
+| Producer | Key field | Consumer(s) |
+|---|---|---|
+| `30` (W4 KTO) | `merged_hub_model`, `format_compliance_strict` | `31`, `31p`, `32`, `41` |
+| `31` (W5 SDPO) | `merged_hub_model` | `31p`, `32`, `41` |
+| `31p` (W6 pilot) | `merged_hub_model`, `judge` | `32` reads `judge`; `41` may use as source |
+| `32` (W6 full) | `merged_hub_model`, `gate_passed` | `33` (gates on `gate_passed`), `41` |
+| `33` (W7) | `merged_hub_model` | `40` |
+
+### 8.4 Recommended path
+
+For the full leaderboard pipeline:
+
+1. `30` — W4 KTO (~80-100 min, ~15 units) — must pass format gate
+2. `31p` — W6 pilot (~2 hr, ~30 units) — also trains the distilled judge that `32`/`33` reuse
+3. `41` — optional Blind-A submission off the pilot for cheap Gemini-anchored signal (~30 min, ~6 units)
+4. `32` — W6 full (~5 hr, ~65 units) — only if pilot gate passes
+5. `33` — W7 train+dev retrain (~5 hr, ~65 units) — for the final Blind-B submission
+6. `40` — Blind-B inference (~30 min, ~6 units)
+
+Skip `31` unless `30` reports format compliance < 70% (rare).
+
+---
+
+## 9. Reproducibility — running the pilot
 
 The W6 pilot ([`colab/31p_pilot_grpo_with_judge.ipynb`](colab/31p_pilot_grpo_with_judge.ipynb)) is the cheapest path to validate the Option B refactor end-to-end. Total ~2 A100-hr ≈ 30 Colab compute units (≈ 30% of one Pro month):
 
@@ -231,7 +337,7 @@ Local CPU work (no Colab budget): all 342 unit tests run via `pytest` in ~2.3s.
 
 ---
 
-## 9. Status & deferred items
+## 10. Status & deferred items
 
 **Shipped (W1–W7 scaffolding complete)**: state-tracker, CMQR, wRRF, ProRank, KTO/SDPO/GRPO trainers, distilled judge, train+dev retrain pipeline, Blind-A and Blind-B submission notebooks, validators, 342 tests.
 
@@ -248,7 +354,7 @@ The honest plan-vs-code alignment ledger lives in [`documents/experiments_log.md
 
 ---
 
-## 10. Key references
+## 11. Key references
 
 - **Retrieval**: [CMQR](documents/research/CMQR_2406.18960.pdf) (multi-query rewriting), [RA-Rec](documents/research/RA-Rec_2406.00033.pdf) (state tracker), [ProRank](documents/research/ProRank_2506.03487.pdf), [Rank-R1](documents/research/Rank-R1_2503.06034.pdf), [RankZephyr](documents/research/RankZephyr_2312.02724.pdf), [Mistral-SPLADE](documents/research/Mistral-SPLADE_2408.11119.pdf).
 - **Preference + RL**: [KTO](documents/research/KTO_2402.01306.pdf), [S-DPO](documents/research/S-DPO_2406.09215.pdf), [Rank-GRPO](documents/research/Rank-GRPO_2510.20150.pdf), [Rec-R1](documents/research/Rec-R1_2503.24289.pdf), [DRPO](documents/research/DRPO_2410.18127.pdf), [OPO](documents/research/OPO_2410.04346.pdf).
