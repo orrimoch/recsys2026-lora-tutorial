@@ -224,15 +224,15 @@ The Colab notebooks chain together via `gate_result.json` contracts on Drive. Ea
 
 Two-digit prefix encodes `{wave}{step}`:
 
-| Decade | Wave | Notebooks |
+| Decade | Wave | Active notebooks |
 |---|---|---|
-| `0X` | Prototypes | `02_state_tracker_prototype` |
-| `1X` | W2 — query rewriter | `10_train_cmqr_dev` |
-| `2X` | W3 + W4-prep | `20_train_prorank_dev`, `22_extract_train_states` |
+| `2X` | W4-prep | `22_extract_train_states` (one-time prereq for envelope augmentation) |
 | `3X` | W4-W7 — responder cascade | `30_train_responder_kto`, `31_train_responder_sdpo`, `31p_pilot_grpo_with_judge`, `32_train_responder_grpo`, `33_train_responder_grpo_train_plus_dev` |
 | `4X` | Blind-set inference | `40_run_blindset_B`, `41_run_blindset_A` |
 
 The `p` suffix on `31p` denotes the W6 PILOT (relaxed gate, ~1.5 hr) — a cheap direction check before committing to the full W6 in `32` (~5 hr).
+
+**Archived** under `colab/_archive/`: `10_train_cmqr_dev` (W2 query rewriter, already trained) and `20_train_prorank_dev` (W3 reranker, already trained). Component A is frozen at W3, so these aren't on the active leaderboard path. Kept for reproducibility audits.
 
 ### 8.2 Cascade graph
 
