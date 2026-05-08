@@ -485,6 +485,79 @@ class ProRankReranker:
                     out.append(t[:80])  # hard cap for safety
         return out
 
+    def batch_generate_rationales(
+        self,
+        queries,
+        tids_per_query,
+        max_rationale_tokens: int = RATIONALE_MAX_NEW_TOKENS,
+        batch_size: int = None,
+    ) -> list:
+        """Vectorized counterpart to generate_rationales(). Flattens all
+        (query, tid) pairs across queries into one batched generate loop —
+        ~2-3x faster than calling generate_rationales() once per query in a
+        Python loop, because the GPU stays at high batch fill instead of
+        cycling through small per-query trailing batches.
+
+        Returns a list of length len(queries), each element being a list of
+        rationale strings (one per tid in tids_per_query[i]) — same shape as
+        [self.generate_rationales(q, tids) for q, tids in zip(...)].
+
+        Use a larger `batch_size` here than self.batch_size if your reranker
+        model fits the bigger batch (cross-encoders are tiny). Pilot config
+        bumps this to 64 in cell 7.
+        """
+        if not queries:
+            return []
+        bs = int(batch_size) if batch_size else self.batch_size
+
+        # Flatten with offsets so we can re-shape per-query at the end.
+        flat_prompts: list[str] = []
+        offsets: list[int] = [0]
+        for q, tids in zip(queries, tids_per_query):
+            for t in tids:
+                flat_prompts.append(
+                    DEFAULT_RATIONALE_TEMPLATE.format(
+                        query=(q or "").strip()[:600],
+                        doc=self.tid_to_text.get(t, "").strip()[: self.max_doc_chars],
+                    )
+                )
+            offsets.append(len(flat_prompts))
+
+        if not flat_prompts:
+            return [[] for _ in queries]
+
+        import torch
+
+        flat_out: list[str] = []
+        with torch.no_grad():
+            for start in range(0, len(flat_prompts), bs):
+                batch = flat_prompts[start : start + bs]
+                enc = self.tokenizer(
+                    batch, return_tensors="pt", padding=True, truncation=True,
+                    max_length=2048,
+                )
+                input_ids = enc["input_ids"].to(self.device)
+                attn = enc["attention_mask"].to(self.device)
+                gen_ids = self.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attn,
+                    max_new_tokens=max_rationale_tokens,
+                    do_sample=False,
+                    pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
+                )
+                new_tokens = gen_ids[:, input_ids.shape[1]:]
+                texts = self.tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
+                for t in texts:
+                    for stop in ["\n", ". ", "?", "!"]:
+                        idx = t.find(stop)
+                        if idx > 0:
+                            t = t[:idx]
+                            break
+                    t = t.strip().strip(".,;:!?\"'`").lower()
+                    flat_out.append(t[:80])
+
+        return [flat_out[offsets[i]:offsets[i + 1]] for i in range(len(queries))]
+
     def report(self) -> dict:
         return {
             **self.stats,

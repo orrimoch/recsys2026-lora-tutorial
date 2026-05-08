@@ -398,6 +398,108 @@ class StateTracker:
         self.stats["drop"] += 1
         return None
 
+    # -------- Batched extraction (GRPO-data-prep speedup) -------------------
+
+    def batch_extract(
+        self,
+        session_ids,
+        turn_numbers,
+        user_queries,
+        history_texts,
+    ) -> list:
+        """Vectorized counterpart to extract(). One batched LM forward pass for
+        all cache misses, instead of N sequential calls.
+
+        Per-element semantics match extract() exactly:
+          - cache hit → return cached
+          - first-try success → cache + return
+          - first-try fail → fall back to single-row extract() for that index,
+            which handles retry / prior-state / drop policy
+
+        Caveats: HF backend only (cell 7 in the W6 pilot uses use_vllm=False).
+        For vLLM, falls back to sequential calls — vLLM handles its own batching
+        internally and the batched HF path here would conflict.
+        """
+        n = len(session_ids)
+        results: list = [None] * n
+
+        # vLLM path: vllm.LLM.generate is already batch-friendly inside
+        # _generate_vllm; falling back is correct (and easy).
+        if self._backend == "vllm":
+            for i in range(n):
+                results[i] = self.extract(
+                    session_ids[i], turn_numbers[i], user_queries[i], history_texts[i],
+                )
+            return results
+
+        # Cache pass — collect misses for the batched generate.
+        miss_indices: list[int] = []
+        miss_prompts: list[str] = []
+        for i in range(n):
+            self.stats["calls"] += 1
+            cached = self._load_cached(session_ids[i], int(turn_numbers[i]))
+            if cached is not None:
+                self.stats["cache_hits"] += 1
+                results[i] = cached
+                continue
+            chat_history = build_extraction_prompt(user_queries[i], history_texts[i])
+            messages = [{"role": "system", "content": self.prompt}, *chat_history]
+            tokenizer = self.lm.tokenizer
+            prompt_text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            ) + PREFIX_PRIME
+            miss_indices.append(i)
+            miss_prompts.append(prompt_text)
+
+        if not miss_indices:
+            return results
+
+        # Single batched HF generate over miss_prompts. Causal generate needs
+        # left-padding so all rows align at the right edge; restore after.
+        import torch
+        tokenizer = self.lm.tokenizer
+        model = self.lm.lm
+        device = self.lm.device
+        orig_padding = tokenizer.padding_side
+        tokenizer.padding_side = "left"
+        try:
+            enc = tokenizer(
+                miss_prompts, return_tensors="pt", padding=True, truncation=True,
+                max_length=4096,
+            )
+            input_ids = enc.input_ids.to(device)
+            attn = enc.attention_mask.to(device)
+            with torch.no_grad():
+                outputs = model.generate(
+                    input_ids,
+                    attention_mask=attn,
+                    max_new_tokens=self.max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+                )
+            gen = outputs[:, input_ids.shape[1]:]
+            decoded = tokenizer.batch_decode(gen, skip_special_tokens=True)
+        finally:
+            tokenizer.padding_side = orig_padding
+
+        # Parse first-try outputs; route failures through the single-row path
+        # so retry / prior-state / drop logic stays in one place.
+        for j, i in enumerate(miss_indices):
+            text = PREFIX_PRIME + decoded[j]
+            state = parse_user_state(text)
+            if state:
+                self.stats["ok_first_try"] += 1
+                self._save_cache(session_ids[i], int(turn_numbers[i]), state)
+                results[i] = state
+            else:
+                # Decrement the call we already counted, since extract() counts again.
+                self.stats["calls"] -= 1
+                results[i] = self.extract(
+                    session_ids[i], int(turn_numbers[i]),
+                    user_queries[i], history_texts[i],
+                )
+        return results
+
     # -------- Stats helpers -------------------------------------------------
 
     def parse_validity(self) -> float:
