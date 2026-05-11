@@ -145,6 +145,40 @@ def r_retr(predicted_track_ids: Sequence[str], gold_track_id: str) -> float:
     )
 
 
+def r_retr_grounded(
+    response_text: str,
+    gold_track_name: str = "",
+    top1_track_name: str = "",
+) -> float:
+    """Per-completion grounding signal: did THIS rollout name the gold track?
+
+    Replaces the constant-within-group `r_retr` for GRPO use. With a frozen
+    retriever, `r_retr` returns the same value for every rollout in a G=4
+    group, so it contributes 0 to GRPO's within-group advantage. This
+    function is per-completion so the advantage signal recovers.
+
+    Returns:
+        1.0 if the gold track name appears in the response (case-insensitive)
+        0.5 if the top-1 retrieved track name appears (partial credit:
+            response is grounded in retrieval even if retrieval missed gold)
+        0.0 otherwise
+
+    Falls back to 0.0 when neither name is available — caller should then
+    use `r_retr` for offline / non-GRPO evaluation paths where the
+    constant-in-group property doesn't matter.
+    """
+    if not response_text:
+        return 0.0
+    rl = response_text.lower()
+    g = (gold_track_name or "").strip().lower()
+    if g and g in rl:
+        return 1.0
+    t = (top1_track_name or "").strip().lower()
+    if t and t in rl:
+        return 0.5
+    return 0.0
+
+
 def r_rule(
     response: str,
     top1_meta: Optional[dict] = None,
@@ -437,6 +471,7 @@ def compose_r_turn(
     judge_trust: float = 1.0,
     include_format: bool = True,
     group_responses: Optional[Sequence[str]] = None,
+    gold_track_name: Optional[str] = None,
 ) -> dict[str, float]:
     """Compute R_turn and components.
 
@@ -448,9 +483,23 @@ def compose_r_turn(
     `lex_div_distinct2`. This wires the conversation-data signal that
     `compose_r_session` codified but never reached training. Cap: +0.05.
 
+    `gold_track_name` (algo-review fix, 2026-05-11): when provided, swaps the
+    R_retr term from the constant-within-GRPO-group `r_retr` (frozen-retriever
+    nDCG) to the per-completion `r_retr_grounded` (does THIS rollout name the
+    gold track?). Restores intra-group variance for the largest reward weight,
+    which was the root cause of v2's mode-collapse → reward-decline pattern.
+    When None, falls back to `r_retr` for back-compat (offline eval paths).
+
     Returns dict with all sub-scores so callers can analyse component-wise.
     """
-    rr = r_retr(predicted_track_ids, gold_track_id)
+    if gold_track_name is not None:
+        # GRPO path: per-completion grounding signal so the W_RETR weight
+        # contributes to within-group advantage instead of being constant.
+        top1_name = (top1_meta or {}).get("track_name", "") if top1_meta else ""
+        rr = r_retr_grounded(response_text, gold_track_name, top1_name)
+    else:
+        # Offline/eval path: use the leaderboard nDCG metric.
+        rr = r_retr(predicted_track_ids, gold_track_id)
     ru = r_rule(response_text, top1_meta=top1_meta, user_state=user_state, history_text=history_text)
     rp = r_user_prof(response_text, user_profile=user_profile)
     rf = r_format(response_text) if include_format else 0.0

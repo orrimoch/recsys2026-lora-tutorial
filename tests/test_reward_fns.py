@@ -128,6 +128,76 @@ class TestRRetr:
 
 
 # ---------------------------------------------------------------------------
+# r_retr_grounded — algo-review fix (2026-05-11)
+#
+# Per-completion grounding signal that replaces the constant-within-group
+# r_retr in the GRPO path. Critical property: returns DIFFERENT values for
+# different rollouts in the same group, restoring within-group advantage.
+# ---------------------------------------------------------------------------
+
+class TestRRetrGrounded:
+    def test_gold_named_returns_one(self):
+        assert rf.r_retr_grounded(
+            "I think you'd love Holocene by Bon Iver — the layered vocals…",
+            gold_track_name="Holocene",
+            top1_track_name="Holocene",
+        ) == 1.0
+
+    def test_only_top1_named_returns_half(self):
+        # Gold is something else; response only mentions the top-1 retrieval.
+        assert rf.r_retr_grounded(
+            "Try Skinny Love — it has that intimate folk feel.",
+            gold_track_name="Holocene",
+            top1_track_name="Skinny Love",
+        ) == 0.5
+
+    def test_neither_named_returns_zero(self):
+        assert rf.r_retr_grounded(
+            "Here's a track you might enjoy with great instrumentation.",
+            gold_track_name="Holocene",
+            top1_track_name="Skinny Love",
+        ) == 0.0
+
+    def test_empty_response_returns_zero(self):
+        assert rf.r_retr_grounded("", "Holocene", "Skinny Love") == 0.0
+
+    def test_empty_gold_falls_back_to_top1(self):
+        # When gold name is missing (edge case: gold_track_id not in catalog),
+        # at least credit the top-1 mention.
+        assert rf.r_retr_grounded(
+            "Skinny Love captures that sparse intimacy.",
+            gold_track_name="",
+            top1_track_name="Skinny Love",
+        ) == 0.5
+
+    def test_case_insensitive_match(self):
+        # Substring match must be case-insensitive — model output may vary case.
+        assert rf.r_retr_grounded(
+            "HOLOCENE is a haunting track by bon iver.",
+            gold_track_name="Holocene",
+            top1_track_name="anything",
+        ) == 1.0
+
+    def test_per_completion_variance_in_group(self):
+        """The whole point: different rollouts of the same prompt → different scores.
+        This is what r_retr (frozen retriever, group-constant) cannot give GRPO."""
+        gold = "Holocene"
+        top1 = "Skinny Love"
+        rollout_grounded = "Holocene by Bon Iver matches your reflective mood."
+        rollout_partial = "Skinny Love has the intimate folk feel you described."
+        rollout_offtopic = "Here's a great song with rich textures and feel."
+        scores = [
+            rf.r_retr_grounded(rollout_grounded, gold, top1),
+            rf.r_retr_grounded(rollout_partial, gold, top1),
+            rf.r_retr_grounded(rollout_offtopic, gold, top1),
+        ]
+        # Within-group variance is the diagnostic: r_retr would give all the
+        # same value (since predicted_track_ids is identical across rollouts).
+        assert scores == [1.0, 0.5, 0.0]
+        assert max(scores) - min(scores) > 0.0
+
+
+# ---------------------------------------------------------------------------
 # r_rule
 # ---------------------------------------------------------------------------
 
@@ -295,6 +365,77 @@ class TestComposeRTurn:
 # ---------------------------------------------------------------------------
 # Session shaping
 # ---------------------------------------------------------------------------
+
+class TestComposeRTurnGoldTrackName:
+    """Algo-review fix (2026-05-11): when gold_track_name is provided,
+    compose_r_turn swaps the constant-within-group r_retr for the
+    per-completion r_retr_grounded. This is the CRITICAL behavior change."""
+
+    def _envelope(self, body: str) -> str:
+        return f"<user_state>\nmood: calm\n</user_state>\n<response>{body}</response>"
+
+    def test_gold_name_uses_grounded_path(self):
+        # When gold name is named in the response → r_retr should be 1.0.
+        env = self._envelope("Holocene by Bon Iver matches your reflective mood perfectly.")
+        comps = rf.compose_r_turn(
+            predicted_track_ids=["nope"], gold_track_id="some-id",  # nDCG would be 0
+            response_text=env,
+            top1_meta={"track_name": "Skinny Love", "artist_name": "Bon Iver"},
+            gold_track_name="Holocene",
+        )
+        # r_retr in returned dict should be 1.0 (grounded path), NOT 0 (nDCG path).
+        assert comps["r_retr"] == 1.0
+
+    def test_gold_name_none_falls_back_to_r_retr(self):
+        # When gold_track_name is None, original constant r_retr applies.
+        env = self._envelope("Holocene by Bon Iver matches your mood.")
+        comps = rf.compose_r_turn(
+            predicted_track_ids=["a", "b"], gold_track_id="a",   # nDCG@1 hit
+            response_text=env,
+            top1_meta={"track_name": "Holocene", "artist_name": "Bon Iver"},
+            gold_track_name=None,
+        )
+        assert comps["r_retr"] == 1.0  # nDCG@1 = 1 since gold is rank 0
+
+    def test_grounded_per_completion_variance(self):
+        """Same prompt context, different rollouts → DIFFERENT r_retr values.
+        This is what r_retr (constant in group) cannot give GRPO."""
+        common_kwargs = dict(
+            predicted_track_ids=["a", "b"], gold_track_id="a",
+            top1_meta={"track_name": "Skinny Love", "artist_name": "Bon Iver"},
+            gold_track_name="Holocene",
+        )
+        rollout_grounded = self._envelope(
+            "Holocene by Bon Iver — its layered atmosphere matches your reflective mood."
+        )
+        rollout_partial = self._envelope(
+            "Skinny Love is sparse and intimate, perfect for that reflective mood."
+        )
+        rollout_off = self._envelope(
+            "Here's a track with rich texture and groove for your reflective mood."
+        )
+        scores = [
+            rf.compose_r_turn(response_text=rollout_grounded, **common_kwargs)["r_retr"],
+            rf.compose_r_turn(response_text=rollout_partial, **common_kwargs)["r_retr"],
+            rf.compose_r_turn(response_text=rollout_off, **common_kwargs)["r_retr"],
+        ]
+        assert scores == [1.0, 0.5, 0.0]
+        # The within-group spread is the whole point — non-zero variance.
+        assert max(scores) - min(scores) >= 0.5
+
+    def test_empty_gold_name_falls_back_gracefully(self):
+        # gold_track_name="" should NOT crash; behaves like grounded path
+        # but with no gold to match (only top1 partial credit possible).
+        env = self._envelope("Skinny Love is sparse and reflective.")
+        comps = rf.compose_r_turn(
+            predicted_track_ids=["a"], gold_track_id="a",
+            response_text=env,
+            top1_meta={"track_name": "Skinny Love", "artist_name": "Bon Iver"},
+            gold_track_name="",
+        )
+        # Empty gold falls back inside r_retr_grounded → top1 partial credit
+        assert comps["r_retr"] == 0.5
+
 
 class TestComposeRSession:
     def test_monotonic_session(self):

@@ -166,6 +166,11 @@ RETRIEVAL_REQUIRED = {
     "top1_track_name", "top1_artist_name",
     "reranker_rationales",
 }
+# Optional column added 2026-05-11 (algo-review fix). When present, enables
+# the per-completion grounding reward in compose_r_turn (replaces the
+# constant-within-GRPO-group r_retr). Older retrieval parquets won't have
+# it — build_grpo_dataset emits empty string and reward falls back to r_retr.
+RETRIEVAL_OPTIONAL = {"gold_track_name"}
 
 
 def validate_envelope_schema(df: pd.DataFrame) -> None:
@@ -300,9 +305,19 @@ def build_grpo_dataset(
         user_profile_json = row.get("user_profile_json")
         if user_profile_json is None or pd.isna(user_profile_json):
             user_profile_json = "{}"
+        # Algo-review fix (2026-05-11): carry gold_track_name through so the
+        # GRPO reward closure can compute per-completion grounding instead of
+        # the constant-within-group r_retr. When the source retrieval parquet
+        # lacks this column, default to "" and reward falls back to r_retr.
+        gold_track_name = ""
+        if "gold_track_name" in row.index:
+            gtn = row.get("gold_track_name")
+            if gtn is not None and not pd.isna(gtn):
+                gold_track_name = str(gtn)
         out_rows.append({
             "prompt": prompt,
             "gold_track_id": gold,
+            "gold_track_name": gold_track_name,
             "predicted_track_ids": predicted,
             "top1_meta_json": json.dumps(top1_meta, ensure_ascii=False),
             "user_state_json": json.dumps(user_state, ensure_ascii=False),
