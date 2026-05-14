@@ -3,6 +3,7 @@ Batch inference script for Music CRS.
 """
 
 import os
+import gc
 import json
 import torch
 import argparse
@@ -194,6 +195,13 @@ def main(args):
                     "predicted_track_ids": result['retrieval_items'],
                     "predicted_response": result["response"]
                 })
+            # Per-batch GPU cleanup — fixes the leak where ~5-7 GB of
+            # non-PyTorch memory accumulated per batch (cuBLAS workspaces +
+            # caching allocator drift in the reranker/embedder forward passes),
+            # OOMing the ProRank reranker around batch 5-6 on A100-40GB.
+            del results
+            gc.collect()
+            torch.cuda.empty_cache()
             batch_idx = i // args.batch_size
             if batch_idx > 0 and batch_idx % SAVE_EVERY_N == 0:
                 music_crs.save_caches()
