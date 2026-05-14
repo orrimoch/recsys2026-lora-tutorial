@@ -179,6 +179,14 @@ def main(args):
     batch_data = [b for b, _ in paired]
     metadata = [m for _, m in paired]
 
+    # Subprocess-chunking slice (2026-05-14 OOM workaround). Both indices apply
+    # AFTER the length-bucket sort, so chunks are deterministic across calls.
+    _end = args.end_idx if args.end_idx >= 0 else len(batch_data)
+    if args.start_idx > 0 or _end < len(batch_data):
+        print(f"[chunk] processing turns [{args.start_idx}:{_end}] of {len(batch_data)} total")
+        batch_data = batch_data[args.start_idx:_end]
+        metadata = metadata[args.start_idx:_end]
+
     inference_results = []
     # try/finally for cache durability — W3 review P0 #1.
     SAVE_EVERY_N = 50
@@ -208,8 +216,16 @@ def main(args):
     finally:
         music_crs.save_caches()
     os.makedirs(f"exp/inference/{args.eval_dataset}", exist_ok=True)
-    with open(f"exp/inference/{args.eval_dataset}/{args.tid}.json", "w", encoding="utf-8") as f:
+    # If running as a chunk, write to a chunk-specific filename so multiple
+    # subprocesses don't clobber each other. Cell 7 of colab/41 concatenates
+    # all chunk files into the final {tid}.json.
+    if args.start_idx > 0 or args.end_idx >= 0:
+        out_filename = f"{args.tid}.chunk_{args.start_idx:04d}_{args.end_idx:04d}.json"
+    else:
+        out_filename = f"{args.tid}.json"
+    with open(f"exp/inference/{args.eval_dataset}/{out_filename}", "w", encoding="utf-8") as f:
         json.dump(inference_results, f, ensure_ascii=False)
+    print(f"[chunk] wrote {len(inference_results)} predictions to {out_filename}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -251,6 +267,20 @@ if __name__ == "__main__":
         default=None,
         choices=[None, "eager", "sdpa", "flash_attention_2"],
         help="Override config.attn_implementation. On CUDA use 'sdpa' (or 'flash_attention_2' once pip-installed) for ~40x less attention memory; on MPS stay on 'eager'. Defaults to config value."
+    )
+    # 2026-05-14: subprocess-chunking args. Memory leak ~1.5 GB/turn outside
+    # PyTorch's allocator (cuBLAS workspaces, NCCL state, possibly dataset
+    # loader CUDA buffers) — neither empty_cache nor lower batch_size can
+    # reclaim it. Workaround: cell 7 of colab/41 calls this script in chunks
+    # of N turns each, separate subprocess per chunk. Subprocess exit
+    # guarantees full GPU memory release.
+    parser.add_argument(
+        "--start_idx", type=int, default=0,
+        help="Start index into batch_data (after length-bucket sort). Default 0."
+    )
+    parser.add_argument(
+        "--end_idx", type=int, default=-1,
+        help="End index (exclusive). -1 means all. Used for subprocess chunking."
     )
     args = parser.parse_args()
     main(args)
