@@ -66,8 +66,10 @@ def test_duplicate_tids_rejected(sample_prediction_duplicate_tids):
 
 def test_missing_turn_rejected(sample_prediction_missing_turn):
     # 7 rows for one session (turn 5 missing). Exercise the per-session turn check
-    # via the blindA branch (which also enforces turns 1..8).
-    errors = vp.validate_schema(sample_prediction_missing_turn, "blindA")
+    # via the dev branch (which still enforces turns 1..8 — blindA's check was
+    # removed 2026-05-14 because the actual Blind-A dataset is 80 sessions × 1
+    # turn each, not 10 sessions × 8 turns).
+    errors = vp.validate_schema(sample_prediction_missing_turn, "dev")
     assert any("missing turns" in e for e in errors), f"errors: {errors}"
 
 

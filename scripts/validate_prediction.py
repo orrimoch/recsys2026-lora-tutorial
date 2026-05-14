@@ -29,7 +29,14 @@ EXPECTED_ROWS = {
 }
 EXPECTED_TURNS_PER_SESSION = {
     "dev": 8,
-    "blindA": 8,
+    # blindA: removed 2026-05-14. The current Blind-A dataset
+    # (talkpl-ai/TalkPlayData-Challenge-Blind-A, test split) is 80 unique
+    # sessions × 1 turn each (different sessions captured at different turn
+    # numbers, distribution {1: 20, 2: 15, 3: 10, 4: 5, 5: 8, 6: 9, 7: 8,
+    # 8: 5}). The "8 turns per session" check matched an OLD format where
+    # 10 sessions × 8 turns = 80 rows; today it would reject any valid
+    # submission. Row count check (EXPECTED_ROWS["blindA"]=80) is the
+    # remaining guardrail.
     "blindB": 8,
 }
 
