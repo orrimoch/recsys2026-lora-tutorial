@@ -14,28 +14,18 @@ from typing import List, Dict, Any, Tuple
 import pandas as pd
 from omegaconf import OmegaConf
 
-def chat_history_parser(conversations, music_crs, target_turn_number):
-    """
-    Parse conversation history up to a target turn.
+def chat_history_parser(conversations, music_crs, target_turn_number, chat_history_window=None):
+    """Parse conversation history up to a target turn.
 
-    Args:
-        conversations (List[Dict]): List of conversation turn dictionaries containing:
-            - turn_number: Turn index (1-8)
-            - role: Speaker role ('user', 'assistant', 'music')
-            - content: Message content or track ID
-        music_crs: CRS baseline instance (used to convert track IDs to metadata)
-        target_turn_number (int): The turn to predict (history excludes this turn)
-
-    Returns:
-        Tuple[List[Dict], str]:
-            - chat_history: List of previous messages formatted as [{"role": ..., "content": ...}]
-            - user_query: The user query at the target turn
+    Phase 1 Bundle C — `chat_history_window` (default None = full history) limits
+    the parser to the LAST N turn-pairs (N user msgs + N assistant msgs = 2N items).
+    Phase 0 showed long queries (>30 words) recall@20 = 0.247 vs short (<10 words)
+    0.359 — full chat history poisons retrieval. Windowing addresses this.
     """
     df_conversation = pd.DataFrame(conversations)
     df_history = df_conversation[df_conversation['turn_number'] < target_turn_number]
     chat_history = []
     for turn_data in df_history.to_dict(orient="records"):
-        turn_number = turn_data['turn_number']
         current_role = turn_data['role']
         current_content = turn_data['content']
         if turn_data['role'] == "music":
@@ -45,6 +35,13 @@ def chat_history_parser(conversations, music_crs, target_turn_number):
             "role": current_role,
             "content": current_content
         })
+
+    # Windowing: keep only the last N turn-pairs (= 2N messages) if configured.
+    if chat_history_window is not None and chat_history_window > 0:
+        max_messages = 2 * chat_history_window
+        if len(chat_history) > max_messages:
+            chat_history = chat_history[-max_messages:]
+
     df_current_turn = df_conversation[df_conversation['turn_number'] == target_turn_number]
     user_query = df_current_turn.iloc[0]['content']
     return chat_history, user_query
@@ -139,12 +136,20 @@ def main(args):
         cmqr_max_new_tokens=cmqr_max_new_tokens,
     )
     db = load_dataset(config.test_dataset_name, split="test")
+    # Phase 1 Bundle C: chat_history_window (per-config field, default None = full history)
+    # limits the chat history passed downstream to the last N user+assistant message pairs.
+    # Addresses Phase 0's −11pp recall@20 on long queries (>30 words) from history poisoning.
+    chat_history_window = config.get("chat_history_window", None)
     # Prepare all batch data at once
     batch_data, metadata = [], []
     for item in db:
         user_id = item['user_id']
         session_id = item['session_id']
         chat_history = item['conversations'][:-1]
+        if chat_history_window is not None and chat_history_window > 0:
+            max_msgs = 2 * int(chat_history_window)
+            if len(chat_history) > max_msgs:
+                chat_history = chat_history[-max_msgs:]
         user_query = item['conversations'][-1]['content']
         turn_number = item['conversations'][-1]['turn_number']
         # Full session-level context — downstream rerankers (e.g. LGBM) may
