@@ -52,3 +52,49 @@ def test_concat_modalities_returns_float32():
 
     out = concat_modalities(text=text, cf=cf, audio=audio)
     assert out.dtype == np.float32
+
+
+def test_compute_collision_buckets_groups_tracks_by_sid():
+    from mcrs.sid.preprocessing import compute_collision_buckets
+
+    track_ids = ["t1", "t2", "t3", "t4"]
+    sid_assignments = [
+        (10, 20, 30),  # t1 unique
+        (5, 5, 5),     # t2 collides with t3
+        (5, 5, 5),     # t3
+        (1, 2, 3),     # t4 unique
+    ]
+    popularity = {"t1": 50.0, "t2": 30.0, "t3": 80.0, "t4": 10.0}
+
+    buckets = compute_collision_buckets(track_ids, sid_assignments, popularity)
+
+    assert buckets[(10, 20, 30)] == ["t1"]
+    assert buckets[(5, 5, 5)] == ["t3", "t2"]
+    assert buckets[(1, 2, 3)] == ["t4"]
+
+
+def test_compute_collision_buckets_sorts_by_popularity_descending():
+    from mcrs.sid.preprocessing import compute_collision_buckets
+
+    track_ids = ["a", "b", "c"]
+    sid_assignments = [(0, 0, 0), (0, 0, 0), (0, 0, 0)]
+    popularity = {"a": 1.0, "b": 100.0, "c": 50.0}
+
+    buckets = compute_collision_buckets(track_ids, sid_assignments, popularity)
+    assert buckets[(0, 0, 0)] == ["b", "c", "a"]
+
+
+def test_compute_collision_buckets_handles_missing_popularity_as_zero():
+    from mcrs.sid.preprocessing import compute_collision_buckets
+
+    track_ids = ["a", "b"]
+    sid_assignments = [(0, 0, 0), (0, 0, 0)]
+    popularity = {"a": 5.0}
+
+    buckets = compute_collision_buckets(track_ids, sid_assignments, popularity)
+    assert buckets[(0, 0, 0)] == ["a", "b"]
+
+
+def test_compute_collision_buckets_empty_input_returns_empty_dict():
+    from mcrs.sid.preprocessing import compute_collision_buckets
+    assert compute_collision_buckets([], [], {}) == {}
