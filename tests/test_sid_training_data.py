@@ -290,6 +290,30 @@ def test_build_doc2query_pairs_handles_empty_synthetic_queries_list():
     assert pairs == []
 
 
+def test_build_doc2query_pairs_handles_numpy_object_array_queries():
+    """Regression: pd.read_parquet returns list[str] columns as numpy object arrays.
+    Earlier code used `row.get('synthetic_queries') or []` which raised
+    'ambiguous truth value' on numpy arrays. Builder must coerce to list first.
+    """
+    import numpy as np
+    from mcrs.sid.training_data import build_doc2query_pairs
+
+    rows = [
+        {"track_id": "t_ok", "synthetic_queries": np.array(["q1", "q2", "q3"], dtype=object)},
+        {"track_id": "t_empty", "synthetic_queries": np.array([], dtype=object)},
+        {"track_id": "t_none", "synthetic_queries": None},
+        {"track_id": "t_orphan", "synthetic_queries": np.array(["x"], dtype=object)},
+    ]
+    track_to_sid = {"t_ok": (1, 2, 3), "t_empty": (4, 5, 6), "t_none": (7, 8, 9)}
+
+    pairs = build_doc2query_pairs(rows, track_to_sid)
+
+    assert len(pairs) == 3
+    assert all(p["track_id"] == "t_ok" for p in pairs)
+    assert {p["query"] for p in pairs} == {"q1", "q2", "q3"}
+    assert {p["source"] for p in pairs} == {"doc2query"}
+
+
 def test_stratified_split_preserves_source_proportions():
     """Each source's train/val ratio is approximately 95/5."""
     import pandas as pd

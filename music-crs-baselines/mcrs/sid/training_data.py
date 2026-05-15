@@ -182,8 +182,16 @@ def build_doc2query_pairs(
     pairs: list[dict[str, Any]] = []
     for row in doc2query_rows:
         tid = row.get("track_id")
-        queries = row.get("synthetic_queries") or []
-        if tid not in track_to_sid or not queries:
+        raw_queries = row.get("synthetic_queries")
+        # Parquet stores list[str] as a numpy object-array; `array or []` raises
+        # "ambiguous truth value". Coerce to a plain Python list before testing.
+        if raw_queries is None:
+            continue
+        if hasattr(raw_queries, "tolist"):
+            queries = raw_queries.tolist()
+        else:
+            queries = list(raw_queries)
+        if tid not in track_to_sid or len(queries) == 0:
             continue
         c1, c2, c3 = track_to_sid[tid]
         for q in queries:
