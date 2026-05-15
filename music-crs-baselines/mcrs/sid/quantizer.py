@@ -101,18 +101,19 @@ class SIDQuantizer:
         # FIX (canonical for normalized embeddings):
         # - use_cosine_sim=True: VQ assignment uses cosine similarity instead of L2.
         #   Codebook entries are forced to unit-norm, naturally spread on the sphere.
-        # - orthogonal_reg_weight=10: penalizes pairs of codes that are similar,
-        #   driving them apart in the latent space.
-        # - threshold_ema_dead_code=2 + decay=0.8: standard dead-code revival;
-        #   safety net that doesn't hurt.
-        # - kmeans_iters=20: more thorough init (vs 10 default).
+        # - orthogonal_reg_weight=1.0: penalizes pairs of codes that are similar,
+        #   driving them apart. Lowered from 10.0 -> 1.0 (2026-05-16 v3.1) because
+        #   too-aggressive ortho_reg starves residual layers (level 2/3) of natural
+        #   structure to capture.
+        # - threshold_ema_dead_code=2 + decay=0.8: standard dead-code revival.
+        # - kmeans_iters=20: more thorough init.
         self.rvq = ResidualVQ(
             dim=latent_dim,
             num_quantizers=num_levels,
             codebook_size=codebook_size,
             commitment_weight=commitment_weight,
             use_cosine_sim=True,
-            orthogonal_reg_weight=10.0,
+            orthogonal_reg_weight=1.0,
             kmeans_init=True,
             kmeans_iters=20,
             threshold_ema_dead_code=2,
