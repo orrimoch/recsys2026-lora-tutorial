@@ -116,36 +116,47 @@ def test_validate_cluster_purity_samples_subset_when_n_samples_lt_total():
     assert purity == 1.0
 
 
-def test_compute_relative_mse_gate_passes_when_rqvae_within_1_5x_pca():
-    """Gate 1: RQ-VAE MSE <= 1.5 x PCA-256 baseline MSE."""
+def test_compute_relative_mse_gate_passes_via_absolute_path_for_low_mse():
+    """Gate 1: pass via the ABSOLUTE path when rqvae_mse <= absolute_threshold (0.02)."""
     from mcrs.sid.validation import compute_relative_mse_gate
 
-    passed, ratio = compute_relative_mse_gate(rqvae_mse=0.020, pca_mse=0.018, multiplier=1.5)
+    passed, mse = compute_relative_mse_gate(rqvae_mse=0.001, pca_mse=0.018, multiplier=1.5)
     assert passed is True
-    assert abs(ratio - 0.020 / 0.018) < 1e-9
+    assert mse == 0.001  # returns absolute mse for log inspection
 
 
-def test_compute_relative_mse_gate_fails_when_rqvae_too_lossy():
-    """RQ-VAE MSE 5x PCA -> fails."""
+def test_compute_relative_mse_gate_fails_when_both_paths_fail():
+    """High absolute mse AND ratio > multiplier -> fail."""
     from mcrs.sid.validation import compute_relative_mse_gate
 
-    passed, ratio = compute_relative_mse_gate(rqvae_mse=0.10, pca_mse=0.02, multiplier=1.5)
-    assert passed is False
-    assert ratio == 5.0
+    passed, mse = compute_relative_mse_gate(rqvae_mse=0.10, pca_mse=0.02, multiplier=1.5)
+    assert passed is False  # 0.10 > 0.02 absolute, AND 0.10/0.02=5 > 1.5
+    assert mse == 0.10
 
 
-def test_compute_relative_mse_gate_passes_when_rqvae_better_than_pca():
-    """RQ-VAE MSE < PCA -> passes (ratio < 1)."""
+def test_compute_relative_mse_gate_passes_via_absolute_path_when_better_than_pca():
+    """If absolute is good, we pass without even checking the relative ratio."""
     from mcrs.sid.validation import compute_relative_mse_gate
 
-    passed, ratio = compute_relative_mse_gate(rqvae_mse=0.005, pca_mse=0.020, multiplier=1.5)
+    passed, mse = compute_relative_mse_gate(rqvae_mse=0.005, pca_mse=0.020, multiplier=1.5)
+    assert passed is True  # absolute path: 0.005 <= 0.02
+    assert mse == 0.005
+
+
+def test_compute_relative_mse_gate_passes_via_relative_path_when_absolute_fails():
+    """High absolute MSE but acceptable relative-to-PCA -> pass via fallback."""
+    from mcrs.sid.validation import compute_relative_mse_gate
+
+    # MSE 0.05 fails absolute (>0.02) but is within 1.5x of PCA 0.04 -> pass via relative path
+    passed, mse = compute_relative_mse_gate(rqvae_mse=0.05, pca_mse=0.04, multiplier=1.5)
     assert passed is True
-    assert ratio == 0.25
+    assert mse == 0.05
 
 
 def test_compute_relative_mse_gate_handles_zero_pca_baseline():
-    """If PCA reconstructs perfectly, fall back to absolute threshold check."""
+    """Zero pca_mse with low absolute MSE: passes via absolute path."""
     from mcrs.sid.validation import compute_relative_mse_gate
 
-    passed, ratio = compute_relative_mse_gate(rqvae_mse=0.001, pca_mse=0.0, multiplier=1.5)
+    passed, mse = compute_relative_mse_gate(rqvae_mse=0.001, pca_mse=0.0, multiplier=1.5)
     assert passed is True
+    assert mse == 0.001
