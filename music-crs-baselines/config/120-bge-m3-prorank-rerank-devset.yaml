@@ -50,8 +50,9 @@ response_max_new_tokens: 64
 top_n_for_prompt: 1
 query_preprocessing_mode: "raw"
 
-# vLLM on Colab A100 for ~5-10x throughput.
-use_vllm: true
+# vLLM disabled — known unstable on Colab (per project_colab_library_traps.md);
+# transformers SDPA path is fast enough for dev-scale eval.
+use_vllm: false
 
 # W1 StateTracker (required by CMQR for state injection).
 use_state_tracker: true

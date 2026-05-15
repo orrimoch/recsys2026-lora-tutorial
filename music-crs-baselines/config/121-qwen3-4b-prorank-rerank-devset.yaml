@@ -37,7 +37,7 @@ response_max_new_tokens: 64
 top_n_for_prompt: 1
 query_preprocessing_mode: "raw"
 
-use_vllm: true
+use_vllm: false
 
 use_state_tracker: true
 state_tracker_prompt_name: "state_extraction"
