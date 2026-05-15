@@ -119,3 +119,53 @@ def test_windowed_chat_history_no_op_when_history_short():
 def test_windowed_chat_history_handles_empty_input():
     from mcrs.sid.training_data import windowed_chat_history
     assert windowed_chat_history([], n_turns=3) == []
+
+
+def test_build_metadata_as_query_pairs_one_pair_per_track():
+    """Returns one (query, sid) pair for each track present in the SID lookup."""
+    from mcrs.sid.training_data import build_metadata_as_query_pairs
+
+    track_metadata = [
+        {"track_id": "t1", "track_name": ["Bohemian Rhapsody"], "artist_name": ["Queen"], "album_name": ["A Night at the Opera"], "tag_list": ["rock"], "release_date": "1975"},
+        {"track_id": "t2", "track_name": ["Yesterday"], "artist_name": ["The Beatles"], "album_name": ["Help!"], "tag_list": ["pop"], "release_date": "1965"},
+    ]
+    track_to_sid = {"t1": (1, 2, 3), "t2": (4, 5, 6)}
+
+    pairs = build_metadata_as_query_pairs(track_metadata, track_to_sid)
+    assert len(pairs) == 2
+    by_tid = {p["track_id"]: p for p in pairs}
+    assert "Bohemian Rhapsody" in by_tid["t1"]["query"]
+    assert "Queen" in by_tid["t1"]["query"]
+    assert by_tid["t1"]["code_1"] == 1
+    assert by_tid["t1"]["code_2"] == 2
+    assert by_tid["t1"]["code_3"] == 3
+    assert by_tid["t1"]["source"] == "metadata"
+
+
+def test_build_metadata_as_query_pairs_skips_tracks_not_in_sid_lookup():
+    """If a track has no SID assignment, skip it (don't crash, don't synthesize)."""
+    from mcrs.sid.training_data import build_metadata_as_query_pairs
+
+    track_metadata = [
+        {"track_id": "t1", "track_name": ["A"], "artist_name": ["B"], "album_name": [""], "tag_list": [], "release_date": ""},
+        {"track_id": "t_missing", "track_name": ["C"], "artist_name": ["D"], "album_name": [""], "tag_list": [], "release_date": ""},
+    ]
+    track_to_sid = {"t1": (1, 2, 3)}  # t_missing absent
+
+    pairs = build_metadata_as_query_pairs(track_metadata, track_to_sid)
+    assert len(pairs) == 1
+    assert pairs[0]["track_id"] == "t1"
+
+
+def test_build_metadata_as_query_pairs_handles_empty_metadata_fields():
+    """Tracks with empty/missing metadata fields still produce a pair (using whatever's available)."""
+    from mcrs.sid.training_data import build_metadata_as_query_pairs
+
+    track_metadata = [
+        {"track_id": "t1", "track_name": ["Only Title"], "artist_name": [], "album_name": [], "tag_list": [], "release_date": ""},
+    ]
+    track_to_sid = {"t1": (1, 2, 3)}
+
+    pairs = build_metadata_as_query_pairs(track_metadata, track_to_sid)
+    assert len(pairs) == 1
+    assert "Only Title" in pairs[0]["query"]

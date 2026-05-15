@@ -64,3 +64,39 @@ def windowed_chat_history(
     if len(chat_history) <= max_msgs:
         return chat_history
     return chat_history[-max_msgs:]
+
+
+def build_metadata_as_query_pairs(
+    track_metadata: list[dict[str, Any]],
+    track_to_sid: dict[str, tuple[int, int, int]],
+) -> list[dict[str, Any]]:
+    """For each track in metadata that has a SID assignment, build one
+    (query, SID) training pair. Query = concatenated metadata fields.
+
+    Skips tracks not in track_to_sid (orphaned by W1 quantization).
+    """
+    pairs: list[dict[str, Any]] = []
+    for row in track_metadata:
+        tid = row["track_id"]
+        if tid not in track_to_sid:
+            continue
+        # Build query from available metadata fields
+        parts = []
+        for field in ("track_name", "artist_name", "album_name", "tag_list"):
+            val = row.get(field)
+            if isinstance(val, list) and val:
+                rendered = ", ".join(str(v) for v in val if v)
+                if rendered:
+                    parts.append(f"{field}: {rendered}")
+        release = row.get("release_date") or ""
+        if release:
+            parts.append(f"release_date: {release}")
+        query = " | ".join(parts)
+        c1, c2, c3 = track_to_sid[tid]
+        pairs.append({
+            "source": "metadata",
+            "track_id": tid,
+            "query": query,
+            "code_1": c1, "code_2": c2, "code_3": c3,
+        })
+    return pairs
