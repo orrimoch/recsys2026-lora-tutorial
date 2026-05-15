@@ -150,6 +150,10 @@ def main(args):
         cmqr_max_new_tokens=cmqr_max_new_tokens,
     )
     db = load_dataset(config.test_dataset_name, split="test")
+    if getattr(args, "subset", None) is not None:
+        n = min(args.subset, len(db))
+        db = db.select(range(n))
+        print(f"[run_inference_devset] --subset {args.subset} → using first {n} sessions ({n*8} turns)")
     # Prepare all batch data at once
     batch_data, metadata = [], []
     for item in db:
@@ -249,6 +253,13 @@ if __name__ == "__main__":
         choices=[None, "eager", "sdpa", "flash_attention_2"],
         help="Override config.attn_implementation. On CUDA use 'sdpa' for ~40x less attention memory; "
              "on MPS stay on 'eager' (our memory has 'MPS + sdpa' dead-ends). Defaults to config value."
+    )
+    parser.add_argument(
+        "--subset",
+        type=int,
+        default=None,
+        help="Truncate the dev set to first N sessions (default: full 1000). "
+             "Useful for T4 smoke runs before committing the ~3-6 hr full pipeline.",
     )
     args = parser.parse_args()
     main(args)
