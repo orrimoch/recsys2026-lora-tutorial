@@ -1,0 +1,67 @@
+# Phase 1 Bundle A — BGE-M3 swap for the metadata-dense sub of wRRF.
+#
+# Single-axis change vs config 110-prorank-rerank-devset.yaml:
+#   retrieval_type: "wrrf_bm25_dense_lyrics_v1"  →  "wrrf_bm25_dense_lyrics_bge_m3_v1"
+#
+# Effect: the BM25 + lyrics-dense + ProRank reranker pipeline is identical;
+# only the metadata-dense sub is replaced (Qwen3-Embedding-0.6B → BGE-M3).
+# The Phase 0 baseline diagnostic showed dense recall@100 = 0.179 vs BM25 =
+# 0.396, identifying dense as the weak link. BGE-M3 (~568M, hybrid sparse+
+# dense+multi-vec) is in the same size class but a different family.
+#
+# Prerequisite: catalog embeddings must exist at
+# `experiments/cache/dense_local/BAAI_bge-m3/bge-m3-metadata/track_embeddings.pkl`.
+# Generate via:
+#   python scripts/embed_catalog.py --model BAAI/bge-m3 --label bge-m3-metadata
+# (One-time ~30-60 min on Blackwell-95GB; cache survives across runs.)
+#
+# Eval: this config is run via run_inference_devset.py (full pipeline incl.
+# CMQR + ProRank + responder), then scored by music-crs-evaluator/evaluate_devset.py
+# for the official nDCG@20. Compare to baseline config 110's nDCG@20.
+# Decision rule: ship to Blind-A only if ΔnDCG@20 ≥ +0.02.
+
+lm_type: "Qwen/Qwen2.5-1.5B-Instruct"
+retrieval_type: "wrrf_bm25_dense_lyrics_bge_m3_v1"
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Dataset"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+# Pull top-100 from CMQR per plan §A3. ProRank shrinks to 20 for submission.
+retrieval_topk: 100
+
+# A5 ProRank reranker (W3 lever) — kept identical to 110 for single-axis isolation.
+reranker_type: "pro_rank"
+
+# Frozen exp-021 responder path — same generation params as 110 so any
+# Δ in score is attributable to the retriever swap, not LM behaviour.
+response_prompt_name: "response_generation"
+response_max_new_tokens: 64
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw"
+
+# vLLM on Colab A100 for ~5-10x throughput.
+use_vllm: true
+
+# W1 StateTracker (required by CMQR for state injection).
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+# W2 CMQR — kept on for parity with 110.
+use_cmqr: true
+cmqr_prompt_name: "cmqr_rewrites"
+cmqr_n_rewrites: 4
+cmqr_topk_per_rewrite: 50
+cmqr_rrf_k: 60
+cmqr_max_new_tokens: 96

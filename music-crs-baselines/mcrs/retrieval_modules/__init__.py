@@ -1,6 +1,7 @@
 from .bm25 import BM25_MODEL
 from .bert import BERT_MODEL
 from .dense_precomputed import DENSE_PRECOMPUTED
+from .dense_local import DENSE_LOCAL
 from .rrf import RRF_MODEL
 from .sequential_rerank import SEQUENTIAL_RERANK
 
@@ -59,6 +60,26 @@ def load_retrieval_module(
             embed_col="lyrics-qwen3_embedding_0.6b",
             instruct=QWEN3_MUSIC_INSTRUCT, instruct_label="instruct-music-v1",
         )
+    # Phase 1 Bundle A — BGE-M3 hybrid embedder over track metadata.
+    # Embeddings precomputed via `scripts/embed_catalog.py` and cached locally.
+    # BGE-M3 is symmetric (no instruct prefix) and uses model-default pooling
+    # (sentence-transformers handles it).
+    elif retrieval_type == "dense_metadata_bge_m3_local":
+        return DENSE_LOCAL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            model_name="BAAI/bge-m3",
+            embed_label="bge-m3-metadata",
+        )
+    # Phase 1 Bundle B — Qwen3-Embedding-4B over track metadata.
+    # Same family as the current 0.6B; tests "is the dense just under-powered?"
+    # Qwen3-Embedding asymmetric — apply the music instruct prefix.
+    elif retrieval_type == "dense_metadata_qwen3_4b_local":
+        return DENSE_LOCAL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            model_name="Qwen/Qwen3-Embedding-4B",
+            embed_label="qwen3-4b-metadata",
+            instruct=QWEN3_MUSIC_INSTRUCT, instruct_label="instruct-music-v1",
+        )
     # RRF hybrids. Each key pins a specific sub-retriever combination so the
     # config file needs only one field, per the existing factory signature.
     elif retrieval_type == "rrf_bm25_dense_metadata_v1":
@@ -101,6 +122,66 @@ def load_retrieval_module(
                 },
                 {
                     "type": "dense_metadata_qwen3_instruct",
+                    "corpus_types": corpus_types,
+                    "topk_internal": 20,
+                    "weight": 0.4,
+                },
+                {
+                    "type": "dense_lyrics_qwen3_instruct",
+                    "corpus_types": corpus_types,
+                    "topk_internal": 20,
+                    "weight": 0.4,
+                },
+            ],
+            k=60,
+        )
+    # Phase 1 Bundle A — same shape as wrrf_bm25_dense_lyrics_v1 but the metadata-dense
+    # sub is BGE-M3 (locally embedded) instead of Qwen3-Embedding-0.6B. Single-axis
+    # swap: only the metadata-dense embedder changes, BM25 + lyrics-dense identical.
+    elif retrieval_type == "wrrf_bm25_dense_lyrics_bge_m3_v1":
+        return RRF_MODEL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            sub_specs=[
+                {
+                    "type": "bm25",
+                    "corpus_types": [
+                        "track_name", "artist_name", "album_name",
+                        "release_date", "tag_list",
+                    ],
+                    "topk_internal": 60,
+                    "weight": 1.0,
+                },
+                {
+                    "type": "dense_metadata_bge_m3_local",
+                    "corpus_types": corpus_types,
+                    "topk_internal": 20,
+                    "weight": 0.4,
+                },
+                {
+                    "type": "dense_lyrics_qwen3_instruct",
+                    "corpus_types": corpus_types,
+                    "topk_internal": 20,
+                    "weight": 0.4,
+                },
+            ],
+            k=60,
+        )
+    # Phase 1 Bundle B — same shape but metadata-dense is Qwen3-Embedding-4B.
+    elif retrieval_type == "wrrf_bm25_dense_lyrics_qwen3_4b_v1":
+        return RRF_MODEL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            sub_specs=[
+                {
+                    "type": "bm25",
+                    "corpus_types": [
+                        "track_name", "artist_name", "album_name",
+                        "release_date", "tag_list",
+                    ],
+                    "topk_internal": 60,
+                    "weight": 1.0,
+                },
+                {
+                    "type": "dense_metadata_qwen3_4b_local",
                     "corpus_types": corpus_types,
                     "topk_internal": 20,
                     "weight": 0.4,
