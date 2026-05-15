@@ -80,3 +80,42 @@ def test_format_query_for_sid_input_truncates_long_history_messages():
     # The assistant's content is truncated to 200 chars max
     assert "x" * 300 not in out
     assert "x" * 200 in out
+
+
+def test_windowed_chat_history_returns_last_n_turn_pairs():
+    """N=3 keeps the last 6 messages (3 user + 3 assistant pairs)."""
+    from mcrs.sid.training_data import windowed_chat_history
+
+    chat = []
+    for i in range(5):  # 5 user-assistant turn-pairs = 10 messages
+        chat.append({"role": "user", "content": f"u{i}"})
+        chat.append({"role": "assistant", "content": f"a{i}"})
+
+    out = windowed_chat_history(chat, n_turns=3)
+    assert len(out) == 6
+    # Should keep the last 6 (i=2 onwards)
+    assert out[0]["content"] == "u2"
+    assert out[-1]["content"] == "a4"
+
+
+def test_windowed_chat_history_no_op_when_n_turns_is_none():
+    """n_turns=None preserves full history."""
+    from mcrs.sid.training_data import windowed_chat_history
+
+    chat = [{"role": "user", "content": str(i)} for i in range(20)]
+    out = windowed_chat_history(chat, n_turns=None)
+    assert len(out) == 20
+
+
+def test_windowed_chat_history_no_op_when_history_short():
+    """When len(chat) <= 2*n_turns, no truncation needed."""
+    from mcrs.sid.training_data import windowed_chat_history
+
+    chat = [{"role": "user", "content": "u1"}, {"role": "assistant", "content": "a1"}]
+    out = windowed_chat_history(chat, n_turns=3)
+    assert out == chat
+
+
+def test_windowed_chat_history_handles_empty_input():
+    from mcrs.sid.training_data import windowed_chat_history
+    assert windowed_chat_history([], n_turns=3) == []

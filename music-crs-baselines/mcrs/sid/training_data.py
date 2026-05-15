@@ -51,3 +51,16 @@ def format_query_for_sid_input(
             parts.append(f"  {role}: {content}")
     parts.append(f"[QUERY]: {current_user_query}")
     return "\n".join(parts)
+
+
+def windowed_chat_history(
+    chat_history: list[dict[str, str]],
+    n_turns: Optional[int] = None,
+) -> list[dict[str, str]]:
+    """Keep last N turn-pairs (= 2N messages) of chat history; no-op if n_turns is None."""
+    if n_turns is None or n_turns <= 0:
+        return chat_history
+    max_msgs = 2 * n_turns
+    if len(chat_history) <= max_msgs:
+        return chat_history
+    return chat_history[-max_msgs:]
