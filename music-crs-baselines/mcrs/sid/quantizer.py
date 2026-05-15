@@ -89,13 +89,34 @@ class SIDQuantizer:
             nn.GELU(),
             nn.Linear(max(latent_dim * 2, 64), input_dim),
         )
+        # Anti-collapse configuration (2026-05-16, after 2 full-scale runs showed
+        # chronic level-1 collapse to 2/256 codes even with dead-code revival):
+        #
+        # ROOT CAUSE: our input is L2-normalized per modality (text + CF + audio).
+        # It lives near a unit hypersphere. L2-distance VQ on hypersphere data
+        # collapses everything to the centroid; codes pull toward the centroid and
+        # the encoder learns to map all points to ~the same latent direction.
+        # Dead-code revival can't recover because revived codes get pulled back.
+        #
+        # FIX (canonical for normalized embeddings):
+        # - use_cosine_sim=True: VQ assignment uses cosine similarity instead of L2.
+        #   Codebook entries are forced to unit-norm, naturally spread on the sphere.
+        # - orthogonal_reg_weight=10: penalizes pairs of codes that are similar,
+        #   driving them apart in the latent space.
+        # - threshold_ema_dead_code=2 + decay=0.8: standard dead-code revival;
+        #   safety net that doesn't hurt.
+        # - kmeans_iters=20: more thorough init (vs 10 default).
         self.rvq = ResidualVQ(
             dim=latent_dim,
             num_quantizers=num_levels,
             codebook_size=codebook_size,
             commitment_weight=commitment_weight,
+            use_cosine_sim=True,
+            orthogonal_reg_weight=10.0,
             kmeans_init=True,
-            kmeans_iters=10,
+            kmeans_iters=20,
+            threshold_ema_dead_code=2,
+            decay=0.8,
         )
 
     def parameters(self):
@@ -123,12 +144,26 @@ class SIDQuantizer:
 
     @torch.no_grad()
     def encode_batch(self, embs: np.ndarray) -> np.ndarray:
-        """Encode N embeddings → (N, num_levels) array of code indices."""
+        """Encode N embeddings → (N, num_levels) array of code indices.
+
+        Forces eval() mode on encoder + rvq before encoding so codebook EMA
+        and dead-code revival don't mutate state during inference (otherwise
+        save→encode→load→encode produces different SIDs because the codebook
+        shifts in the first encode pass).
+        """
         device = next(self.encoder.parameters()).device
         x = torch.from_numpy(np.asarray(embs, dtype=np.float32)).to(device)
-        z = self.encoder(x)
-        _, indices, _ = self.rvq(z)
-        return indices.detach().cpu().numpy().astype(np.int64)
+        was_training_enc = self.encoder.training
+        was_training_rvq = self.rvq.training
+        self.encoder.eval()
+        self.rvq.eval()
+        try:
+            z = self.encoder(x)
+            _, indices, _ = self.rvq(z)
+            return indices.detach().cpu().numpy().astype(np.int64)
+        finally:
+            if was_training_enc: self.encoder.train()
+            if was_training_rvq: self.rvq.train()
 
     def encode(self, emb: np.ndarray) -> tuple[int, ...]:
         """Encode a single embedding → tuple of num_levels code indices."""
