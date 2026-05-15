@@ -157,3 +157,29 @@ def build_raw_conversation_pairs(
                 chat_history.append({"role": "assistant", "content": content})
                 pending_user_query = None
     return pairs
+
+
+def build_doc2query_pairs(
+    doc2query_rows: list[dict[str, Any]],
+    track_to_sid: dict[str, tuple[int, int, int]],
+) -> list[dict[str, Any]]:
+    """For each track with synthetic queries (from notebook 54's doc2query
+    output), emit one (query, SID) pair per synthetic query.
+
+    Skips tracks not in track_to_sid; skips empty query lists.
+    """
+    pairs: list[dict[str, Any]] = []
+    for row in doc2query_rows:
+        tid = row.get("track_id")
+        queries = row.get("synthetic_queries") or []
+        if tid not in track_to_sid or not queries:
+            continue
+        c1, c2, c3 = track_to_sid[tid]
+        for q in queries:
+            pairs.append({
+                "source": "doc2query",
+                "track_id": tid,
+                "query": q,
+                "code_1": c1, "code_2": c2, "code_3": c3,
+            })
+    return pairs

@@ -242,3 +242,49 @@ def test_build_raw_conversation_pairs_handles_session_without_user_profile_or_go
     assert len(pairs) == 1
     assert "[USER]" not in pairs[0]["query"]
     assert "anything" in pairs[0]["query"]
+
+
+def test_build_doc2query_pairs_one_pair_per_synthetic_query():
+    """A track with N synthetic queries produces N (query, SID) pairs."""
+    from mcrs.sid.training_data import build_doc2query_pairs
+
+    doc2query_rows = [
+        {"track_id": "t1", "synthetic_queries": ["something rock", "energetic 80s", "guitar solo banger"]},
+        {"track_id": "t2", "synthetic_queries": ["dreamy ambient"]},
+    ]
+    track_to_sid = {"t1": (1, 2, 3), "t2": (4, 5, 6)}
+
+    pairs = build_doc2query_pairs(doc2query_rows, track_to_sid)
+    assert len(pairs) == 4  # 3 from t1 + 1 from t2
+    t1_pairs = [p for p in pairs if p["track_id"] == "t1"]
+    assert len(t1_pairs) == 3
+    queries = [p["query"] for p in t1_pairs]
+    assert "something rock" in queries
+    assert all(p["code_1"] == 1 for p in t1_pairs)
+    assert all(p["source"] == "doc2query" for p in t1_pairs)
+
+
+def test_build_doc2query_pairs_skips_tracks_not_in_sid_lookup():
+    """If a track has synthetic queries but no SID assignment, skip all its pairs."""
+    from mcrs.sid.training_data import build_doc2query_pairs
+
+    doc2query_rows = [
+        {"track_id": "t1", "synthetic_queries": ["q1"]},
+        {"track_id": "t_missing", "synthetic_queries": ["q2", "q3"]},
+    ]
+    track_to_sid = {"t1": (1, 2, 3)}
+
+    pairs = build_doc2query_pairs(doc2query_rows, track_to_sid)
+    assert len(pairs) == 1
+    assert pairs[0]["track_id"] == "t1"
+
+
+def test_build_doc2query_pairs_handles_empty_synthetic_queries_list():
+    """A track with empty synthetic_queries list produces no pairs."""
+    from mcrs.sid.training_data import build_doc2query_pairs
+
+    doc2query_rows = [{"track_id": "t1", "synthetic_queries": []}]
+    track_to_sid = {"t1": (1, 2, 3)}
+
+    pairs = build_doc2query_pairs(doc2query_rows, track_to_sid)
+    assert pairs == []
