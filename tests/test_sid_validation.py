@@ -35,3 +35,82 @@ def test_validate_codebook_utilization_at_exact_threshold_passes():
         assignments, codebook_size=256, threshold=0.80,
     )
     assert passed is True
+
+
+def test_validate_cluster_purity_pure_buckets_pass():
+    """When every bucket's tracks share a tag, purity = 100% -> passes."""
+    from mcrs.sid.validation import validate_cluster_purity
+
+    buckets = {
+        f"bucket_{i}": [f"t{i}_{j}" for j in range(3)]
+        for i in range(5)
+    }
+    tag_lookup = {
+        f"t{i}_{j}": ["rock", f"genre{i}"]
+        for i in range(5) for j in range(3)
+    }
+    passed, purity = validate_cluster_purity(
+        buckets, tag_lookup, n_samples=5, threshold=0.60, seed=42,
+    )
+    assert passed is True
+    assert purity == 1.0
+
+
+def test_validate_cluster_purity_random_tags_fail():
+    """Tracks within buckets have no shared tags, purity = 0% -> fails."""
+    from mcrs.sid.validation import validate_cluster_purity
+
+    buckets = {
+        f"bucket_{i}": [f"t{i}_{j}" for j in range(3)]
+        for i in range(5)
+    }
+    tag_lookup = {
+        f"t{i}_{j}": [f"tag_{i}_{j}"]
+        for i in range(5) for j in range(3)
+    }
+    passed, purity = validate_cluster_purity(
+        buckets, tag_lookup, n_samples=5, threshold=0.60, seed=42,
+    )
+    assert passed is False
+    assert purity < 0.60
+
+
+def test_validate_cluster_purity_handles_singleton_buckets():
+    """Singleton buckets count as pure."""
+    from mcrs.sid.validation import validate_cluster_purity
+
+    buckets = {f"bucket_{i}": [f"t{i}"] for i in range(5)}
+    tag_lookup = {f"t{i}": [f"tag_{i}"] for i in range(5)}
+
+    passed, purity = validate_cluster_purity(
+        buckets, tag_lookup, n_samples=5, threshold=0.60, seed=42,
+    )
+    assert passed is True
+    assert purity == 1.0
+
+
+def test_validate_cluster_purity_lowercases_and_strips_tags():
+    """Tag matching is case-insensitive and whitespace-stripped."""
+    from mcrs.sid.validation import validate_cluster_purity
+
+    buckets = {"b": ["t1", "t2"]}
+    tag_lookup = {"t1": ["Rock"], "t2": [" rock "]}
+
+    passed, purity = validate_cluster_purity(
+        buckets, tag_lookup, n_samples=1, threshold=0.60, seed=42,
+    )
+    assert passed is True
+
+
+def test_validate_cluster_purity_samples_subset_when_n_samples_lt_total():
+    """When buckets > n_samples, only sample n_samples for evaluation."""
+    from mcrs.sid.validation import validate_cluster_purity
+
+    buckets = {f"b_{i}": [f"t{i}_a", f"t{i}_b"] for i in range(100)}
+    tag_lookup = {tid: ["rock"] for i in range(100) for tid in [f"t{i}_a", f"t{i}_b"]}
+
+    passed, purity = validate_cluster_purity(
+        buckets, tag_lookup, n_samples=10, threshold=0.60, seed=42,
+    )
+    assert passed is True
+    assert purity == 1.0
