@@ -80,18 +80,29 @@ def build_metadata_as_query_pairs(
         tid = row["track_id"]
         if tid not in track_to_sid:
             continue
-        # Build query from available metadata fields
+        # Build query from available metadata fields. Handle BOTH list-typed
+        # (e.g., track_name=["Yesterday"]) AND scalar-string (e.g., track_name="Yesterday")
+        # variants — the dataset has both depending on field/version.
         parts = []
         for field in ("track_name", "artist_name", "album_name", "tag_list"):
             val = row.get(field)
             if isinstance(val, list) and val:
                 rendered = ", ".join(str(v) for v in val if v)
-                if rendered:
-                    parts.append(f"{field}: {rendered}")
+            elif isinstance(val, str) and val:
+                rendered = val
+            else:
+                rendered = ""
+            if rendered:
+                parts.append(f"{field}: {rendered}")
         release = row.get("release_date") or ""
         if release:
             parts.append(f"release_date: {release}")
         query = " | ".join(parts)
+        # Skip tracks with completely empty metadata — emitting an empty query
+        # would teach the SID generator to map empty input to this SID, which
+        # corrupts cold-start behavior at inference. Caller logs the count.
+        if not query:
+            continue
         c1, c2, c3 = track_to_sid[tid]
         pairs.append({
             "source": "metadata",
