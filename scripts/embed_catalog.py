@@ -66,7 +66,9 @@ def main():
     parser.add_argument("--catalog-dataset", default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata")
     parser.add_argument("--catalog-split", default="all_tracks")
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--cache-root", default=str(BASELINES_DIR / "experiments" / "cache" / "dense_local"))
+    # NOTE: must match where DENSE_LOCAL looks at runtime — i.e., the parent of
+    # `music-crs-baselines/`, since configs use cache_dir: "../experiments/cache".
+    parser.add_argument("--cache-root", default=str(REPO_ROOT / "experiments" / "cache" / "dense_local"))
     parser.add_argument("--max-tracks", type=int, default=None,
                         help="Smoke-test cap; encode only the first N tracks (default: full catalog).")
     args = parser.parse_args()
