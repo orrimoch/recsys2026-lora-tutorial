@@ -288,3 +288,74 @@ def test_build_doc2query_pairs_handles_empty_synthetic_queries_list():
 
     pairs = build_doc2query_pairs(doc2query_rows, track_to_sid)
     assert pairs == []
+
+
+def test_stratified_split_preserves_source_proportions():
+    """Each source's train/val ratio is approximately 95/5."""
+    import pandas as pd
+    from mcrs.sid.training_data import stratified_split
+
+    df = pd.DataFrame([
+        {"source": "raw", "track_id": f"t{i}", "query": f"q{i}", "code_1": 1, "code_2": 2, "code_3": 3}
+        for i in range(100)
+    ] + [
+        {"source": "metadata", "track_id": f"m{i}", "query": f"mq{i}", "code_1": 4, "code_2": 5, "code_3": 6}
+        for i in range(200)
+    ])
+
+    train, val = stratified_split(df, val_frac=0.05, seed=42)
+
+    raw_train = (train["source"] == "raw").sum()
+    raw_val = (val["source"] == "raw").sum()
+    assert raw_train + raw_val == 100
+    assert 4 <= raw_val <= 6  # ~5% of 100
+
+    meta_train = (train["source"] == "metadata").sum()
+    meta_val = (val["source"] == "metadata").sum()
+    assert meta_train + meta_val == 200
+    assert 9 <= meta_val <= 11  # ~5% of 200
+
+
+def test_stratified_split_is_deterministic_with_seed():
+    """Same seed produces same split."""
+    import pandas as pd
+    from mcrs.sid.training_data import stratified_split
+
+    df = pd.DataFrame([
+        {"source": "raw", "track_id": f"t{i}", "query": f"q{i}", "code_1": 1, "code_2": 2, "code_3": 3}
+        for i in range(50)
+    ])
+
+    t1, v1 = stratified_split(df, val_frac=0.10, seed=42)
+    t2, v2 = stratified_split(df, val_frac=0.10, seed=42)
+
+    pd.testing.assert_frame_equal(t1.reset_index(drop=True), t2.reset_index(drop=True))
+    pd.testing.assert_frame_equal(v1.reset_index(drop=True), v2.reset_index(drop=True))
+
+
+def test_stratified_split_handles_single_row_per_source():
+    """When a source has only 1 row, it goes to train (val gets 0)."""
+    import pandas as pd
+    from mcrs.sid.training_data import stratified_split
+
+    df = pd.DataFrame([
+        {"source": "raw", "track_id": "t1", "query": "q", "code_1": 1, "code_2": 2, "code_3": 3},
+    ])
+    train, val = stratified_split(df, val_frac=0.05, seed=42)
+    assert len(train) == 1
+    assert len(val) == 0
+
+
+def test_stratified_split_total_rows_preserved():
+    """train + val == original df (no rows lost)."""
+    import pandas as pd
+    from mcrs.sid.training_data import stratified_split
+
+    df = pd.DataFrame([
+        {"source": "raw" if i % 2 == 0 else "metadata",
+         "track_id": f"t{i}", "query": f"q{i}",
+         "code_1": 0, "code_2": 0, "code_3": 0}
+        for i in range(40)
+    ])
+    train, val = stratified_split(df, val_frac=0.20, seed=42)
+    assert len(train) + len(val) == 40

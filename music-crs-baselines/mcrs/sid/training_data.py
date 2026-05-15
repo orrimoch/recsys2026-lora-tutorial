@@ -183,3 +183,28 @@ def build_doc2query_pairs(
                 "code_1": c1, "code_2": c2, "code_3": c3,
             })
     return pairs
+
+
+def stratified_split(
+    df: "pd.DataFrame",
+    val_frac: float = 0.05,
+    seed: int = 42,
+) -> "tuple[pd.DataFrame, pd.DataFrame]":
+    """Stratified split: each `source` group gets val_frac of its rows in val.
+
+    Deterministic given seed. Sources with <= 1/val_frac rows put 0 rows in val
+    (avoids tiny/empty val per-source slices).
+    """
+    import pandas as pd
+    train_parts = []
+    val_parts = []
+    for source, group in df.groupby("source"):
+        n = len(group)
+        n_val = int(round(val_frac * n))
+        # Shuffle deterministically per source
+        shuffled = group.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+        val_parts.append(shuffled.iloc[:n_val])
+        train_parts.append(shuffled.iloc[n_val:])
+    train = pd.concat(train_parts, ignore_index=True)
+    val = pd.concat(val_parts, ignore_index=True) if val_parts else pd.DataFrame()
+    return train, val
