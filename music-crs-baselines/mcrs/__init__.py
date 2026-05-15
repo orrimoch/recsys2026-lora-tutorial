@@ -1,7 +1,12 @@
 from typing import List, Optional
 
 import torch
-from .crs_baseline import CRS_BASELINE
+
+# CRS_BASELINE is lazily imported inside load_crs_baseline() so that submodule
+# access like `from mcrs.sid.preprocessing import ...` does NOT eagerly trigger
+# the full retriever cascade (BM25, dense, CMQR, etc., each with their own
+# heavy deps). Callers of load_crs_baseline pay the cascade cost on first call,
+# same as before.
 
 def load_crs_baseline(
     lm_type="meta-llama/Llama-3.2-1B-Instruct",
@@ -39,6 +44,7 @@ def load_crs_baseline(
     cmqr_rrf_k: int = 60,
     cmqr_max_new_tokens: int = 96,
 ):
+    from .crs_baseline import CRS_BASELINE  # lazy: see module-level comment
     return CRS_BASELINE(
         lm_type=lm_type,
         retrieval_type=retrieval_type,
