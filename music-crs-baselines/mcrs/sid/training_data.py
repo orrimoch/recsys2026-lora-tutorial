@@ -100,3 +100,60 @@ def build_metadata_as_query_pairs(
             "code_1": c1, "code_2": c2, "code_3": c3,
         })
     return pairs
+
+
+def build_raw_conversation_pairs(
+    sessions: list[dict[str, Any]],
+    track_to_sid: dict[str, tuple[int, int, int]],
+    n_turns_window: int = 3,
+) -> list[dict[str, Any]]:
+    """For each music-role turn in train conversations, emit one (query, SID) pair.
+
+    The query string is built by `format_query_for_sid_input(chat_history_so_far,
+    user_query_at_this_turn, user_profile, conversation_goal)`. Chat history is
+    windowed to the last n_turns_window turn-pairs.
+
+    Skips turns where the gold track is not in track_to_sid (e.g. test-set tracks).
+    """
+    pairs: list[dict[str, Any]] = []
+    for session in sessions:
+        convs = session.get("conversations", [])
+        user_profile = session.get("user_profile")
+        conversation_goal = session.get("conversation_goal")
+
+        # Walk the conversation in order. At each music-role turn, emit a pair.
+        # The chat history at that point is everything BEFORE the current music turn.
+        chat_history: list[dict[str, str]] = []
+        pending_user_query: Optional[str] = None
+        for turn in convs:
+            role = turn.get("role")
+            content = turn.get("content") or ""
+            if role == "user":
+                pending_user_query = content
+                # Note: don't append yet — wait until we see if this turn produces a music response
+            elif role == "music":
+                # Emit a pair if we have a pending user query AND the track has a SID
+                if pending_user_query is not None and content in track_to_sid:
+                    windowed = windowed_chat_history(chat_history, n_turns=n_turns_window)
+                    query_str = format_query_for_sid_input(
+                        chat_history=windowed,
+                        current_user_query=pending_user_query,
+                        user_profile=user_profile,
+                        conversation_goal=conversation_goal,
+                    )
+                    c1, c2, c3 = track_to_sid[content]
+                    pairs.append({
+                        "source": "raw",
+                        "track_id": content,
+                        "query": query_str,
+                        "code_1": c1, "code_2": c2, "code_3": c3,
+                    })
+                # Append the user query and assistant track summary to chat_history
+                if pending_user_query is not None:
+                    chat_history.append({"role": "user", "content": pending_user_query})
+                # The "assistant" message in chat history is the track ID (W4 inference also
+                # uses this — id_to_metadata is applied at inference time, but for SID
+                # training the bare ID is sufficient signal of "what was just played")
+                chat_history.append({"role": "assistant", "content": content})
+                pending_user_query = None
+    return pairs
