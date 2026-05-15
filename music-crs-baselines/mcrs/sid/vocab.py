@@ -41,3 +41,43 @@ def add_sid_tokens_to_tokenizer(
     if to_add:
         tokenizer.add_special_tokens({"additional_special_tokens": to_add})
     return tokenizer, len(to_add)
+
+
+def untie_embeddings_if_tied(model) -> None:
+    """If model has tied input/output embeddings (Qwen2.5-1.5B does), untie them
+    by allocating a fresh nn.Linear for lm_head and copying the embedding weights.
+
+    Required before applying LoRA with modules_to_save=["embed_tokens", "lm_head"]
+    — otherwise PEFT may save two copies of the same tied weight, which the merger
+    can't reconcile back into a single tied matrix.
+    """
+    import torch
+    from torch import nn
+
+    if not getattr(model.config, "tie_word_embeddings", False):
+        return
+    embed_weight = model.get_input_embeddings().weight.data.clone()
+    hidden_size = model.config.hidden_size
+    vocab_size = embed_weight.shape[0]
+    # Create a fresh linear layer with the same weight values, then attach it.
+    new_lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
+    new_lm_head.weight.data = embed_weight
+    # Match dtype + device of original lm_head before swapping.
+    orig_lm_head = model.get_output_embeddings()
+    new_lm_head = new_lm_head.to(
+        dtype=orig_lm_head.weight.dtype, device=orig_lm_head.weight.device,
+    )
+    model.set_output_embeddings(new_lm_head)
+    model.config.tie_word_embeddings = False
+
+
+def extend_model_vocab(model, target_vocab_size: int) -> None:
+    """Resize model's input + output embedding matrices to target_vocab_size.
+
+    No-op if model is already at target size. New rows are randomly initialized
+    by HF's resize_token_embeddings (which uses the model's init scheme).
+    """
+    current = model.get_input_embeddings().weight.shape[0]
+    if current == target_vocab_size:
+        return
+    model.resize_token_embeddings(target_vocab_size)

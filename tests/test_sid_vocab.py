@@ -51,3 +51,67 @@ def test_added_tokens_are_recognized_as_single_ids():
     for tok_str in ["<SID_L0_C0>", "<SID_L1_C100>", "<SID_L2_C255>"]:
         ids = tok.encode(tok_str, add_special_tokens=False)
         assert len(ids) == 1, f"{tok_str} encoded to {ids} (expected length 1)"
+
+
+def test_untie_embeddings_creates_separate_matrices():
+    """After untying, embed_tokens.weight and lm_head.weight are not the same Tensor."""
+    import torch
+    from transformers import AutoModelForCausalLM
+    from mcrs.sid.vocab import untie_embeddings_if_tied
+    model = AutoModelForCausalLM.from_pretrained(
+        "Qwen/Qwen2.5-1.5B-Instruct", torch_dtype=torch.float32
+    )
+    assert model.config.tie_word_embeddings is True  # sanity
+    untie_embeddings_if_tied(model)
+    assert model.config.tie_word_embeddings is False
+    # Different storage = different .data_ptr()
+    assert (
+        model.get_input_embeddings().weight.data_ptr()
+        != model.get_output_embeddings().weight.data_ptr()
+    )
+
+
+def test_untie_embeddings_preserves_values():
+    """Untying copies the tied weight to lm_head — values must be IDENTICAL after untie."""
+    import torch
+    from transformers import AutoModelForCausalLM
+    from mcrs.sid.vocab import untie_embeddings_if_tied
+    model = AutoModelForCausalLM.from_pretrained(
+        "Qwen/Qwen2.5-1.5B-Instruct", torch_dtype=torch.float32
+    )
+    pre = model.get_input_embeddings().weight.data.clone()
+    untie_embeddings_if_tied(model)
+    assert torch.allclose(model.get_input_embeddings().weight, pre)
+    assert torch.allclose(model.get_output_embeddings().weight, pre)
+
+
+def test_extend_model_vocab_grows_to_target():
+    """After extending, embed_tokens has exactly len(tokenizer) rows."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from mcrs.sid.vocab import (
+        add_sid_tokens_to_tokenizer, untie_embeddings_if_tied, extend_model_vocab,
+    )
+    tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+    tok, _ = add_sid_tokens_to_tokenizer(tok, 3, 256)
+    model = AutoModelForCausalLM.from_pretrained(
+        "Qwen/Qwen2.5-1.5B-Instruct", torch_dtype=torch.float32
+    )
+    untie_embeddings_if_tied(model)
+    extend_model_vocab(model, len(tok))
+    assert model.get_input_embeddings().weight.shape[0] == len(tok)
+    assert model.get_output_embeddings().weight.shape[0] == len(tok)
+
+
+def test_extend_model_vocab_idempotent():
+    """Calling extend_model_vocab with a target equal to current size is a no-op."""
+    import torch
+    from transformers import AutoModelForCausalLM
+    from mcrs.sid.vocab import untie_embeddings_if_tied, extend_model_vocab
+    model = AutoModelForCausalLM.from_pretrained(
+        "Qwen/Qwen2.5-1.5B-Instruct", torch_dtype=torch.float32
+    )
+    untie_embeddings_if_tied(model)
+    n_before = model.get_input_embeddings().weight.shape[0]
+    extend_model_vocab(model, n_before)
+    assert model.get_input_embeddings().weight.shape[0] == n_before
