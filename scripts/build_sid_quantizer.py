@@ -225,11 +225,14 @@ def main():
     level1_buckets: dict[int, list[str]] = {}
     for tid, sid_row in zip(track_ids, sids_arr):
         level1_buckets.setdefault(int(sid_row[0]), []).append(tid)
+    # Gate 3 threshold 0.20 = mean dominant-tag fraction across sampled buckets.
+    # See validation.validate_cluster_purity v2 docstring for why intersection-based
+    # purity (the v1 metric) is geometrically impossible at 184-tracks-per-bucket scale.
     g3_pass, g3_purity = validate_cluster_purity(
         {str(k): v for k, v in level1_buckets.items()},
         tag_lookup,
         n_samples=100,
-        threshold=0.60,
+        threshold=0.20,
         seed=args.seed,
     )
 
