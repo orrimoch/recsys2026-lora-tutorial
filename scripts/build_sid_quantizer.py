@@ -69,24 +69,47 @@ def main():
     if args.max_tracks is not None:
         emb_ds = emb_ds.select(range(min(args.max_tracks, len(emb_ds))))
 
+    # Per-modality fixed dims (verified 2026-05-15 via dataset peek).
+    # Per `feedback_embedding_imputation.md`, impute missing/wrong-shape rows
+    # with zeros — never drop tracks (catalog coverage discipline).
+    TEXT_DIM, CF_DIM, AUDIO_DIM = 1024, 128, 512
+
+    def _safe_array(raw, expected_dim: int) -> np.ndarray:
+        """Return float32 array of expected_dim. Impute zeros if raw is None/empty/wrong-shape."""
+        if raw is None:
+            return np.zeros(expected_dim, dtype=np.float32)
+        arr = np.asarray(raw, dtype=np.float32)
+        if arr.size == 0 or arr.shape != (expected_dim,):
+            return np.zeros(expected_dim, dtype=np.float32)
+        return arr
+
     track_ids: list[str] = []
     fused_embs: list[np.ndarray] = []
+    n_imputed = {"text": 0, "cf": 0, "audio": 0}
     for row in tqdm(emb_ds, desc="concat modalities"):
         tid = row["track_id"]
-        text = np.array(row["metadata-qwen3_embedding_0.6b"], dtype=np.float32)
-        cf_raw = row["cf-bpr"]
-        cf = (
-            np.zeros(128, dtype=np.float32)
-            if (cf_raw is None or len(cf_raw) == 0)
-            else np.array(cf_raw, dtype=np.float32)
-        )
-        audio = np.array(row["audio-laion_clap"], dtype=np.float32)
+        text = _safe_array(row.get("metadata-qwen3_embedding_0.6b"), TEXT_DIM)
+        cf = _safe_array(row.get("cf-bpr"), CF_DIM)
+        audio = _safe_array(row.get("audio-laion_clap"), AUDIO_DIM)
+        # Track imputation rates (a row counts as imputed if it's the all-zero vector).
+        if not text.any():
+            n_imputed["text"] += 1
+        if not cf.any():
+            n_imputed["cf"] += 1
+        if not audio.any():
+            n_imputed["audio"] += 1
         fused = concat_modalities(text=text, cf=cf, audio=audio)
         track_ids.append(tid)
         fused_embs.append(fused)
 
     X = np.stack(fused_embs)  # (N, ~1664)
     print(f"[build_sid_quantizer] X shape={X.shape}", file=sys.stderr)
+    print(
+        f"[build_sid_quantizer] imputed-zero rows: text={n_imputed['text']}, "
+        f"cf={n_imputed['cf']}, audio={n_imputed['audio']} "
+        f"(out of {len(track_ids)})",
+        file=sys.stderr,
+    )
 
     # 2) Train RQ-VAE ----------------------------------------------------------
     device = (
