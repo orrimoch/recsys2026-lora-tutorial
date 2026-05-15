@@ -114,3 +114,38 @@ def test_validate_cluster_purity_samples_subset_when_n_samples_lt_total():
     )
     assert passed is True
     assert purity == 1.0
+
+
+def test_compute_relative_mse_gate_passes_when_rqvae_within_1_5x_pca():
+    """Gate 1: RQ-VAE MSE <= 1.5 x PCA-256 baseline MSE."""
+    from mcrs.sid.validation import compute_relative_mse_gate
+
+    passed, ratio = compute_relative_mse_gate(rqvae_mse=0.020, pca_mse=0.018, multiplier=1.5)
+    assert passed is True
+    assert abs(ratio - 0.020 / 0.018) < 1e-9
+
+
+def test_compute_relative_mse_gate_fails_when_rqvae_too_lossy():
+    """RQ-VAE MSE 5x PCA -> fails."""
+    from mcrs.sid.validation import compute_relative_mse_gate
+
+    passed, ratio = compute_relative_mse_gate(rqvae_mse=0.10, pca_mse=0.02, multiplier=1.5)
+    assert passed is False
+    assert ratio == 5.0
+
+
+def test_compute_relative_mse_gate_passes_when_rqvae_better_than_pca():
+    """RQ-VAE MSE < PCA -> passes (ratio < 1)."""
+    from mcrs.sid.validation import compute_relative_mse_gate
+
+    passed, ratio = compute_relative_mse_gate(rqvae_mse=0.005, pca_mse=0.020, multiplier=1.5)
+    assert passed is True
+    assert ratio == 0.25
+
+
+def test_compute_relative_mse_gate_handles_zero_pca_baseline():
+    """If PCA reconstructs perfectly, fall back to absolute threshold check."""
+    from mcrs.sid.validation import compute_relative_mse_gate
+
+    passed, ratio = compute_relative_mse_gate(rqvae_mse=0.001, pca_mse=0.0, multiplier=1.5)
+    assert passed is True

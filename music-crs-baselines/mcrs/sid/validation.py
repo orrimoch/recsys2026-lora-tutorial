@@ -52,3 +52,20 @@ def validate_cluster_purity(
             pure_count += 1
     purity = pure_count / len(sampled_keys)
     return (purity >= threshold, purity)
+
+
+def compute_relative_mse_gate(
+    rqvae_mse: float,
+    pca_mse: float,
+    multiplier: float = 1.5,
+    absolute_fallback: float = 0.01,
+) -> tuple[bool, float]:
+    """Gate 1: RQ-VAE reconstruction MSE <= multiplier * PCA-256 baseline MSE.
+
+    Falls back to absolute threshold when PCA baseline is 0 (degenerate case).
+    Returns (passed, ratio_or_absolute_value).
+    """
+    if pca_mse == 0.0:
+        return (rqvae_mse < absolute_fallback, rqvae_mse)
+    ratio = rqvae_mse / pca_mse
+    return (ratio <= multiplier, ratio)
