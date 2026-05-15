@@ -266,3 +266,40 @@ def test_summarize_diagnostic_slice_breakdown_groups_by_artist_mention():
     assert artist_slice["no"]["n"] == 1
     assert abs(artist_slice["yes"]["recall@20"] - 1.0) < 1e-9
     assert abs(artist_slice["no"]["recall@20"] - 1.0) < 1e-9
+
+
+# ---- per-turn records JSONL I/O (consumed by compare_diagnostic_runs) ----
+
+def test_write_then_read_records_jsonl_roundtrip(tmp_path):
+    """Records survive write→read unchanged so the comparison script can consume them."""
+    from scripts.phase0_retrieval_diagnostic import (
+        read_records_jsonl,
+        write_records_jsonl,
+    )
+
+    records = [
+        {
+            "session_id": "s1",
+            "turn_number": 1,
+            "user_query": "play me something",
+            "gold_id": _tid("g", 0),
+            "bm25_top_100": [_tid("b", i) for i in range(3)],
+            "dense_top_100": [_tid("d", i) for i in range(3)],
+            "fused_top_k": [_tid("f", i) for i in range(3)],
+        },
+        {
+            "session_id": "s2",
+            "turn_number": 4,
+            "user_query": "by Taylor Swift",
+            "gold_id": _tid("g", 1),
+            "bm25_top_100": [_tid("b", i) for i in range(3)],
+            "dense_top_100": [_tid("d", i) for i in range(3)],
+            "fused_top_k": [_tid("f", i) for i in range(3)],
+        },
+    ]
+
+    path = tmp_path / "records.jsonl"
+    write_records_jsonl(records, path)
+    loaded = list(read_records_jsonl(path))
+
+    assert loaded == records

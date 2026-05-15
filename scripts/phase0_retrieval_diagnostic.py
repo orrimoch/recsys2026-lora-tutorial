@@ -81,6 +81,27 @@ def has_artist_mention(query: str) -> bool:
     return _ARTIST_MENTION_RE.search(query) is not None
 
 
+def write_records_jsonl(records: list[dict], path) -> None:
+    """Write per-turn diagnostic records as JSONL. Consumed by compare_diagnostic_runs."""
+    import json
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w", encoding="utf-8") as f:
+        for rec in records:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def read_records_jsonl(path):
+    """Lazily yield per-turn records from a JSONL file."""
+    import json
+    with Path(path).open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            yield json.loads(line)
+
+
 def _slice_recall_at_20(records: list[dict], key_fn) -> dict[str, dict]:
     buckets: dict[str, list[float]] = {}
     for rec in records:
@@ -359,6 +380,11 @@ def main():
         "--out-md",
         default=str(REPO_ROOT / "documents" / "phase0_baseline_report.md"),
     )
+    parser.add_argument(
+        "--out-records",
+        default=str(REPO_ROOT / "data" / "phase0_diagnostic_records.jsonl"),
+        help="Per-turn records JSONL (consumed by scripts/compare_diagnostic_runs.py).",
+    )
     args = parser.parse_args()
 
     records = collect_per_turn_records(
@@ -372,11 +398,13 @@ def main():
 
     out_json = Path(args.out_json)
     out_md = Path(args.out_md)
+    out_records = Path(args.out_records)
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_md.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     out_md.write_text(render_markdown_report(summary, args.config, args.sample), encoding="utf-8")
-    print(f"wrote {out_json} and {out_md}", file=sys.stderr)
+    write_records_jsonl(records, out_records)
+    print(f"wrote {out_json}, {out_md}, {out_records}", file=sys.stderr)
     print(f"n_turns={summary['n_turns']}, fused recall@20={summary['per_component_metrics']['fused']['recall@20']:.3f}",
           file=sys.stderr)
 
