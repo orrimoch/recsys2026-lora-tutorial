@@ -1,0 +1,49 @@
+# Phase 1 Bundle A — BGE-M3 swap, run on Blind-A dataset for direct CodaBench submission.
+#
+# Single-axis change vs config 110-prorank-rerank-devset.yaml:
+#   retrieval_type: "wrrf_bm25_dense_lyrics_v1"  →  "wrrf_bm25_dense_lyrics_bge_m3_v1"
+#   test_dataset_name: "...-Challenge-Dataset"   →  "...-Challenge-Blind-A"
+#
+# Workflow (notebook 52):
+#   1. Embed catalog with BGE-M3 (one-time, ~30-60 min on L4/A100, Drive-cached).
+#   2. Run this config via run_inference_blindset.py → exp/inference/blindset_A/122-...json
+#   3. Package + zip → upload to CodaBench → see real leaderboard nDCG@20.
+
+lm_type: "Qwen/Qwen2.5-1.5B-Instruct"
+retrieval_type: "wrrf_bm25_dense_lyrics_bge_m3_v1"
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+retrieval_topk: 100
+
+reranker_type: "pro_rank"
+
+response_prompt_name: "response_generation"
+response_max_new_tokens: 64
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw"
+
+use_vllm: false
+
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+use_cmqr: true
+cmqr_prompt_name: "cmqr_rewrites"
+cmqr_n_rewrites: 4
+cmqr_topk_per_rewrite: 50
+cmqr_rrf_k: 60
+cmqr_max_new_tokens: 96
