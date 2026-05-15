@@ -98,3 +98,42 @@ def test_compute_collision_buckets_handles_missing_popularity_as_zero():
 def test_compute_collision_buckets_empty_input_returns_empty_dict():
     from mcrs.sid.preprocessing import compute_collision_buckets
     assert compute_collision_buckets([], [], {}) == {}
+
+
+def test_dedup_per_bucket_cap_one_keeps_first_per_bucket():
+    from mcrs.sid.preprocessing import dedup_with_per_bucket_cap
+
+    beam_outputs = [
+        ["t1", "t2", "t3"],
+        ["t4"],
+        ["t5", "t6"],
+    ]
+    out = dedup_with_per_bucket_cap(beam_outputs, cap=1)
+    assert out[:3] == ["t1", "t4", "t5"]
+
+
+def test_dedup_per_bucket_cap_spills_extras_to_fill_remaining_slots():
+    from mcrs.sid.preprocessing import dedup_with_per_bucket_cap
+
+    beam_outputs = [
+        ["t1", "t2", "t3"],
+        ["t4", "t5"],
+    ]
+    out = dedup_with_per_bucket_cap(beam_outputs, cap=1)
+    assert out == ["t1", "t4", "t2", "t3", "t5"]
+
+
+def test_dedup_per_bucket_cap_drops_duplicate_track_ids_across_beams():
+    from mcrs.sid.preprocessing import dedup_with_per_bucket_cap
+
+    beam_outputs = [
+        ["t1", "t2"],
+        ["t2", "t3"],
+    ]
+    out = dedup_with_per_bucket_cap(beam_outputs, cap=1)
+    assert out == ["t1", "t2", "t3"]
+
+
+def test_dedup_per_bucket_cap_empty_beams_input_returns_empty():
+    from mcrs.sid.preprocessing import dedup_with_per_bucket_cap
+    assert dedup_with_per_bucket_cap([], cap=1) == []

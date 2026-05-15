@@ -39,3 +39,35 @@ def compute_collision_buckets(
     for sid in buckets:
         buckets[sid].sort(key=lambda t: -popularity.get(t, 0.0))
     return buckets
+
+
+def dedup_with_per_bucket_cap(
+    beam_outputs: list[list[str]],
+    cap: int = 1,
+) -> list[str]:
+    """Deduplicate beam outputs across collision buckets with per-bucket cap.
+
+    Pass 1: take cap items from each beam's bucket, in beam order.
+    Pass 2: spillover — take remaining items from each bucket, in beam-then-rank order.
+    Globally unique track_ids (a track appearing in multiple beam buckets
+    appears once in the output, at its earliest position).
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for bucket in beam_outputs:
+        taken = 0
+        for tid in bucket:
+            if taken >= cap:
+                break
+            if tid in seen:
+                continue
+            out.append(tid)
+            seen.add(tid)
+            taken += 1
+    for bucket in beam_outputs:
+        for tid in bucket:
+            if tid in seen:
+                continue
+            out.append(tid)
+            seen.add(tid)
+    return out
