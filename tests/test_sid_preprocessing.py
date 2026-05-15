@@ -100,6 +100,14 @@ def test_compute_collision_buckets_empty_input_returns_empty_dict():
     assert compute_collision_buckets([], [], {}) == {}
 
 
+def test_compute_collision_buckets_raises_on_length_mismatch():
+    """Mismatched track_ids vs sid_assignments lengths is a programming error -> ValueError."""
+    from mcrs.sid.preprocessing import compute_collision_buckets
+
+    with pytest.raises(ValueError):
+        compute_collision_buckets(["t1"], [(0, 0, 0), (1, 1, 1)], {})
+
+
 def test_dedup_per_bucket_cap_one_keeps_first_per_bucket():
     from mcrs.sid.preprocessing import dedup_with_per_bucket_cap
 
@@ -137,3 +145,17 @@ def test_dedup_per_bucket_cap_drops_duplicate_track_ids_across_beams():
 def test_dedup_per_bucket_cap_empty_beams_input_returns_empty():
     from mcrs.sid.preprocessing import dedup_with_per_bucket_cap
     assert dedup_with_per_bucket_cap([], cap=1) == []
+
+
+def test_dedup_per_bucket_cap_two_takes_top_2_per_bucket_in_pass_one():
+    """cap=2: each beam contributes top-2 before spillover begins."""
+    from mcrs.sid.preprocessing import dedup_with_per_bucket_cap
+
+    beam_outputs = [
+        ["t1", "t2", "t3"],
+        ["t4", "t5"],
+    ]
+    out = dedup_with_per_bucket_cap(beam_outputs, cap=2)
+    # Pass 1: t1, t2 (beam 0 cap=2), t4, t5 (beam 1 cap=2)
+    # Pass 2 spillover: t3
+    assert out == ["t1", "t2", "t4", "t5", "t3"]
