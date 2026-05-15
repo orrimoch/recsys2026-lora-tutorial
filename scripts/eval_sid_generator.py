@@ -16,6 +16,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINES_DIR = REPO_ROOT / "music-crs-baselines"
 sys.path.insert(0, str(BASELINES_DIR))
+sys.path.insert(0, str(REPO_ROOT))   # so `scripts.compare_diagnostic_runs` is importable
 
 import pandas as pd
 import torch
@@ -111,6 +112,10 @@ def main():
         args.model_id, torch_dtype=torch.bfloat16, device_map="auto",
     )
     model.eval()
+    # Explicitly pin pad/eos on generation_config so beam search + custom logits_processor
+    # don't trip on post-EOS positions in newer transformers.
+    model.generation_config.pad_token_id = tok.pad_token_id
+    model.generation_config.eos_token_id = tok.eos_token_id
 
     sid_lookup = build_sid_to_token_id_lookup(tok, num_levels=3, codebook_size=256)
     inverse = {v: k for k, v in sid_lookup.items()}
@@ -139,11 +144,16 @@ def main():
                 row.query,
                 truncation=True, max_length=args.max_prompt_len,
                 return_tensors="pt",
+                add_special_tokens=False,   # match training (training_format.py uses encode(..., add_special_tokens=False))
             ).to(model.device)
             prompt_len = inputs["input_ids"].shape[1]
 
+            # HF beam search calls prefix_allowed_tokens_fn with batch_id in [0, num_beams).
+            # All beams share the same single-row prompt, so map every beam id to the same length.
             prefix_fn = make_prefix_allowed_tokens_fn(
-                trie, prompt_lens={0: prompt_len}, eos_token_id=eos_id,
+                trie,
+                prompt_lens={i: prompt_len for i in range(args.num_beams)},
+                eos_token_id=eos_id,
             )
             out = model.generate(
                 **inputs,
@@ -185,24 +195,21 @@ def main():
         "delta_vs_phase0": mean_ndcg - 0.099,
     }
 
-    # Optional paired-bootstrap CI vs Phase 0 baseline.
+    # Paired-bootstrap CI: deferred to W4 because W2 val parquet rows do not align
+    # 1:1 with Phase 0 baseline turns (W2 val is a stratified random split; Phase 0
+    # is full dev). Inner-joining on (session_id, turn_number) requires those keys
+    # in W2 val, which W2 did not preserve. W4 will run a full diagnostic on dev
+    # turns where the join is natural. For W3, gate on point estimate only.
+    metrics["paired_bootstrap_ci"] = None
+    metrics["gate_pass"] = mean_ndcg >= 0.12
     if args.phase0_jsonl.exists():
+        # Diagnostic-only: per-query MEAN comparison (NOT paired CI — pairing not valid).
         baseline_per_query = _load_phase0_per_query(args.phase0_jsonl)
-        # Align by query_id (or track_id_gold) — both runs evaluated same val rows, but make sure.
-        # For simplicity here, paired-bootstrap on same-length lists (truncate to common count).
-        n_common = min(len(per_query_ndcg), len(baseline_per_query))
-        ours = per_query_ndcg[:n_common]
-        theirs = baseline_per_query[:n_common]
-        from scripts.compare_diagnostic_runs import paired_bootstrap_ci
-        lo, hi = paired_bootstrap_ci(
-            ours, theirs, n_resamples=1000, alpha=0.05,
-        )
-        metrics["paired_bootstrap_ci"] = {"lo": lo, "hi": hi, "n_compared": n_common}
-        metrics["gate_pass"] = (mean_ndcg >= 0.12) and (lo > 0)
+        if baseline_per_query:
+            metrics["phase0_mean_per_query_ndcg_at_20"] = sum(baseline_per_query) / len(baseline_per_query)
+            metrics["phase0_n_queries"] = len(baseline_per_query)
     else:
-        print(f"[warn] phase0 jsonl not found at {args.phase0_jsonl}; skipping CI.", file=sys.stderr)
-        metrics["paired_bootstrap_ci"] = None
-        metrics["gate_pass"] = mean_ndcg >= 0.12  # point-estimate gate
+        print(f"[warn] phase0 jsonl not found at {args.phase0_jsonl}; only point-estimate gate.", file=sys.stderr)
 
     (args.output_dir / "w3_eval_metrics.json").write_text(json.dumps(metrics, indent=2))
     with (args.output_dir / "per_query_ndcg.jsonl").open("w") as f:

@@ -67,3 +67,22 @@ def test_build_sid_trie_handles_collisions():
     trie = build_sid_trie(sids, lookup)
     # Trie collapses duplicates — only one path.
     assert trie.valid_next_token_ids(prefix=[100, 200]) == [300]
+
+
+def test_prefix_allowed_tokens_fn_handles_nonzero_batch_id():
+    """Regression test: HF beam search calls prefix_fn with batch_id in [0, num_beams).
+    If prompt_lens only has key 0, beams 1..N-1 default to prompt_len=0 and the trie
+    walks the entire prompt → returns [] → eos at step 0 → nDCG=0 silently. The eval
+    script must populate prompt_lens for every beam id."""
+    from mcrs.sid.inference import build_sid_trie, make_prefix_allowed_tokens_fn
+    sids = [(1, 2, 3)]
+    lookup = {(0, 1): 100, (1, 2): 200, (2, 3): 300}
+    trie = build_sid_trie(sids, lookup)
+    # Simulate num_beams=4 — populate prompt_lens for every beam id.
+    prompt_len = 10
+    prompt_lens = {i: prompt_len for i in range(4)}
+    fn = make_prefix_allowed_tokens_fn(trie, prompt_lens, eos_token_id=2)
+    # Each beam, fresh prompt, no SID emitted yet — should all return [100].
+    input_ids = [0] * prompt_len
+    for batch_id in range(4):
+        assert fn(batch_id, input_ids) == [100], f"beam {batch_id} got wrong allowed tokens"
