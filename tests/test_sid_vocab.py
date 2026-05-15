@@ -115,3 +115,59 @@ def test_extend_model_vocab_idempotent():
     n_before = model.get_input_embeddings().weight.shape[0]
     extend_model_vocab(model, n_before)
     assert model.get_input_embeddings().weight.shape[0] == n_before
+
+
+def test_build_sid_to_token_id_lookup_returns_full_768():
+    """Lookup contains every (level, code) tuple in the 768-token grid."""
+    from transformers import AutoTokenizer
+    from mcrs.sid.vocab import add_sid_tokens_to_tokenizer, build_sid_to_token_id_lookup
+    tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+    tok, _ = add_sid_tokens_to_tokenizer(tok, 3, 256)
+    lookup = build_sid_to_token_id_lookup(tok, 3, 256)
+    assert len(lookup) == 768
+    assert (0, 0) in lookup
+    assert (2, 255) in lookup
+
+
+def test_build_sid_to_token_id_lookup_returns_unique_ids():
+    """Every (level, code) maps to a distinct token id."""
+    from transformers import AutoTokenizer
+    from mcrs.sid.vocab import add_sid_tokens_to_tokenizer, build_sid_to_token_id_lookup
+    tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+    tok, _ = add_sid_tokens_to_tokenizer(tok, 3, 256)
+    lookup = build_sid_to_token_id_lookup(tok, 3, 256)
+    assert len(set(lookup.values())) == 768
+
+
+def test_encode_decode_sid_round_trip():
+    """encode → decode is the identity for a sample of valid (c1, c2, c3)."""
+    from transformers import AutoTokenizer
+    from mcrs.sid.vocab import (
+        add_sid_tokens_to_tokenizer, build_sid_to_token_id_lookup,
+        encode_sid_to_token_ids, decode_token_ids_to_sid,
+    )
+    tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+    tok, _ = add_sid_tokens_to_tokenizer(tok, 3, 256)
+    lookup = build_sid_to_token_id_lookup(tok, 3, 256)
+    inverse = {v: k for k, v in lookup.items()}
+    for triple in [(0, 0, 0), (5, 100, 200), (255, 255, 255)]:
+        ids = encode_sid_to_token_ids(*triple, lookup=lookup)
+        assert len(ids) == 3
+        assert decode_token_ids_to_sid(ids, inverse=inverse) == triple
+
+
+def test_decode_token_ids_to_sid_raises_on_non_sid_id():
+    """Passing a non-SID token id raises a clear ValueError (debugging aid)."""
+    import pytest
+    from transformers import AutoTokenizer
+    from mcrs.sid.vocab import (
+        add_sid_tokens_to_tokenizer, build_sid_to_token_id_lookup,
+        decode_token_ids_to_sid,
+    )
+    tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+    tok, _ = add_sid_tokens_to_tokenizer(tok, 3, 256)
+    lookup = build_sid_to_token_id_lookup(tok, 3, 256)
+    inverse = {v: k for k, v in lookup.items()}
+    bos_id = tok.bos_token_id or 1
+    with pytest.raises(ValueError, match="not a SID token"):
+        decode_token_ids_to_sid([bos_id, bos_id, bos_id], inverse=inverse)

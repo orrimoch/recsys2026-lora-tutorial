@@ -81,3 +81,55 @@ def extend_model_vocab(model, target_vocab_size: int) -> None:
     if current == target_vocab_size:
         return
     model.resize_token_embeddings(target_vocab_size)
+
+
+def build_sid_to_token_id_lookup(
+    tokenizer, num_levels: int = 3, codebook_size: int = 256,
+) -> dict[tuple[int, int], int]:
+    """Return {(level, code): token_id} for every SID token in the tokenizer.
+
+    Caller must have already run add_sid_tokens_to_tokenizer on the tokenizer.
+    """
+    lookup: dict[tuple[int, int], int] = {}
+    for level in range(num_levels):
+        for code in range(codebook_size):
+            tok_str = f"<SID_L{level}_C{code}>"
+            ids = tokenizer.encode(tok_str, add_special_tokens=False)
+            if len(ids) != 1:
+                raise ValueError(
+                    f"SID token {tok_str} encoded to {len(ids)} ids; "
+                    f"add_sid_tokens_to_tokenizer must run first"
+                )
+            lookup[(level, code)] = ids[0]
+    return lookup
+
+
+def encode_sid_to_token_ids(
+    code_1: int, code_2: int, code_3: int,
+    *, lookup: dict[tuple[int, int], int],
+) -> list[int]:
+    """Convert a SID triplet into the 3 token ids the model emits."""
+    return [lookup[(0, code_1)], lookup[(1, code_2)], lookup[(2, code_3)]]
+
+
+def decode_token_ids_to_sid(
+    token_ids: list[int],
+    *, inverse: dict[int, tuple[int, int]],
+) -> tuple[int, int, int]:
+    """Convert 3 token ids back to (code_1, code_2, code_3).
+
+    Raises ValueError if any id is not a SID token, or if levels are out of order.
+    """
+    if len(token_ids) != 3:
+        raise ValueError(f"Expected 3 token ids, got {len(token_ids)}")
+    codes = [None, None, None]
+    for expected_level, tok_id in enumerate(token_ids):
+        if tok_id not in inverse:
+            raise ValueError(f"Token id {tok_id} is not a SID token")
+        level, code = inverse[tok_id]
+        if level != expected_level:
+            raise ValueError(
+                f"Position {expected_level} has SID level {level} (expected {expected_level})"
+            )
+        codes[expected_level] = code
+    return (codes[0], codes[1], codes[2])
