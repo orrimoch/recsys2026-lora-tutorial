@@ -52,3 +52,35 @@ def test_read_tracker_returns_all_rows(tmp_path):
     assert rows[0]["config_id"] == "A"
     assert float(rows[0]["composite"]) == 0.1
     assert rows[1]["config_id"] == "B"
+
+
+def test_append_score_handles_empty_existing_file(tmp_path):
+    """Regression test: append_score must initialize header even if the file
+    exists but is empty (e.g., user touch'ed it as a placeholder). Without this
+    guard the tracker silently corrupts and read_tracker returns []."""
+    tracker = tmp_path / "tracker.md"
+    tracker.touch()  # exists, but empty — the failure mode the W6 review caught
+    assert tracker.exists() and tracker.stat().st_size == 0
+
+    append_score(tracker_path=tracker, config_id="A", composite=0.1, ndcg=0.05,
+                 llm=2.0, lex_div=0.7, submission_url="url1")
+    text = tracker.read_text()
+    assert "| config_id " in text  # header written despite file existing
+    assert "| A |" in text
+
+    rows = read_tracker(tracker)
+    assert len(rows) == 1
+    assert rows[0]["config_id"] == "A"
+
+
+def test_append_score_sanitizes_pipe_chars_in_notes(tmp_path):
+    """Regression test: pipe characters in notes must be escaped, otherwise the
+    markdown table parser sees extra columns and silently drops the row."""
+    tracker = tmp_path / "tracker.md"
+    append_score(tracker_path=tracker, config_id="A", composite=0.1, ndcg=0.05,
+                 llm=2.0, lex_div=0.7, submission_url="url1",
+                 notes="tried w=0.3 | regressed | also lex_div tanked")
+    rows = read_tracker(tracker)
+    assert len(rows) == 1
+    # The escaped pipe should appear in the notes field
+    assert "regressed" in rows[0]["notes"]

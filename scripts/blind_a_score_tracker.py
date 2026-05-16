@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -26,6 +27,13 @@ HEADER = (
     "| config_id | composite | ndcg@20 | llm | lex_div | submitted_at | url | notes |\n"
     "|---|---|---|---|---|---|---|---|\n"
 )
+
+
+def _esc_table_cell(s: str) -> str:
+    """Escape characters that would break a markdown table cell."""
+    if s is None:
+        return ""
+    return str(s).replace("|", "\\|").replace("\n", " ").replace("\r", "")
 
 
 def append_score(
@@ -41,10 +49,10 @@ def append_score(
 ) -> None:
     """Append one CodaBench submission result to the markdown table."""
     if submitted_at is None:
-        submitted_at = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        submitted_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    if not tracker_path.exists():
-        # First write: include the table header.
+    if not tracker_path.exists() or tracker_path.stat().st_size == 0:
+        # First write OR empty placeholder: include the table header.
         preamble = (
             "---\n"
             "name: Blind-A submissions tracker\n"
@@ -58,17 +66,31 @@ def append_score(
         tracker_path.write_text(preamble + HEADER)
 
     row = (
-        f"| {config_id} "
+        f"| {_esc_table_cell(config_id)} "
         f"| {composite:.4f} "
         f"| {ndcg:.4f} "
         f"| {llm:.4f} "
         f"| {lex_div:.4f} "
-        f"| {submitted_at} "
-        f"| {submission_url} "
-        f"| {notes} |\n"
+        f"| {_esc_table_cell(submitted_at)} "
+        f"| {_esc_table_cell(submission_url)} "
+        f"| {_esc_table_cell(notes)} |\n"
     )
     with tracker_path.open("a") as f:
         f.write(row)
+
+
+def _split_table_row(line: str) -> list[str]:
+    """Split a markdown table row on unescaped '|' separators.
+
+    Escaped pipes written by _esc_table_cell (i.e. '\\|') are treated as
+    literal characters inside the cell — not as column separators — so rows
+    with notes containing '|' characters are parsed correctly.
+    """
+    # Replace escaped pipes with a placeholder, split on bare |, restore.
+    PLACEHOLDER = "\x00PIPE\x00"
+    safe = line.replace("\\|", PLACEHOLDER)
+    parts = safe.split("|")
+    return [p.replace(PLACEHOLDER, "\\|").strip() for p in parts]
 
 
 def read_tracker(tracker_path: Path) -> list[dict]:
@@ -82,13 +104,19 @@ def read_tracker(tracker_path: Path) -> list[dict]:
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("| config_id "):
+            # Use simple split here — header has no escaped pipes.
             columns = [c.strip() for c in line.strip("|").split("|")]
             in_table = True
             continue
         if in_table and line.startswith("|---"):
             continue
         if in_table and line.startswith("|"):
-            cells = [c.strip() for c in line.strip("|").split("|")]
+            cells = _split_table_row(line)
+            # strip leading/trailing empty strings that result from outer '|'
+            if cells and cells[0] == "":
+                cells = cells[1:]
+            if cells and cells[-1] == "":
+                cells = cells[:-1]
             if len(cells) != len(columns):
                 continue
             rows.append(dict(zip(columns, cells)))

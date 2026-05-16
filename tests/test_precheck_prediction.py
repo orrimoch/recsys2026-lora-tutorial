@@ -82,3 +82,15 @@ def test_precheck_flags_duplicate_tracks_per_record(tmp_path):
     result = precheck(p, catalog=catalog, expected_n=80)
     assert not result["ok"]
     assert any("duplicate" in e.lower() for e in result["errors"])
+
+
+def test_precheck_flags_empty_track_list(tmp_path):
+    """A record with predicted_track_ids=[] → ok=False with 'empty' error."""
+    catalog = {"t1"}
+    records = [{"session_id": f"S{i}", "user_id": f"U{i}", "turn_number": 1,
+                "predicted_track_ids": []} for i in range(80)]
+    p = tmp_path / "pred.json"
+    p.write_text(json.dumps(records))
+    result = precheck(p, catalog=catalog, expected_n=80)
+    assert not result["ok"]
+    assert any("empty" in e.lower() for e in result["errors"])
