@@ -8,7 +8,7 @@ Usage:
         --pred_a music-crs-baselines/exp/inference/dev/170-...json \\
         --pred_b music-crs-baselines/exp/inference/dev/132-...json \\
         --dataset talkpl-ai/TalkPlayData-Challenge-Dataset \\
-        --split test \\
+        --gold_split test \\
         --label_a 'wRRF+SID (170)' \\
         --label_b 'wRRF current (132)' \\
         --output experiments/diagnostic_runs/w4_gate.json
@@ -37,8 +37,9 @@ def parse_args():
     p.add_argument("--dataset", type=str,
                    default="talkpl-ai/TalkPlayData-Challenge-Dataset",
                    help="HF dataset for gold lookups")
-    p.add_argument("--split", type=str, default="test",
-                   help="Dataset split holding gold tracks (dev=test split)")
+    p.add_argument("--gold_split", type=str, default="test",
+                   help="Dataset split holding gold tracks. For dev evaluation use 'test' "
+                        "(the TalkPlayData dev set is the 'test' split per HF convention).")
     p.add_argument("--label_a", type=str, default="A")
     p.add_argument("--label_b", type=str, default="B")
     p.add_argument("--k", type=int, default=20, help="nDCG@k")
@@ -58,48 +59,61 @@ def ndcg_at_k(retrieved: list[str], gold: str, k: int) -> float:
 
 
 def _load_pred(path: Path) -> dict[str, list[str]]:
-    """Return {session_id_or_index: predicted_track_list} from a blindset prediction.json.
+    """Return {composite_key: predicted_track_list} from a prediction.json.
 
-    Tolerant of two shapes seen in practice:
-      list[dict]: each dict has 'session_id' or 'id' + 'predicted_items' or 'tracks'
-      dict[str, dict]: keyed by session id, value has 'predicted_items' or 'tracks'
+    Composite key = f"{session_id}__{turn_number}" so multi-turn sessions don't
+    collapse. run_inference_blindset.py writes one record per (session, turn)
+    with keys: session_id, user_id, turn_number, predicted_track_ids.
     """
     raw = json.loads(path.read_text())
+    if not isinstance(raw, list):
+        raise ValueError(f"Expected JSON list of records, got {type(raw).__name__}")
     out: dict[str, list[str]] = {}
-    if isinstance(raw, dict):
-        for sid, rec in raw.items():
-            tracks = rec.get("predicted_items") or rec.get("tracks") or rec.get("track_ids") or []
-            out[str(sid)] = list(tracks)
-    elif isinstance(raw, list):
-        for i, rec in enumerate(raw):
-            sid = rec.get("session_id") or rec.get("id") or str(i)
-            tracks = rec.get("predicted_items") or rec.get("tracks") or rec.get("track_ids") or []
-            out[str(sid)] = list(tracks)
-    else:
-        raise ValueError(f"Unexpected prediction.json shape: {type(raw)}")
+    for rec in raw:
+        sid = rec.get("session_id")
+        tn = rec.get("turn_number")
+        if sid is None or tn is None:
+            continue
+        tracks = (
+            rec.get("predicted_track_ids")
+            or rec.get("predicted_items")
+            or rec.get("tracks")
+            or rec.get("track_ids")
+            or []
+        )
+        out[f"{sid}__{tn}"] = list(tracks)
     return out
 
 
 def _load_gold(dataset: str, split: str) -> dict[str, str]:
-    """Return {session_id: gold_track_id} from the dataset's held-out split.
+    """Return {composite_key: gold_track_id} from the dataset.
 
-    Falls back to indexing the rows if session_id absent.
+    Composite key = f"{session_id}__{turn_number}". Mirrors the canonical
+    extraction at music-crs-evaluator/make_ground_truth.py:parsing_groundtruth:
+    for each turn in 1..8, the gold track is the 2nd content row of that turn's
+    conversations.
     """
+    import pandas as pd
     from datasets import load_dataset
     ds = load_dataset(dataset, split=split)
     out: dict[str, str] = {}
-    for i, row in enumerate(ds):
-        sid = row.get("session_id") or row.get("id") or str(i)
-        # Gold track is whatever the dataset's evaluation schema designates.
-        # Try common field names; the first non-None wins.
-        gold = (
-            row.get("target_track_id")
-            or row.get("gold_track_id")
-            or row.get("target")
-            or row.get("track_id")
-        )
-        if gold:
-            out[str(sid)] = str(gold)
+    for row in ds:
+        sid = row.get("session_id")
+        if sid is None:
+            continue
+        convs = row.get("conversations")
+        if not convs:
+            continue
+        df = pd.DataFrame(convs)
+        if "turn_number" not in df.columns:
+            continue
+        for tn in range(1, 9):
+            sub = df[df["turn_number"] == tn]
+            if len(sub) < 2:
+                continue
+            gold = sub.iloc[1]["content"]
+            if gold:
+                out[f"{sid}__{tn}"] = str(gold)
     return out
 
 
@@ -107,7 +121,7 @@ def main():
     args = parse_args()
     preds_a = _load_pred(args.pred_a)
     preds_b = _load_pred(args.pred_b)
-    gold = _load_gold(args.dataset, args.split)
+    gold = _load_gold(args.dataset, args.gold_split)
 
     # Compute per-session nDCG for both; pair by session id.
     common = sorted(set(preds_a) & set(preds_b) & set(gold))
