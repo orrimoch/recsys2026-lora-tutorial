@@ -101,6 +101,10 @@ def parse_args():
                         "from ~4.8GB to ~975MB), evaluate eval_loss every save_steps, and "
                         "load_best_model_at_end so the pushed model is the best by val loss. "
                         "Trade-off: ~5x less disk, but cannot resume mid-training (no optimizer).")
+    p.add_argument("--no-gradient-checkpointing", action="store_true",
+                   help="Disable gradient checkpointing. Trades memory for ~30%% speedup. "
+                        "Use on big-VRAM GPUs (Blackwell 95GB, A100 80GB). On L4 24GB this "
+                        "may OOM at batch>=16.")
     p.add_argument("--results-dir", type=Path, default=None,
                    help="If set, copy per-experiment artifacts to <results-dir>/<run-id>/ "
                         "BEFORE --cleanup-after-push fires. Persists: tensorboard runs/, "
@@ -226,7 +230,7 @@ def main():
         save_total_limit=2,
         report_to=args.report_to,
         remove_unused_columns=False,
-        gradient_checkpointing=True,
+        gradient_checkpointing=not args.no_gradient_checkpointing,
         **save_best_kwargs,
     )
 
