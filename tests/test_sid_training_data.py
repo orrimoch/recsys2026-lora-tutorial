@@ -383,3 +383,107 @@ def test_stratified_split_total_rows_preserved():
     ])
     train, val = stratified_split(df, val_frac=0.20, seed=42)
     assert len(train) + len(val) == 40
+
+
+def test_build_raw_conversation_pairs_emits_session_id():
+    """Each raw pair carries a session_id derived from the input session dict."""
+    from mcrs.sid.training_data import build_raw_conversation_pairs
+
+    sessions = [
+        {
+            "session_id": "sess-A",
+            "conversations": [
+                {"role": "user", "content": "play indie rock"},
+                {"role": "music", "content": "track-1"},
+                {"role": "user", "content": "more"},
+                {"role": "music", "content": "track-2"},
+            ],
+        },
+        {
+            "id": "sess-B",  # alternative key
+            "conversations": [
+                {"role": "user", "content": "jazz"},
+                {"role": "music", "content": "track-3"},
+            ],
+        },
+        {
+            # no session id at all → synthetic fallback
+            "conversations": [
+                {"role": "user", "content": "x"},
+                {"role": "music", "content": "track-1"},
+            ],
+        },
+    ]
+    track_to_sid = {"track-1": (1, 2, 3), "track-2": (4, 5, 6), "track-3": (7, 8, 9)}
+    pairs = build_raw_conversation_pairs(sessions, track_to_sid, n_turns_window=3)
+
+    sids = {p["session_id"] for p in pairs}
+    assert "sess-A" in sids
+    assert "sess-B" in sids
+    # Synthetic fallback for the 3rd session (index 2)
+    assert any(s.startswith("session_") for s in sids)
+    # First session should have 2 pairs both tagged sess-A
+    sess_a_pairs = [p for p in pairs if p["session_id"] == "sess-A"]
+    assert len(sess_a_pairs) == 2
+
+
+def test_build_metadata_pairs_emit_session_id_none():
+    """Metadata pairs include session_id=None (uniform schema)."""
+    from mcrs.sid.training_data import build_metadata_as_query_pairs
+
+    rows = [{"track_id": "t1", "track_name": "Yesterday", "artist_name": "Beatles"}]
+    pairs = build_metadata_as_query_pairs(rows, {"t1": (1, 2, 3)})
+    assert pairs[0]["session_id"] is None
+
+
+def test_build_doc2query_pairs_emit_session_id_none():
+    """Doc2query pairs include session_id=None (uniform schema)."""
+    from mcrs.sid.training_data import build_doc2query_pairs
+
+    rows = [{"track_id": "t1", "synthetic_queries": ["q1", "q2"]}]
+    pairs = build_doc2query_pairs(rows, {"t1": (1, 2, 3)})
+    assert all(p["session_id"] is None for p in pairs)
+
+
+def test_stratified_split_group_by_keeps_session_in_one_partition():
+    """Group-level split: every session_id ends up entirely in train OR entirely in val,
+    never split across both. This is the data-leakage fix."""
+    import pandas as pd
+    from mcrs.sid.training_data import stratified_split
+
+    # 20 sessions × 5 turns each = 100 raw rows + 50 metadata rows
+    rows = []
+    for s in range(20):
+        for t in range(5):
+            rows.append({
+                "source": "raw", "session_id": f"sess-{s}",
+                "track_id": f"t{s}-{t}", "query": "q",
+                "code_1": 1, "code_2": 2, "code_3": 3,
+            })
+    for m in range(50):
+        rows.append({
+            "source": "metadata", "session_id": None,
+            "track_id": f"meta-{m}", "query": "mq",
+            "code_1": 4, "code_2": 5, "code_3": 6,
+        })
+    df = pd.DataFrame(rows)
+
+    train, val = stratified_split(
+        df, val_frac=0.20, seed=42,
+        group_by={"raw": "session_id"},
+    )
+    train_raw_sessions = set(train[train["source"] == "raw"]["session_id"])
+    val_raw_sessions = set(val[val["source"] == "raw"]["session_id"])
+
+    # No session appears in both partitions — the leakage fix
+    assert train_raw_sessions.isdisjoint(val_raw_sessions), (
+        f"Session leak: {train_raw_sessions & val_raw_sessions}"
+    )
+    # ~20% of 20 sessions = 4 in val
+    assert len(val_raw_sessions) == 4
+
+    # Metadata source uses row-level split (group_by doesn't apply)
+    meta_train = (train["source"] == "metadata").sum()
+    meta_val = (val["source"] == "metadata").sum()
+    assert meta_train + meta_val == 50
+    assert 9 <= meta_val <= 11  # ~20% of 50

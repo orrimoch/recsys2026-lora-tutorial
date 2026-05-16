@@ -132,7 +132,18 @@ def main():
           f"(raw={len(raw_pairs)}, metadata={len(meta_pairs)}, doc2query={len(doc2query_pairs)})",
           file=sys.stderr)
 
-    train, val = stratified_split(df, val_frac=args.val_frac, seed=args.seed)
+    # Group-level split for the 'raw' source so all turns from one session land in
+    # the same partition (avoids train↔val leakage via overlapping chat history).
+    # 'metadata' and 'doc2query' rows are independent → row-level split is fine.
+    train, val = stratified_split(
+        df, val_frac=args.val_frac, seed=args.seed,
+        group_by={"raw": "session_id"},
+    )
+    n_val_sessions = val[val["source"] == "raw"]["session_id"].nunique() if "session_id" in val.columns else 0
+    n_train_sessions = train[train["source"] == "raw"]["session_id"].nunique() if "session_id" in train.columns else 0
+    print(f"[build_sid_training_data] raw split is session-level: "
+          f"{n_train_sessions} train sessions / {n_val_sessions} val sessions "
+          f"(disjoint by construction)", file=sys.stderr)
 
     # 6. Write outputs
     out_dir = REPO_ROOT / "experiments" / "cache" / "sid_training"
