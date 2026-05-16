@@ -99,6 +99,7 @@ def main(args):
     cmqr_topk_per_rewrite = int(config.get("cmqr_topk_per_rewrite", 50))
     cmqr_rrf_k = int(config.get("cmqr_rrf_k", 60))
     cmqr_max_new_tokens = int(config.get("cmqr_max_new_tokens", 96))
+    extra_config_dict = OmegaConf.to_container(config, resolve=True)
     music_crs = load_crs_baseline(
         lm_type=config.lm_type,
         retrieval_type=config.retrieval_type,
@@ -134,6 +135,7 @@ def main(args):
         cmqr_topk_per_rewrite=cmqr_topk_per_rewrite,
         cmqr_rrf_k=cmqr_rrf_k,
         cmqr_max_new_tokens=cmqr_max_new_tokens,
+        extra_config=extra_config_dict,
     )
     db = load_dataset(config.test_dataset_name, split="test")
     # Phase 1 Bundle C: chat_history_window (per-config field, default None = full history)

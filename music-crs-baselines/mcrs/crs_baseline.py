@@ -160,6 +160,10 @@ class CRS_BASELINE:
         cmqr_topk_per_rewrite: int = 50,
         cmqr_rrf_k: int = 60,
         cmqr_max_new_tokens: int = 96,
+        # ---- W5 extra_config: YAML overrides forwarded to the factory -------
+        # Supports sid_hub_repo (str) and sid_stream_weight (float) overrides
+        # for the SID weight sweep without forking YAML config files.
+        extra_config: dict | None = None,
     ):
         """Initialize the CRS baseline components.
 
@@ -175,6 +179,7 @@ class CRS_BASELINE:
             dtype: Torch dtype for the LLM weights/tensors.
         """
         self.cache_dir = cache_dir
+        self.extra_config = extra_config or {}
         self.lm_type = lm_type
         self.retrieval_type = retrieval_type
         self.item_db_name = item_db_name
@@ -192,7 +197,7 @@ class CRS_BASELINE:
             lora_path=lora_path,
             lora_max_rank=int(lora_max_rank),
         )
-        self.retrieval = load_retrieval_module(self.retrieval_type, self.item_db_name, self.track_split_types, self.corpus_types, self.cache_dir)
+        self.retrieval = load_retrieval_module(self.retrieval_type, self.item_db_name, self.track_split_types, self.corpus_types, self.cache_dir, extra_config=self.extra_config)
         self.reranker_type = reranker_type
         self.reranker_model_path = reranker_model_path
         self.reranker = load_reranker_module(
