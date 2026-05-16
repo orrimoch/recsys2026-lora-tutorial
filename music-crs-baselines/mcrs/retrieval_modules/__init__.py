@@ -287,8 +287,9 @@ def load_retrieval_module(
         )
     # W4 ensemble: existing 3-stream wRRF (BM25 + dense_metadata + dense_lyrics)
     # plus the new SID generator as a 4th stream. Initial SID weight = 0.5
-    # (between BM25=1.0 and dense=0.4); tuned in W5.
+    # (between BM25=1.0 and dense=0.4); tuned in W5 via extra_config.sid_stream_weight.
     elif retrieval_type == "wrrf_bm25_dense_sid_v1":
+        sid_weight = float(extra_config.get("sid_stream_weight", 0.5))
         return RRF_MODEL(
             dataset_name, track_split_types, corpus_types, cache_dir,
             sub_specs=[
@@ -317,7 +318,7 @@ def load_retrieval_module(
                     "type": "sid_generator",
                     "corpus_types": corpus_types,
                     "topk_internal": 20,
-                    "weight": 0.5,
+                    "weight": sid_weight,
                 },
             ],
             k=60,
