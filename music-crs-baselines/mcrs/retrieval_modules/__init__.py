@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from .bm25 import BM25_MODEL
 from .bert import BERT_MODEL
 from .dense_precomputed import DENSE_PRECOMPUTED
@@ -220,6 +222,18 @@ def load_retrieval_module(
             ],
             k=60,
         )
+    # SID (Semantic Item ID) generator (W4). Beam-searches a fine-tuned causal
+    # LM to emit SID triplets; maps them back to track_ids via a trie lookup.
+    elif retrieval_type == "sid_generator":
+        from mcrs.retrieval_modules.sid_generator import SID_GENERATOR
+        return SID_GENERATOR(
+            hub_repo="OrRim123/recsys2026-sid-generator-qwen15b-v1-merged",
+            sid_lookup_path=Path(cache_dir) / "sid" / "track_to_sid.parquet",
+            device="cuda",
+            num_beams=20,
+            max_prompt_len=1024,
+            cap_per_bucket=1,
+        )
     # cf-bpr user x item affinity retriever (exp 025 A2).
     # Query-independent; scores per-user against all tracks via cosine on
     # precomputed cf-bpr embeddings. Warm users only; cold users get empty list
@@ -261,6 +275,43 @@ def load_retrieval_module(
                     "corpus_types": corpus_types,
                     "topk_internal": 20,
                     "weight": 0.25,
+                },
+            ],
+            k=60,
+        )
+    # W4 ensemble: existing 3-stream wRRF (BM25 + dense_metadata + dense_lyrics)
+    # plus the new SID generator as a 4th stream. Initial SID weight = 0.5
+    # (between BM25=1.0 and dense=0.4); tuned in W5.
+    elif retrieval_type == "wrrf_bm25_dense_sid_v1":
+        return RRF_MODEL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            sub_specs=[
+                {
+                    "type": "bm25",
+                    "corpus_types": [
+                        "track_name", "artist_name", "album_name",
+                        "release_date", "tag_list",
+                    ],
+                    "topk_internal": 60,
+                    "weight": 1.0,
+                },
+                {
+                    "type": "dense_metadata_qwen3_instruct",
+                    "corpus_types": corpus_types,
+                    "topk_internal": 20,
+                    "weight": 0.4,
+                },
+                {
+                    "type": "dense_lyrics_qwen3_instruct",
+                    "corpus_types": corpus_types,
+                    "topk_internal": 20,
+                    "weight": 0.4,
+                },
+                {
+                    "type": "sid_generator",
+                    "corpus_types": corpus_types,
+                    "topk_internal": 20,
+                    "weight": 0.5,
                 },
             ],
             k=60,
