@@ -268,14 +268,18 @@ def main():
     hub_lora_repo = f"{args.hub_repo}-lora"
     model.push_to_hub(hub_lora_repo, private=False)
     tokenizer.push_to_hub(hub_lora_repo, private=False)
-    print(f"[push] {hub_lora_repo}", file=sys.stderr)
+    print(f"[push] LoRA adapter repo: https://huggingface.co/{hub_lora_repo}", file=sys.stderr)
 
     hub_merged_repo = None
     if args.merge:
         merged = model.merge_and_unload()
-        # The pre-merge LoRA-wrapped model is no longer referenced by anything we
-        # care about (merged is a new fp model). Drop the reference + clear cache.
+        # del + null out trainer's reference to actually free the pre-merge
+        # LoRA-wrapped model from VRAM. Without nulling trainer.model and
+        # trainer.model_wrapped, the only Python reference is gone but trainer
+        # still pins the tensors → torch.cuda.empty_cache reclaims nothing.
         del model
+        trainer.model = None
+        trainer.model_wrapped = None
         _free_gpu("after merge_and_unload")
 
         merged_dir = args.output_dir / "merged"
@@ -286,7 +290,7 @@ def main():
         # accepts safe_serialization (only save_pretrained does, on line above).
         merged.push_to_hub(hub_merged_repo, private=False)
         tokenizer.push_to_hub(hub_merged_repo, private=False)
-        print(f"[push] merged → {hub_merged_repo}", file=sys.stderr)
+        print(f"[push] merged model repo: https://huggingface.co/{hub_merged_repo}", file=sys.stderr)
         del merged
         _free_gpu("after merged push")
 
