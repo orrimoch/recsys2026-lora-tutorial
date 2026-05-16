@@ -1,0 +1,59 @@
+# W4 ensemble: 4-stream wRRF (BM25 + dense_meta + dense_lyrics + SID generator)
+# stacked with the v5-kto-merged responder (W6) on Blind-A.
+#
+# Origin of SID generator: W3 fine-tune of Qwen2.5-1.5B-Instruct + LoRA on
+# (raw conversations + metadata-as-query) training data; see
+# documents/specs/2026-05-15-sid-retrieval-design.md + W3 memory.
+# Hub: OrRim123/recsys2026-sid-generator-qwen15b-v1-merged
+#
+# Initial SID weight = 0.5 (tunable in W5).
+#
+# To run:
+#   python run_inference_blindset.py --tid 170-wrrf-sid-v5kto-blindsetA --batch_size 32
+#
+# Wallclock estimate: ~60-100 min on L4 (4 retrievers + CMQR + ProRank + v5-kto
+# responder; SID-gen pass adds ~10-15 min over 132 for 80 Blind-A turns).
+
+lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
+lora_path: null
+lora_max_rank: 32
+
+retrieval_type: "wrrf_bm25_dense_sid_v1"
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+retrieval_topk: 100
+reranker_type: "pro_rank"
+
+# v5-kto-trained prompt + longer max_new_tokens to accommodate CoT + envelope.
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 320
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw"
+
+use_vllm: false
+
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+# CMQR routes only to BM25/dense streams (NOT SID — see spec §1) but the
+# config flag enables it globally; downstream wRRF handles routing internally.
+use_cmqr: true
+cmqr_prompt_name: "cmqr_rewrites"
+cmqr_n_rewrites: 4
+cmqr_topk_per_rewrite: 50
+cmqr_rrf_k: 60
+cmqr_max_new_tokens: 96
