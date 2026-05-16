@@ -94,7 +94,13 @@ def parse_args():
                    choices=["tensorboard", "wandb", "trackio", "none"],
                    help="Logging backend for live training metrics graphs (default: tensorboard). "
                         "TensorBoard writes ~5-20 MB of logs under output_dir/runs/<timestamp>/; "
-                        "view via %tensorboard --logdir <path> in Colab.")
+                        "view via %%tensorboard --logdir <path> in Colab.")
+    p.add_argument("--save-best", action="store_true",
+                   help="Disk-friendly mode: keep at most 2 checkpoints (best + latest), "
+                        "save model weights ONLY (no optimizer state — drops checkpoint size "
+                        "from ~4.8GB to ~975MB), evaluate eval_loss every save_steps, and "
+                        "load_best_model_at_end so the pushed model is the best by val loss. "
+                        "Trade-off: ~5x less disk, but cannot resume mid-training (no optimizer).")
     p.add_argument("--results-dir", type=Path, default=None,
                    help="If set, copy per-experiment artifacts to <results-dir>/<run-id>/ "
                         "BEFORE --cleanup-after-push fires. Persists: tensorboard runs/, "
@@ -184,6 +190,23 @@ def main():
     train_ds = build_hf_dataset(args.train_parquet, tokenizer, sid_lookup, args.max_prompt_len, sample_n=train_sample_n)
     val_ds = build_hf_dataset(args.val_parquet, tokenizer, sid_lookup, args.max_prompt_len, sample_n=val_sample_n)
 
+    # --save-best (Option B): disk-friendly + best-by-val-loss model selection.
+    # save_only_model=True drops optimizer state from each checkpoint
+    # (~4.8GB → ~975MB), losing resume capability but cutting peak disk 5x.
+    # Requires eval to determine "best", so eval_strategy is forced to steps.
+    save_best_kwargs: dict = {}
+    if args.save_best:
+        save_best_kwargs = dict(
+            save_only_model=True,
+            load_best_model_at_end=True,
+            metric_for_best_model="eval_loss",
+            greater_is_better=False,
+        )
+    eval_strategy = "no" if (args.smoke or args.tiny) else "steps"
+    if args.save_best:
+        eval_strategy = "steps"  # required for load_best_model_at_end
+    eval_steps = save_steps_eff if args.save_best else 200
+
     training_args = TrainingArguments(
         output_dir=str(args.output_dir),
         per_device_train_batch_size=args.micro_batch,
@@ -196,14 +219,15 @@ def main():
         lr_scheduler_type="cosine",
         bf16=True,
         logging_steps=10,
-        eval_strategy="no" if (args.smoke or args.tiny) else "steps",
-        eval_steps=200,
+        eval_strategy=eval_strategy,
+        eval_steps=eval_steps,
         save_strategy="steps",
         save_steps=save_steps_eff,
         save_total_limit=2,
         report_to=args.report_to,
         remove_unused_columns=False,
         gradient_checkpointing=True,
+        **save_best_kwargs,
     )
 
     def collator(examples):
