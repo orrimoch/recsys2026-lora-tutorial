@@ -523,19 +523,54 @@ def test_subsample_one_turn_per_session_keeps_one_per_session():
     assert len(meta) == 20
 
 
-def test_subsample_one_turn_per_session_deterministic():
-    """Same seed produces same selected turn per session."""
+def test_subsample_one_turn_per_session_picks_varied_turn_positions():
+    """Regression for the C1 bug: with the same seed, equal-length sessions must
+    NOT all pick the same relative turn position. Encode turn position in track_id
+    suffix and assert the chosen positions vary across sessions.
+    """
+    import pandas as pd
+    from mcrs.sid.training_data import subsample_one_turn_per_session
+
+    # 30 sessions × 5 turns each. track_id encodes turn position as last char.
+    df = pd.DataFrame([
+        {"source": "raw", "session_id": f"sess-{s}",
+         "track_id": f"t{s}-{t}", "query": "q",
+         "code_1": 1, "code_2": 2, "code_3": 3}
+        for s in range(30) for t in range(5)
+    ])
+    sampled = subsample_one_turn_per_session(df, source="raw", seed=42)
+    # Extract turn position (last char of track_id after the dash) per session
+    sampled_positions = sampled["track_id"].str.split("-").str[-1].astype(int)
+    unique_positions = set(sampled_positions.tolist())
+    # Across 30 sessions of 5 turns, with uniform sampling we expect to see at
+    # least 3 of the 5 possible positions (probability of seeing <3 by chance
+    # is vanishingly small with N=30). The pre-fix bug would have produced
+    # {1} (always turn-2) or some single-position set.
+    assert len(unique_positions) >= 3, (
+        f"Subsample picked only positions {unique_positions} across 30 sessions "
+        f"— suggests per-session seed bug (sample reusing global seed)"
+    )
+
+
+def test_subsample_one_turn_per_session_robust_to_row_shuffle():
+    """Determinism: same seed + same set of sessions must select the same
+    (session_id, track_id) pairs even after the input rows are shuffled.
+    Catches implementations whose output depends on row insertion order.
+    """
     import pandas as pd
     from mcrs.sid.training_data import subsample_one_turn_per_session
 
     df = pd.DataFrame([
         {"source": "raw", "session_id": f"sess-{s}", "track_id": f"t{s}-{t}",
          "query": "q", "code_1": 1, "code_2": 2, "code_3": 3}
-        for s in range(5) for t in range(4)
+        for s in range(8) for t in range(4)
     ])
+    df_shuffled = df.sample(frac=1.0, random_state=999).reset_index(drop=True)
+
     a = subsample_one_turn_per_session(df, source="raw", seed=42)
-    b = subsample_one_turn_per_session(df, source="raw", seed=42)
-    pd.testing.assert_frame_equal(
-        a.sort_values("session_id").reset_index(drop=True),
-        b.sort_values("session_id").reset_index(drop=True),
+    b = subsample_one_turn_per_session(df_shuffled, source="raw", seed=42)
+    a_pairs = set(zip(a["session_id"], a["track_id"]))
+    b_pairs = set(zip(b["session_id"], b["track_id"]))
+    assert a_pairs == b_pairs, (
+        f"Selection depends on row order: a={a_pairs - b_pairs}, b={b_pairs - a_pairs}"
     )

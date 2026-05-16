@@ -229,7 +229,8 @@ def subsample_one_turn_per_session(
     session_col: str = "session_id",
     seed: int = 42,
 ) -> "pd.DataFrame":
-    """For rows of `source`, keep exactly ONE row per `session_id` (random, seeded).
+    """For rows of `source`, keep exactly ONE row per `session_id` (uniformly random
+    within session, seeded per-session for reproducibility).
 
     Mirrors Blind-A's structure (80 unique sessions × 1 turn each) so val nDCG@20
     is a structurally honest estimator of Blind-A nDCG@20. Without this, val has
@@ -238,7 +239,15 @@ def subsample_one_turn_per_session(
 
     Rows from other sources (metadata, doc2query) are left untouched (they have
     no session structure and Blind-A has no analogue for them anyway).
+
+    Determinism: per-session seed = hash(global_seed, session_id), so:
+    - Different sessions pick DIFFERENT relative turn positions (uniform per session).
+    - Same global seed + same session_id → same selected turn (reproducible).
+    - Selection is independent of input row ordering (we sort within group first).
     """
+    import hashlib
+
+    import numpy as np
     import pandas as pd
 
     if df.empty or session_col not in df.columns:
@@ -248,12 +257,21 @@ def subsample_one_turn_per_session(
     other_rows = df[~src_mask]
     if src_rows.empty:
         return df.reset_index(drop=True)
-    # Sample 1 row per non-null session_id deterministically.
-    sampled = (
-        src_rows.dropna(subset=[session_col])
-        .groupby(session_col, group_keys=False, sort=False)
-        .apply(lambda g: g.sample(n=1, random_state=seed))
+
+    # Sort the candidate rows once by (session_id, track_id, query) so per-group
+    # iteration order is row-order-independent. Then sample one row per session
+    # using a per-session-derived seed.
+    candidates = src_rows.dropna(subset=[session_col]).sort_values(
+        by=[session_col, "track_id", "query"]
     )
+    keep_idx = []
+    for sess_id, group in candidates.groupby(session_col, sort=True):
+        h = hashlib.md5(f"{seed}:{sess_id}".encode("utf-8")).digest()
+        per_session_seed = int.from_bytes(h[:4], "big")
+        rng_local = np.random.default_rng(per_session_seed)
+        chosen = int(rng_local.integers(0, len(group)))
+        keep_idx.append(group.index[chosen])
+    sampled = candidates.loc[keep_idx]
     return pd.concat([sampled, other_rows], ignore_index=True)
 
 
@@ -292,8 +310,10 @@ def stratified_split(
             train_parts.append(shuffled.iloc[n_val:])
         else:
             # Group-level split: pick whole groups for val. All rows of each group
-            # go to the same partition.
-            unique_groups = group[gcol].dropna().unique()
+            # go to the same partition. Sort group ids first so the split is
+            # reproducible across pandas/HF-datasets versions regardless of the
+            # row insertion order coming out of the upstream loader.
+            unique_groups = np.sort(group[gcol].dropna().unique())
             n_val_groups = int(round(val_frac * len(unique_groups)))
             rng = np.random.default_rng(seed)
             shuffled_groups = rng.permutation(unique_groups)

@@ -155,6 +155,10 @@ def main():
     print(f"[build_sid_training_data] val raw subsampled to 1 turn per session: "
           f"{val_raw_before} -> {val_raw_after} rows (matches Blind-A 80×1 shape)",
           file=sys.stderr)
+    if val_raw_after < 50 and not (args.max_sessions is not None and args.max_sessions <= 200):
+        print(f"[build_sid_training_data] WARNING: only {val_raw_after} val raw rows. "
+              f"Standard error of nDCG@20 will be wide (~0.04). Consider larger val_frac "
+              f"or more train sessions for tighter gate decisions.", file=sys.stderr)
 
     # 6. Write outputs
     out_dir = REPO_ROOT / "experiments" / "cache" / "sid_training"
