@@ -71,6 +71,10 @@ def parse_args():
                    help="Resume from the latest checkpoint in --output-dir if any exists. "
                         "Picks up model + optimizer + scheduler + RNG state. Use after a "
                         "Colab disconnect or OOM.")
+    p.add_argument("--cleanup-after-push", action="store_true",
+                   help="After pushing adapter (and merged) to Hub, delete the local "
+                        "adapter_dir, merged_dir, and trainer checkpoints. Use when the Hub "
+                        "is the canonical store and local disk is at a premium.")
     return p.parse_args()
 
 
@@ -232,6 +236,24 @@ def main():
     }
     (args.output_dir / "training_summary.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2))
+
+    # Optional: cleanup local copies once Hub push has succeeded. Saves ~5 GB
+    # (checkpoints) + ~975 MB (adapter) + ~3 GB (merged) on whatever disk
+    # output_dir lives on. Hub remains the canonical store.
+    if args.cleanup_after_push:
+        import shutil
+        for ckpt in args.output_dir.glob("checkpoint-*"):
+            print(f"[cleanup] rm {ckpt}", file=sys.stderr)
+            shutil.rmtree(ckpt, ignore_errors=True)
+        adapter_dir = args.output_dir / "adapter"
+        if adapter_dir.exists():
+            print(f"[cleanup] rm {adapter_dir}", file=sys.stderr)
+            shutil.rmtree(adapter_dir, ignore_errors=True)
+        if args.merge:
+            merged_dir = args.output_dir / "merged"
+            if merged_dir.exists():
+                print(f"[cleanup] rm {merged_dir}", file=sys.stderr)
+                shutil.rmtree(merged_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
