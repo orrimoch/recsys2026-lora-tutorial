@@ -222,6 +222,41 @@ def build_doc2query_pairs(
     return pairs
 
 
+def subsample_one_turn_per_session(
+    df: "pd.DataFrame",
+    *,
+    source: str = "raw",
+    session_col: str = "session_id",
+    seed: int = 42,
+) -> "pd.DataFrame":
+    """For rows of `source`, keep exactly ONE row per `session_id` (random, seeded).
+
+    Mirrors Blind-A's structure (80 unique sessions × 1 turn each) so val nDCG@20
+    is a structurally honest estimator of Blind-A nDCG@20. Without this, val has
+    multiple turns per session and biases the metric (different chat-history-length
+    distribution than Blind-A's 1-turn-per-session shape).
+
+    Rows from other sources (metadata, doc2query) are left untouched (they have
+    no session structure and Blind-A has no analogue for them anyway).
+    """
+    import pandas as pd
+
+    if df.empty or session_col not in df.columns:
+        return df.reset_index(drop=True)
+    src_mask = df["source"] == source
+    src_rows = df[src_mask]
+    other_rows = df[~src_mask]
+    if src_rows.empty:
+        return df.reset_index(drop=True)
+    # Sample 1 row per non-null session_id deterministically.
+    sampled = (
+        src_rows.dropna(subset=[session_col])
+        .groupby(session_col, group_keys=False, sort=False)
+        .apply(lambda g: g.sample(n=1, random_state=seed))
+    )
+    return pd.concat([sampled, other_rows], ignore_index=True)
+
+
 def stratified_split(
     df: "pd.DataFrame",
     val_frac: float = 0.05,

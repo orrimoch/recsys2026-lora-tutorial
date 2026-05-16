@@ -487,3 +487,55 @@ def test_stratified_split_group_by_keeps_session_in_one_partition():
     meta_val = (val["source"] == "metadata").sum()
     assert meta_train + meta_val == 50
     assert 9 <= meta_val <= 11  # ~20% of 50
+
+
+def test_subsample_one_turn_per_session_keeps_one_per_session():
+    """val subsample reduces raw to 1 row per session_id; non-raw rows untouched."""
+    import pandas as pd
+    from mcrs.sid.training_data import subsample_one_turn_per_session
+
+    rows = []
+    for s in range(10):
+        for t in range(5):  # 5 turns per session
+            rows.append({
+                "source": "raw", "session_id": f"sess-{s}",
+                "track_id": f"t{s}-{t}", "query": "q",
+                "code_1": 1, "code_2": 2, "code_3": 3,
+            })
+    for m in range(20):
+        rows.append({
+            "source": "metadata", "session_id": None,
+            "track_id": f"meta-{m}", "query": "mq",
+            "code_1": 4, "code_2": 5, "code_3": 6,
+        })
+    df = pd.DataFrame(rows)
+
+    subsampled = subsample_one_turn_per_session(df, source="raw", seed=42)
+
+    raw = subsampled[subsampled["source"] == "raw"]
+    assert raw["session_id"].nunique() == 10
+    assert len(raw) == 10  # 1 per session, mirrors Blind-A 80×1
+    # Each session appears exactly once
+    counts = raw.groupby("session_id").size()
+    assert (counts == 1).all()
+    # Metadata rows untouched
+    meta = subsampled[subsampled["source"] == "metadata"]
+    assert len(meta) == 20
+
+
+def test_subsample_one_turn_per_session_deterministic():
+    """Same seed produces same selected turn per session."""
+    import pandas as pd
+    from mcrs.sid.training_data import subsample_one_turn_per_session
+
+    df = pd.DataFrame([
+        {"source": "raw", "session_id": f"sess-{s}", "track_id": f"t{s}-{t}",
+         "query": "q", "code_1": 1, "code_2": 2, "code_3": 3}
+        for s in range(5) for t in range(4)
+    ])
+    a = subsample_one_turn_per_session(df, source="raw", seed=42)
+    b = subsample_one_turn_per_session(df, source="raw", seed=42)
+    pd.testing.assert_frame_equal(
+        a.sort_values("session_id").reset_index(drop=True),
+        b.sort_values("session_id").reset_index(drop=True),
+    )

@@ -37,6 +37,7 @@ from mcrs.sid.training_data import (
     build_metadata_as_query_pairs,
     build_raw_conversation_pairs,
     stratified_split,
+    subsample_one_turn_per_session,
 )
 
 
@@ -144,6 +145,16 @@ def main():
     print(f"[build_sid_training_data] raw split is session-level: "
           f"{n_train_sessions} train sessions / {n_val_sessions} val sessions "
           f"(disjoint by construction)", file=sys.stderr)
+
+    # Make val structurally match Blind-A: 1 turn per session (random within session).
+    # Without this, val has multi-turn-per-session structure and biases nDCG@20
+    # vs Blind-A's 1-turn-per-session shape.
+    val_raw_before = (val["source"] == "raw").sum()
+    val = subsample_one_turn_per_session(val, source="raw", seed=args.seed)
+    val_raw_after = (val["source"] == "raw").sum()
+    print(f"[build_sid_training_data] val raw subsampled to 1 turn per session: "
+          f"{val_raw_before} -> {val_raw_after} rows (matches Blind-A 80×1 shape)",
+          file=sys.stderr)
 
     # 6. Write outputs
     out_dir = REPO_ROOT / "experiments" / "cache" / "sid_training"
