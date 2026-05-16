@@ -67,6 +67,10 @@ def parse_args():
     p.add_argument("--lora-dropout", type=float, default=0.05)
     p.add_argument("--merge", action="store_true",
                    help="After training, merge LoRA into base + push merged model (~3GB)")
+    p.add_argument("--resume", action="store_true",
+                   help="Resume from the latest checkpoint in --output-dir if any exists. "
+                        "Picks up model + optimizer + scheduler + RNG state. Use after a "
+                        "Colab disconnect or OOM.")
     return p.parse_args()
 
 
@@ -181,7 +185,17 @@ def main():
         train_dataset=train_ds, eval_dataset=val_ds,
         data_collator=collator,
     )
-    trainer.train()
+    # Resume from last checkpoint if requested AND one exists. HF picks the
+    # latest checkpoint in output_dir automatically when passed True.
+    resume_arg = args.resume if args.resume else None
+    if args.resume:
+        ckpts = sorted(args.output_dir.glob("checkpoint-*"))
+        if ckpts:
+            print(f"[resume] from latest checkpoint: {ckpts[-1].name}", file=sys.stderr)
+        else:
+            print(f"[resume] no checkpoints in {args.output_dir}; starting fresh", file=sys.stderr)
+            resume_arg = None
+    trainer.train(resume_from_checkpoint=resume_arg)
 
     # Save LoRA adapter locally + push.
     adapter_dir = args.output_dir / "adapter"
