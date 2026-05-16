@@ -43,6 +43,21 @@ NUM_LEVELS = 3
 CODEBOOK_SIZE = 256
 
 
+def _free_gpu(label: str = "") -> None:
+    """Release Python references + run gc + clear CUDA cache.
+
+    Called at strategic points: after trainer.train() (frees Adam optimizer state ~3.8GB),
+    after merge (frees the pre-merge LoRA-wrapped model), after push (frees merged ~3GB).
+    """
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        before = torch.cuda.memory_allocated() / 1e9
+        torch.cuda.empty_cache()
+        after = torch.cuda.memory_allocated() / 1e9
+        print(f"[gpu] {label}: {before:.2f} GB -> {after:.2f} GB allocated", file=sys.stderr)
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--train-parquet", type=Path,
@@ -75,6 +90,16 @@ def parse_args():
                    help="After pushing adapter (and merged) to Hub, delete the local "
                         "adapter_dir, merged_dir, and trainer checkpoints. Use when the Hub "
                         "is the canonical store and local disk is at a premium.")
+    p.add_argument("--report-to", default="tensorboard",
+                   choices=["tensorboard", "wandb", "trackio", "none"],
+                   help="Logging backend for live training metrics graphs (default: tensorboard). "
+                        "TensorBoard writes ~5-20 MB of logs under output_dir/runs/<timestamp>/; "
+                        "view via %tensorboard --logdir <path> in Colab.")
+    p.add_argument("--results-dir", type=Path, default=None,
+                   help="If set, copy per-experiment artifacts to <results-dir>/<run-id>/ "
+                        "BEFORE --cleanup-after-push fires. Persists: tensorboard runs/, "
+                        "training_summary.json, results.txt (hub repos + final metrics). "
+                        "Use a Drive path so artifacts survive Colab runtime death.")
     return p.parse_args()
 
 
@@ -176,7 +201,7 @@ def main():
         save_strategy="steps",
         save_steps=save_steps_eff,
         save_total_limit=2,
-        report_to="none",
+        report_to=args.report_to,
         remove_unused_columns=False,
         gradient_checkpointing=True,
     )
@@ -201,6 +226,15 @@ def main():
             resume_arg = None
     trainer.train(resume_from_checkpoint=resume_arg)
 
+    # Capture final-step metrics for the results.txt summary later.
+    final_log = trainer.state.log_history[-1] if trainer.state.log_history else {}
+
+    # Free Adam optimizer state (~3.8GB on GPU for 476M trainable params) — done
+    # with training, no longer needed for the save/merge/push steps.
+    trainer.optimizer = None
+    trainer.lr_scheduler = None
+    _free_gpu("after trainer.train")
+
     # Save LoRA adapter locally + push.
     adapter_dir = args.output_dir / "adapter"
     model.save_pretrained(adapter_dir)
@@ -212,34 +246,89 @@ def main():
     tokenizer.push_to_hub(hub_lora_repo, private=False)
     print(f"[push] {hub_lora_repo}", file=sys.stderr)
 
+    hub_merged_repo = None
     if args.merge:
         merged = model.merge_and_unload()
+        # The pre-merge LoRA-wrapped model is no longer referenced by anything we
+        # care about (merged is a new fp model). Drop the reference + clear cache.
+        del model
+        _free_gpu("after merge_and_unload")
+
         merged_dir = args.output_dir / "merged"
         merged.save_pretrained(merged_dir, safe_serialization=True)
         tokenizer.save_pretrained(merged_dir)
-        merged_repo = f"{args.hub_repo}-merged"
+        hub_merged_repo = f"{args.hub_repo}-merged"
         # safetensors is the default in recent transformers; push_to_hub no longer
         # accepts safe_serialization (only save_pretrained does, on line above).
-        merged.push_to_hub(merged_repo, private=False)
-        tokenizer.push_to_hub(merged_repo, private=False)
-        print(f"[push] merged → {merged_repo}", file=sys.stderr)
+        merged.push_to_hub(hub_merged_repo, private=False)
+        tokenizer.push_to_hub(hub_merged_repo, private=False)
+        print(f"[push] merged → {hub_merged_repo}", file=sys.stderr)
+        del merged
+        _free_gpu("after merged push")
 
     # Persist a small summary so notebooks can pick it up.
     summary = {
         "base_model": BASE_MODEL,
         "lora_r": args.lora_r, "lora_alpha": args.lora_alpha,
         "epochs": args.epochs, "lr": args.lr,
-        "smoke": args.smoke,
+        "smoke": args.smoke, "tiny": args.tiny,
         "n_train": len(train_ds), "n_val": len(val_ds),
         "hub_lora_repo": hub_lora_repo,
-        "hub_merged_repo": f"{args.hub_repo}-merged" if args.merge else None,
+        "hub_merged_repo": hub_merged_repo,
+        "final_metrics": final_log,
     }
     (args.output_dir / "training_summary.json").write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary, indent=2))
 
+    # Persist per-experiment artifacts to a Drive-friendly location BEFORE cleanup.
+    # Survives Colab runtime death and --cleanup-after-push.
+    if args.results_dir is not None:
+        import shutil
+        from datetime import datetime
+        run_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{args.hub_repo.split('/')[-1]}"
+        per_exp_dir = args.results_dir / run_id
+        per_exp_dir.mkdir(parents=True, exist_ok=True)
+        # Copy training_summary.json
+        shutil.copy2(args.output_dir / "training_summary.json", per_exp_dir / "training_summary.json")
+        # Copy tensorboard runs/ if they exist (for post-mortem viewing)
+        runs_src = args.output_dir / "runs"
+        if runs_src.exists():
+            shutil.copytree(runs_src, per_exp_dir / "runs", dirs_exist_ok=True)
+        # Write a human-readable results.txt with key info
+        results_lines = [
+            f"# W3 SID Generator Training — {run_id}",
+            "",
+            f"Base model:        {BASE_MODEL}",
+            f"Mode:              {'tiny' if args.tiny else 'smoke' if args.smoke else 'full'}",
+            f"Epochs:            {args.epochs}",
+            f"LR:                {args.lr}",
+            f"LoRA r/alpha:      {args.lora_r} / {args.lora_alpha}",
+            f"n_train / n_val:   {len(train_ds)} / {len(val_ds)}",
+            "",
+            f"Hub repos:",
+            f"  LoRA adapter:    https://huggingface.co/{hub_lora_repo}",
+        ]
+        if hub_merged_repo:
+            results_lines.append(f"  Merged model:    https://huggingface.co/{hub_merged_repo}")
+        results_lines += [
+            "",
+            f"Final-step metrics:",
+        ]
+        for k, v in final_log.items():
+            results_lines.append(f"  {k:24s} {v}")
+        results_lines += [
+            "",
+            f"TensorBoard logs:  {per_exp_dir / 'runs'}",
+            f"  view via:        %tensorboard --logdir {per_exp_dir / 'runs'}",
+        ]
+        (per_exp_dir / "results.txt").write_text("\n".join(results_lines) + "\n")
+        print(f"[results] persisted to {per_exp_dir}", file=sys.stderr)
+
     # Optional: cleanup local copies once Hub push has succeeded. Saves ~5 GB
     # (checkpoints) + ~975 MB (adapter) + ~3 GB (merged) on whatever disk
     # output_dir lives on. Hub remains the canonical store.
+    # NOTE: this does NOT touch output_dir/runs/ (TensorBoard logs) — copy them
+    # to --results-dir if you want them to survive cleanup.
     if args.cleanup_after_push:
         import shutil
         for ckpt in args.output_dir.glob("checkpoint-*"):
@@ -254,6 +343,7 @@ def main():
             if merged_dir.exists():
                 print(f"[cleanup] rm {merged_dir}", file=sys.stderr)
                 shutil.rmtree(merged_dir, ignore_errors=True)
+        _free_gpu("after cleanup")
 
 
 if __name__ == "__main__":
