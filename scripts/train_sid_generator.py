@@ -54,7 +54,9 @@ def parse_args():
     p.add_argument("--hub-repo", type=str,
                    default="OrRim123/recsys2026-sid-generator-qwen15b-v1")
     p.add_argument("--smoke", action="store_true",
-                   help="Tiny run for plumbing test (200 steps, 1k train rows)")
+                   help="Tiny run for plumbing test (200 steps, 1k train rows, ~10 min)")
+    p.add_argument("--tiny", action="store_true",
+                   help="Even tinier e2e plumbing test (30 steps, 100 train rows, ~3 min)")
     p.add_argument("--max-prompt-len", type=int, default=1024)
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--epochs", type=int, default=3)
@@ -134,11 +136,21 @@ def main():
     model = load_and_extend_model(tokenizer)
     model = wrap_lora(model, args)
 
-    sample_n = 1000 if args.smoke else None
-    train_ds = build_hf_dataset(args.train_parquet, tokenizer, sid_lookup, args.max_prompt_len, sample_n=sample_n)
-    val_ds = build_hf_dataset(args.val_parquet, tokenizer, sid_lookup, args.max_prompt_len, sample_n=200 if args.smoke else None)
+    # --tiny is the smallest plumbing-test mode (~3 min); --smoke is the medium
+    # plumbing-test mode (~10 min); no flag = full training.
+    if args.tiny:
+        train_sample_n, val_sample_n, max_steps = 100, 30, 30
+        save_steps_eff = 30
+    elif args.smoke:
+        train_sample_n, val_sample_n, max_steps = 1000, 200, 200
+        save_steps_eff = 500
+    else:
+        train_sample_n, val_sample_n, max_steps = None, None, -1
+        save_steps_eff = 500
 
-    max_steps = 200 if args.smoke else -1
+    train_ds = build_hf_dataset(args.train_parquet, tokenizer, sid_lookup, args.max_prompt_len, sample_n=train_sample_n)
+    val_ds = build_hf_dataset(args.val_parquet, tokenizer, sid_lookup, args.max_prompt_len, sample_n=val_sample_n)
+
     training_args = TrainingArguments(
         output_dir=str(args.output_dir),
         per_device_train_batch_size=args.micro_batch,
@@ -151,10 +163,10 @@ def main():
         lr_scheduler_type="cosine",
         bf16=True,
         logging_steps=10,
-        eval_strategy="steps" if not args.smoke else "no",
+        eval_strategy="no" if (args.smoke or args.tiny) else "steps",
         eval_steps=200,
         save_strategy="steps",
-        save_steps=500,
+        save_steps=save_steps_eff,
         save_total_limit=2,
         report_to="none",
         remove_unused_columns=False,
