@@ -22,8 +22,10 @@ def load_retrieval_module(
         dataset_name: str,
         track_split_types: list[str],
         corpus_types: list[str] = ["track_name", "artist_name", "album_name"],
-        cache_dir: str = "./cache"
+        cache_dir: str = "./cache",
+        extra_config: dict | None = None,
     ):
+    extra_config = extra_config or {}
     if retrieval_type == "bm25":
         return BM25_MODEL(dataset_name, track_split_types, corpus_types, cache_dir)
     elif retrieval_type == "bert":
@@ -226,8 +228,12 @@ def load_retrieval_module(
     # LM to emit SID triplets; maps them back to track_ids via a trie lookup.
     elif retrieval_type == "sid_generator":
         from mcrs.retrieval_modules.sid_generator import SID_GENERATOR
+        sid_hub_repo = extra_config.get(
+            "sid_hub_repo",
+            "OrRim123/recsys2026-sid-generator-qwen15b-v1-merged",
+        )
         return SID_GENERATOR(
-            hub_repo="OrRim123/recsys2026-sid-generator-qwen15b-v1-merged",
+            hub_repo=sid_hub_repo,
             sid_lookup_path=Path(cache_dir) / "sid" / "track_to_sid.parquet",
             device="cuda",
             num_beams=20,
