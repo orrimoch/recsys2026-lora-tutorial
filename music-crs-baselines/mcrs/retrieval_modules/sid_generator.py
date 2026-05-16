@@ -13,6 +13,7 @@ cap (per spec §2.5).
 """
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from mcrs.sid.inference import build_sid_trie, make_prefix_allowed_tokens_fn
+from mcrs.sid.training_data import format_query_for_sid_input
 from mcrs.sid.vocab import build_sid_to_token_id_lookup
 
 
@@ -70,20 +72,52 @@ class SID_GENERATOR:
         sids = list(t2s[["code_1", "code_2", "code_3"]].itertuples(index=False, name=None))
         self.trie = build_sid_trie(sids, self.sid_lookup)
 
+    # Class-level flag so the "no batch_context" warning fires once per process.
+    _warned_no_batch_context: bool = False
+
     def batch_text_to_item_retrieval(
         self,
         queries: list[str],
         topk: int,
         user_ids: Optional[list[str]] = None,
+        batch_context: Optional[list[dict]] = None,
     ) -> list[list[str]]:
         """For each query, run constrained beam search → top-K track IDs.
 
         Interface parity: matches BM25_MODEL.batch_text_to_item_retrieval (user_ids
         accepted but ignored — SID retrieval is text-conditioned only).
+
+        batch_context: optional list of per-query dicts with keys
+          {chat_history, current_user_query, user_profile, conversation_goal}.
+          When provided, each query is reformatted via format_query_for_sid_input
+          to match the W3 training distribution before tokenizing.
+          When None (back-compat), bare queries are used with a one-time warning.
         """
+        use_context = (
+            batch_context is not None and len(batch_context) == len(queries)
+        )
+        if not use_context and not SID_GENERATOR._warned_no_batch_context:
+            warnings.warn(
+                "SID_GENERATOR.batch_text_to_item_retrieval called without "
+                "batch_context — input format will NOT match the W3 training "
+                "distribution ([USER]/[GOAL]/[HISTORY]/[QUERY] blocks). "
+                "Pass batch_context for correct inference. "
+                "(This warning fires once per process.)",
+                stacklevel=2,
+            )
+            SID_GENERATOR._warned_no_batch_context = True
+
         results: list[list[str]] = []
         with torch.inference_mode():
-            for query in queries:
+            for i, query in enumerate(queries):
+                if use_context:
+                    ctx = batch_context[i]
+                    query = format_query_for_sid_input(
+                        chat_history=ctx.get("chat_history", []),
+                        current_user_query=ctx.get("current_user_query", query),
+                        user_profile=ctx.get("user_profile"),
+                        conversation_goal=ctx.get("conversation_goal"),
+                    )
                 inputs = self.tokenizer(
                     query, truncation=True, max_length=self.max_prompt_len,
                     return_tensors="pt", add_special_tokens=False,

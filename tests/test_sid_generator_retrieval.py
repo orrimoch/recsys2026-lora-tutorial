@@ -233,3 +233,136 @@ def test_factory_wrrf_sid_subspec_has_four_streams():
     assert '"dense_metadata_qwen3_instruct"' in block
     assert '"dense_lyrics_qwen3_instruct"' in block
     assert '"sid_generator"' in block
+
+
+def test_batch_text_to_item_retrieval_uses_batch_context_to_reformat(monkeypatch, tiny_sid_lookup_parquet):
+    """When batch_context is passed, SID_GENERATOR reformats each query via
+    format_query_for_sid_input before tokenizing — matching training distribution."""
+    from mcrs.retrieval_modules.sid_generator import SID_GENERATOR
+    import torch
+
+    captured_queries = []
+
+    class _CapturingTokenizer:
+        pad_token_id = 0; eos_token_id = 1
+        def get_vocab(self):
+            return {f"<SID_L{lvl}_C{code}>": 1000 + lvl * 256 + code
+                    for lvl in range(3) for code in range(256)}
+        def encode(self, s, add_special_tokens=False):
+            if s.startswith("<SID_L"):
+                import re
+                m = re.match(r"<SID_L(\d+)_C(\d+)>", s)
+                if m:
+                    lvl, code = int(m.group(1)), int(m.group(2))
+                    return [1000 + lvl * 256 + code]
+            return [99]
+        @classmethod
+        def from_pretrained(cls, _): return cls()
+        def __call__(self, text, **k):
+            # Capture what string the model actually receives.
+            captured_queries.append(text)
+            return {"input_ids": torch.tensor([[10, 20, 30]]),
+                    "attention_mask": torch.tensor([[1, 1, 1]])}
+
+    class _StubModel:
+        device = "cpu"
+        def __init__(self): self.generation_config = type("c", (), {})()
+        def eval(self): return self
+        @classmethod
+        def from_pretrained(cls, *a, **k): return cls()
+        def generate(self, input_ids, **k):
+            seqs = [input_ids[0].tolist() + [1000, 1256, 1512]]
+            return type("o", (), {"sequences": torch.tensor(seqs)})()
+
+    monkeypatch.setattr("mcrs.retrieval_modules.sid_generator.AutoTokenizer", _CapturingTokenizer)
+    monkeypatch.setattr("mcrs.retrieval_modules.sid_generator.AutoModelForCausalLM", _StubModel)
+
+    gen = SID_GENERATOR(
+        hub_repo="fake/repo",
+        sid_lookup_path=tiny_sid_lookup_parquet,
+        device="cpu",
+        num_beams=1,
+    )
+
+    batch_context = [{
+        "chat_history": [
+            {"role": "user", "content": "I want indie rock"},
+            {"role": "assistant", "content": "track_name: Mr Brightside"},
+        ],
+        "current_user_query": "something newer",
+        "user_profile": {"age": 36, "country_code": "MX", "preferred_musical_culture": "Rock"},
+        "conversation_goal": {"listener_goal": "find energetic 90s rock"},
+    }]
+
+    gen.batch_text_to_item_retrieval(
+        queries=["bare query"], topk=1, batch_context=batch_context,
+    )
+
+    # Tokenizer was called with the FORMATTED string, not the bare query
+    assert len(captured_queries) == 1
+    formatted = captured_queries[0]
+    assert "[USER]" in formatted, f"Missing [USER] block in: {formatted[:200]}"
+    assert "[QUERY]" in formatted, f"Missing [QUERY] block in: {formatted[:200]}"
+    assert "something newer" in formatted
+    assert "find energetic 90s rock" in formatted
+    assert "Mr Brightside" in formatted
+
+
+def test_batch_text_to_item_retrieval_works_without_batch_context(monkeypatch, tiny_sid_lookup_parquet):
+    """When batch_context is None (back-compat), SID_GENERATOR uses bare queries
+    + emits a warning that input distribution may not match training."""
+    from mcrs.retrieval_modules.sid_generator import SID_GENERATOR
+    import torch, warnings
+
+    class _Tok:
+        pad_token_id = 0; eos_token_id = 1
+        def get_vocab(self):
+            return {f"<SID_L{lvl}_C{code}>": 1000 + lvl * 256 + code
+                    for lvl in range(3) for code in range(256)}
+        def encode(self, s, add_special_tokens=False):
+            if s.startswith("<SID_L"):
+                import re
+                m = re.match(r"<SID_L(\d+)_C(\d+)>", s)
+                if m:
+                    lvl, code = int(m.group(1)), int(m.group(2))
+                    return [1000 + lvl * 256 + code]
+            return [99]
+        @classmethod
+        def from_pretrained(cls, _): return cls()
+        def __call__(self, text, **k):
+            return {"input_ids": torch.tensor([[10, 20, 30]]),
+                    "attention_mask": torch.tensor([[1, 1, 1]])}
+
+    class _Model:
+        device = "cpu"
+        def __init__(self): self.generation_config = type("c", (), {})()
+        def eval(self): return self
+        @classmethod
+        def from_pretrained(cls, *a, **k): return cls()
+        def generate(self, input_ids, **k):
+            seqs = [input_ids[0].tolist() + [1000, 1256, 1512]]
+            return type("o", (), {"sequences": torch.tensor(seqs)})()
+
+    monkeypatch.setattr("mcrs.retrieval_modules.sid_generator.AutoTokenizer", _Tok)
+    monkeypatch.setattr("mcrs.retrieval_modules.sid_generator.AutoModelForCausalLM", _Model)
+
+    # Reset the once-warned flag so the warning can fire in this test.
+    SID_GENERATOR._warned_no_batch_context = False
+
+    gen = SID_GENERATOR(
+        hub_repo="fake/repo",
+        sid_lookup_path=tiny_sid_lookup_parquet,
+        device="cpu",
+        num_beams=1,
+    )
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        out = gen.batch_text_to_item_retrieval(queries=["bare query"], topk=1)
+        # Should not crash; should still return a list of lists
+        assert len(out) == 1
+        # Warning should have been emitted
+        warning_msgs = [str(x.message) for x in w]
+        assert any("batch_context" in msg for msg in warning_msgs), (
+            f"Expected batch_context warning, got: {warning_msgs}"
+        )

@@ -16,7 +16,7 @@ retriever wherever any other retriever would go.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 
 class RRF_MODEL:
@@ -70,17 +70,29 @@ class RRF_MODEL:
 
     def batch_text_to_item_retrieval(
         self, queries: list[str], topk: int, user_ids=None,
+        batch_context: Optional[list[dict]] = None,
     ) -> list[list[str]]:
-        # user_ids threaded through to any sub that uses it (e.g. cf_bpr).
-        # Subs that ignore it (BM25, dense) still accept it for interface parity.
+        # user_ids and batch_context threaded through to any sub that uses them.
+        # Subs that ignore them (BM25, dense) still accept via try/except back-compat.
         per_sub: list[list[list[str]]] = []
         for sub in self.subs:
             print(f"[rrf] running sub: {sub['label']}")
-            per_sub.append(
-                sub["retriever"].batch_text_to_item_retrieval(
-                    queries, topk=sub["topk"], user_ids=user_ids,
+            try:
+                sub_results = sub["retriever"].batch_text_to_item_retrieval(
+                    queries, topk=sub["topk"],
+                    batch_context=batch_context, user_ids=user_ids,
                 )
-            )
+            except TypeError:
+                # Back-compat: sub-retriever doesn't accept batch_context yet.
+                try:
+                    sub_results = sub["retriever"].batch_text_to_item_retrieval(
+                        queries, topk=sub["topk"], user_ids=user_ids,
+                    )
+                except TypeError:
+                    sub_results = sub["retriever"].batch_text_to_item_retrieval(
+                        queries, topk=sub["topk"],
+                    )
+            per_sub.append(sub_results)
 
         results: list[list[str]] = []
         for q_idx in range(len(queries)):

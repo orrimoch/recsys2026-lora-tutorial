@@ -448,20 +448,41 @@ class CRS_BASELINE:
                 extracted_states=extracted_states,
             )
 
+        # Build per-query structured context for SID-style retrievers.
+        # Other retrievers accept-and-ignore via try/except TypeError back-compat.
+        # session_memory at this point has the prior history WITHOUT the current user
+        # query (it was appended above into session_memories but batch_data holds
+        # the original pre-append list — use data.get("session_memory") for prior).
+        batch_context = []
+        for data in batch_data:
+            prior_history = data.get("session_memory", [])  # {role, content} dicts
+            batch_context.append({
+                "chat_history": prior_history,
+                "current_user_query": data["user_query"],
+                "user_profile": data.get("user_profile_raw"),
+                "conversation_goal": data.get("conversation_goal"),
+            })
+
         # Stage 1: Batch retrieval. Pull retrieval_topk (default 20; 40 when
-        # a reranker is configured) candidates per query. user_ids thread
-        # through so cf-bpr-style user-aware retrievers can use them.
+        # a reranker is configured) candidates per query. user_ids and
+        # batch_context thread through so cf-bpr/SID-style retrievers can use them.
         stage1_topk = self.retrieval_topk
         if hasattr(self.retrieval, 'batch_text_to_item_retrieval'):
             try:
                 batch_retrieval_items = self.retrieval.batch_text_to_item_retrieval(
-                    retrieval_inputs, topk=stage1_topk, user_ids=user_ids,
+                    retrieval_inputs, topk=stage1_topk,
+                    user_ids=user_ids, batch_context=batch_context,
                 )
             except TypeError:
-                # Back-compat: retriever predates the user_ids kwarg.
-                batch_retrieval_items = self.retrieval.batch_text_to_item_retrieval(
-                    retrieval_inputs, topk=stage1_topk,
-                )
+                # Back-compat: retriever predates batch_context kwarg.
+                try:
+                    batch_retrieval_items = self.retrieval.batch_text_to_item_retrieval(
+                        retrieval_inputs, topk=stage1_topk, user_ids=user_ids,
+                    )
+                except TypeError:
+                    batch_retrieval_items = self.retrieval.batch_text_to_item_retrieval(
+                        retrieval_inputs, topk=stage1_topk,
+                    )
         else:
             batch_retrieval_items = [self.retrieval.text_to_item_retrieval(inp, topk=stage1_topk) for inp in retrieval_inputs]
         # Capture the pre-rerank pool — A6 backfill source if catalog filter
