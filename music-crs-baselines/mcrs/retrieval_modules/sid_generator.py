@@ -88,7 +88,10 @@ class SID_GENERATOR:
                     query, truncation=True, max_length=self.max_prompt_len,
                     return_tensors="pt", add_special_tokens=False,
                 )
-                if self.model.device != "cpu" and hasattr(inputs, "to"):
+                # HF BatchEncoding supports .to(device) on CPU too (no-op when already there),
+                # so the conditional guard is unnecessary in production. The test fixtures
+                # stub the tokenizer to return a plain dict; guard against that case.
+                if hasattr(inputs, "to"):
                     inputs = inputs.to(self.model.device)
                 prompt_len = inputs["input_ids"].shape[1]
 
@@ -124,6 +127,7 @@ class SID_GENERATOR:
         seen: set[str] = set()
         primary: list[str] = []
         spillover: list[str] = []
+        n_decode_failures = 0
         for tok_ids in beam_token_ids:
             try:
                 sid = (
@@ -132,6 +136,7 @@ class SID_GENERATOR:
                     self.inverse_lookup[tok_ids[2]][1],
                 )
             except (KeyError, IndexError):
+                n_decode_failures += 1
                 continue
             bucket = self.sid_to_tracks.get(sid, [])
             added_in_beam = 0
@@ -144,6 +149,12 @@ class SID_GENERATOR:
                 else:
                     spillover.append(tid)
                 seen.add(tid)
+        if n_decode_failures > 0 and n_decode_failures > len(beam_token_ids) // 2:
+            import warnings
+            warnings.warn(
+                f"SID decode failed for {n_decode_failures}/{len(beam_token_ids)} beams; "
+                f"possible tokenizer/vocab mismatch between training and inference."
+            )
         return (primary + spillover)[:topk]
 
     def text_to_item_retrieval(
