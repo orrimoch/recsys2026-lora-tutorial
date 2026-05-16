@@ -214,7 +214,9 @@ def main():
         merged.save_pretrained(merged_dir, safe_serialization=True)
         tokenizer.save_pretrained(merged_dir)
         merged_repo = f"{args.hub_repo}-merged"
-        merged.push_to_hub(merged_repo, private=False, safe_serialization=True)
+        # safetensors is the default in recent transformers; push_to_hub no longer
+        # accepts safe_serialization (only save_pretrained does, on line above).
+        merged.push_to_hub(merged_repo, private=False)
         tokenizer.push_to_hub(merged_repo, private=False)
         print(f"[push] merged → {merged_repo}", file=sys.stderr)
 
