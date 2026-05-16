@@ -205,3 +205,31 @@ def test_sid_generator_interface_matches_existing_retrievers(monkeypatch, tiny_s
     assert sid_params[:3] == bm25_params[:3] == ["self", "queries", "topk"]
     assert "user_ids" in sid_params
     assert "user_ids" in bm25_params
+
+
+def test_factory_recognizes_sid_generator_retrieval_type():
+    """load_retrieval_module(retrieval_type='sid_generator', ...) must dispatch
+    to SID_GENERATOR class (verified by inspecting registered branches)."""
+    import inspect
+    from mcrs.retrieval_modules import load_retrieval_module
+
+    src = inspect.getsource(load_retrieval_module)
+    assert '"sid_generator"' in src
+    assert '"wrrf_bm25_dense_sid_v1"' in src
+    assert "SID_GENERATOR" in src
+
+
+def test_factory_wrrf_sid_subspec_has_four_streams():
+    """wrrf_bm25_dense_sid_v1 spec must include BM25 + 2 dense + SID = 4 streams."""
+    import inspect
+    from mcrs.retrieval_modules import load_retrieval_module
+
+    src = inspect.getsource(load_retrieval_module)
+    start = src.find('"wrrf_bm25_dense_sid_v1"')
+    assert start >= 0, "wrrf_bm25_dense_sid_v1 entry not found"
+    end = src.find("elif retrieval_type", start + 1)
+    block = src[start:end if end > 0 else len(src)]
+    assert '"bm25"' in block
+    assert '"dense_metadata_qwen3_instruct"' in block
+    assert '"dense_lyrics_qwen3_instruct"' in block
+    assert '"sid_generator"' in block
