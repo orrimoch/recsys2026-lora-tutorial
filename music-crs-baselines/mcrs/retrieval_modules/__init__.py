@@ -230,7 +230,10 @@ def load_retrieval_module(
         from mcrs.retrieval_modules.sid_generator import SID_GENERATOR
         sid_hub_repo = extra_config.get(
             "sid_hub_repo",
-            "OrRim123/recsys2026-sid-generator-qwen15b-v1-merged",
+            # W1 v2 default (2026-05-17): commit bea989b's cosine-Sinkhorn-at-all-levels
+            # codebook produced this -v2-merged. v1-merged still exists on Hub for
+            # comparison runs; override via `extra_config.sid_hub_repo` in YAML.
+            "OrRim123/recsys2026-sid-generator-qwen15b-v2-merged",
         )
         return SID_GENERATOR(
             hub_repo=sid_hub_repo,
@@ -319,6 +322,12 @@ def load_retrieval_module(
                     "corpus_types": corpus_types,
                     "topk_internal": 20,
                     "weight": sid_weight,
+                    # Forward parent's sid_hub_repo (if set) to the SID factory.
+                    # Without this the sub-retriever would always use the default,
+                    # making the YAML override ineffective for wRRF ensembles.
+                    "extra_config": {
+                        "sid_hub_repo": extra_config.get("sid_hub_repo")
+                    } if extra_config.get("sid_hub_repo") else {},
                 },
             ],
             k=60,

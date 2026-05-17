@@ -59,8 +59,10 @@ class RRF_MODEL:
                 f"[rrf] building sub retriever={retriever_type} "
                 f"topk_internal={sub_topk} weight={weight:.2f}"
             )
+            sub_extra_config = spec.get("extra_config", {}) or {}
             sub = load_retrieval_module(
-                retriever_type, dataset_name, split_types, sub_corpus, cache_dir
+                retriever_type, dataset_name, split_types, sub_corpus, cache_dir,
+                extra_config=sub_extra_config,
             )
             self.subs.append({
                 "retriever": sub, "topk": sub_topk,

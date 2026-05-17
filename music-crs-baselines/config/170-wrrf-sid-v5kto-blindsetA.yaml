@@ -4,7 +4,13 @@
 # Origin of SID generator: W3 fine-tune of Qwen2.5-1.5B-Instruct + LoRA on
 # (raw conversations + metadata-as-query) training data; see
 # documents/specs/2026-05-15-sid-retrieval-design.md + W3 memory.
-# Hub: OrRim123/recsys2026-sid-generator-qwen15b-v1-merged
+#
+# Hub (current default, post-2026-05-17):
+#   OrRim123/recsys2026-sid-generator-qwen15b-v2-merged
+#   — W1 v2 (commit bea989b), cosine-Sinkhorn-at-all-levels, 39,263 unique SIDs.
+# To override (e.g. to compare against v1 baseline) add:
+#   extra_config:
+#     sid_hub_repo: OrRim123/recsys2026-sid-generator-qwen15b-v1-merged
 #
 # Initial SID weight = 0.5 (tunable in W5).
 #

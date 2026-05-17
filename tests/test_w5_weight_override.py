@@ -83,8 +83,13 @@ def test_factory_wrrf_sid_defaults_to_0_5_when_override_absent(monkeypatch, tmp_
     assert sid_specs[0]["weight"] == 0.5
 
 
-def test_factory_sid_hub_repo_defaults_to_v1_when_override_absent(monkeypatch, tmp_path):
-    """When extra_config lacks sid_hub_repo, default to v1 merged."""
+def test_factory_sid_hub_repo_defaults_to_v2_when_override_absent(monkeypatch, tmp_path):
+    """When extra_config lacks sid_hub_repo, default to v2 merged.
+
+    2026-05-17: default flipped from v1 → v2 after the cosine-Sinkhorn fix
+    (commit bea989b) produced the qwen15b-v2-merged codebook with 39K unique
+    SIDs vs v1's 3K. v1 model still exists on Hub for comparison runs.
+    """
     import pandas as pd
     sid_dir = tmp_path / "sid"
     sid_dir.mkdir()
@@ -109,4 +114,4 @@ def test_factory_sid_hub_repo_defaults_to_v1_when_override_absent(monkeypatch, t
         cache_dir=str(tmp_path),
     )
 
-    assert captured["hub_repo"] == "OrRim123/recsys2026-sid-generator-qwen15b-v1-merged"
+    assert captured["hub_repo"] == "OrRim123/recsys2026-sid-generator-qwen15b-v2-merged"
