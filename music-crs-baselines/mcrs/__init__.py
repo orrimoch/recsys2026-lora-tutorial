@@ -43,7 +43,15 @@ def load_crs_baseline(
     cmqr_topk_per_rewrite: int = 50,
     cmqr_rrf_k: int = 60,
     cmqr_max_new_tokens: int = 96,
+    extra_config: Optional[dict] = None,
 ):
+    """Build a CRS_BASELINE.
+
+    `extra_config`: arbitrary YAML overrides forwarded to the retriever factory
+    (e.g., `sid_hub_repo`, `sid_stream_weight` for wRRF+SID ensembles). Added
+    after W5 work plumbed `extra_config` into CRS_BASELINE and
+    `run_inference_blindset.py` but forgot to widen this wrapper's signature.
+    """
     from .crs_baseline import CRS_BASELINE  # lazy: see module-level comment
     return CRS_BASELINE(
         lm_type=lm_type,
@@ -80,4 +88,5 @@ def load_crs_baseline(
         cmqr_topk_per_rewrite=cmqr_topk_per_rewrite,
         cmqr_rrf_k=cmqr_rrf_k,
         cmqr_max_new_tokens=cmqr_max_new_tokens,
+        extra_config=extra_config,
     )
