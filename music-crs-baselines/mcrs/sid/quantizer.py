@@ -6,6 +6,15 @@ Spec §2.2 architecture:
     → ResidualVQ × 3 levels, codebook=256 each
     → MLP decoder (256 → 512 → 1664)
   Loss = MSE_recon + 0.25·commitment_loss + λ·sinkhorn_uniform_loss
+
+W1 v2 fix history (2026-05-17):
+  v1 Sinkhorn applied L2-distance regularization to LEVEL 0 ONLY, which
+  (a) doesn't match the cosine-VQ assignment metric, and
+  (b) leaves residual layers (L1, L2) un-regularized — driving the
+      "hourglass" codebook collapse we observed in the W3 v1 diagnostic.
+  v2 applies cosine-similarity-based Sinkhorn to ALL `num_levels` codebooks,
+  walking the residual chain so each level's anti-collapse pressure matches
+  what that level's codebook is meant to capture.
 """
 from __future__ import annotations
 
@@ -15,6 +24,7 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from vector_quantize_pytorch import ResidualVQ
 
 
@@ -29,19 +39,24 @@ def _set_seed(seed: int) -> None:
 
 
 def _sinkhorn_uniform_loss(
-    distances: torch.Tensor,
+    costs: torch.Tensor,
     n_iters: int = 5,
     epsilon: float = 0.05,
 ) -> torch.Tensor:
     """Approximate Sinkhorn-uniform loss over codebook assignments (LC-Rec recipe motivation).
 
     Encourages each code to receive roughly 1/K of the total assignment mass,
-    preventing codebook collapse. `distances` is a (B, K) matrix of squared distances
-    from each input to each code; we Sinkhorn-normalize it and penalize
-    deviation from uniform code marginals.
+    preventing codebook collapse. `costs` is a (B, K) matrix where LOWER = more
+    affinity (e.g., L2 squared distance, OR negative cosine similarity for
+    cosine-VQ setups). We Sinkhorn-normalize and penalize deviation from uniform
+    code marginals.
+
+    Renamed from `distances` to `costs` (v2): cosine-VQ uses negative cosine sim
+    as the cost, not L2. The function is metric-agnostic; the caller picks the
+    cost matrix to match whatever metric the VQ uses.
     """
-    B, K = distances.shape
-    log_q = -distances / max(epsilon, 1e-6)
+    B, K = costs.shape
+    log_q = -costs / max(epsilon, 1e-6)
     log_q = log_q - log_q.logsumexp(dim=1, keepdim=True)  # row-normalize
     for _ in range(n_iters):
         col_marg = log_q.logsumexp(dim=0)
@@ -51,6 +66,18 @@ def _sinkhorn_uniform_loss(
     final_col = log_q.logsumexp(dim=0)
     target = torch.full_like(final_col, fill_value=np.log(B / K))
     return (final_col.exp() * (final_col - target)).sum()
+
+
+def _cosine_cost_matrix(z: torch.Tensor, codebook: torch.Tensor) -> torch.Tensor:
+    """Cost matrix for cosine-VQ Sinkhorn: -cos(z, code) per (input, code) pair.
+
+    Both z and codebook are L2-normalized first so the cost is in [-1, 1] (lower =
+    higher cosine similarity = more affinity). Matches the metric the cosine-VQ
+    uses internally for assignment.
+    """
+    z_n = F.normalize(z, dim=-1)
+    cb_n = F.normalize(codebook, dim=-1)
+    return -(z_n @ cb_n.T)
 
 
 class SIDQuantizer:
@@ -128,19 +155,37 @@ class SIDQuantizer:
         return self
 
     def train_step(self, batch: torch.Tensor) -> dict[str, torch.Tensor]:
-        """One training step: encode → quantize → decode → compute losses."""
+        """One training step: encode → quantize → decode → compute losses.
+
+        v2 (2026-05-17): Sinkhorn applied per-level using cosine cost (matches the
+        cosine-VQ assignment metric) and walks the residual chain so each level's
+        codebook gets anti-collapse pressure on the input distribution that level
+        is actually meant to quantize.
+        """
         z = self.encoder(batch)
-        z_q, _, commitment_loss = self.rvq(z)
+        z_q, indices, commitment_loss = self.rvq(z)
         recon = self.decoder(z_q)
         mse = ((recon - batch) ** 2).mean()
-        # Sinkhorn term over the FIRST codebook's distances
-        first_codebook = self.rvq.layers[0]._codebook.embed[0]  # (K, D)
-        dists = ((z.unsqueeze(1) - first_codebook.unsqueeze(0)) ** 2).sum(dim=-1)  # (B, K)
-        sinkhorn = _sinkhorn_uniform_loss(dists)
+
+        # Per-level Sinkhorn over cosine cost. Walk the residual chain so the
+        # cost matrix at level L uses the residual the L-th codebook actually sees.
+        sinkhorn_per_level: list[torch.Tensor] = []
+        z_residual = z
+        for level in range(self.num_levels):
+            codebook = self.rvq.layers[level]._codebook.embed[0]  # (K, D)
+            cost = _cosine_cost_matrix(z_residual, codebook)
+            sinkhorn_per_level.append(_sinkhorn_uniform_loss(cost))
+            # Subtract this level's assigned (unit-norm) code to form the next residual.
+            assigned_idx = indices[..., level] if indices.dim() > 1 else indices
+            assigned_code = F.normalize(codebook, dim=-1)[assigned_idx]
+            z_residual = z_residual - assigned_code
+
+        sinkhorn_total = torch.stack(sinkhorn_per_level).sum()
         return {
             "mse_recon": mse,
             "commitment": commitment_loss.mean() if commitment_loss.dim() > 0 else commitment_loss,
-            "sinkhorn": self.sinkhorn_lambda * sinkhorn,
+            "sinkhorn": self.sinkhorn_lambda * sinkhorn_total,
+            "sinkhorn_per_level": sinkhorn_per_level,
         }
 
     @torch.no_grad()

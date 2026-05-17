@@ -160,3 +160,37 @@ def test_compute_relative_mse_gate_handles_zero_pca_baseline():
     passed, mse = compute_relative_mse_gate(rqvae_mse=0.001, pca_mse=0.0, multiplier=1.5)
     assert passed is True
     assert mse == 0.001
+
+
+# ---------------------------------------------------------------------------
+# W1 v2 fixes (2026-05-17): stricter recommended thresholds
+# ---------------------------------------------------------------------------
+
+def test_recommended_utilization_thresholds_are_stricter_than_v1():
+    """v1 used [0.50, 0.25, 0.15] (relaxed to make broken Sinkhorn pass).
+    v2 raises these now that all 3 levels get proper anti-collapse pressure."""
+    from mcrs.sid.validation import RECOMMENDED_UTILIZATION_THRESHOLDS
+
+    assert isinstance(RECOMMENDED_UTILIZATION_THRESHOLDS, (list, tuple))
+    assert len(RECOMMENDED_UTILIZATION_THRESHOLDS) == 3
+    # Each new threshold must exceed the v1 relaxed value for the same level.
+    v1_relaxed = [0.50, 0.25, 0.15]
+    for lvl, (new_th, old_th) in enumerate(
+        zip(RECOMMENDED_UTILIZATION_THRESHOLDS, v1_relaxed)
+    ):
+        assert new_th > old_th, (
+            f"Level {lvl+1} threshold {new_th} not stricter than v1 {old_th}"
+        )
+    # L1 must be the loosest, L3 the strictest (residual-layer reality).
+    assert (
+        RECOMMENDED_UTILIZATION_THRESHOLDS[0]
+        >= RECOMMENDED_UTILIZATION_THRESHOLDS[1]
+        >= RECOMMENDED_UTILIZATION_THRESHOLDS[2]
+    )
+
+
+def test_recommended_purity_threshold_is_stricter_than_v1():
+    """v1 used 0.20 (mean dominant-tag fraction); v2 raises this."""
+    from mcrs.sid.validation import RECOMMENDED_PURITY_THRESHOLD
+
+    assert RECOMMENDED_PURITY_THRESHOLD > 0.20

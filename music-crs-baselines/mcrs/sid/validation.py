@@ -1,7 +1,28 @@
-"""Pure functions for SID quantizer validation gates (per spec section 2.4)."""
+"""Pure functions for SID quantizer validation gates (per spec section 2.4).
+
+W1 v2 (2026-05-17): RECOMMENDED_* thresholds tightened from the v1 relaxed
+values that were softened in 2026-05-16 to make the broken-Sinkhorn quantizer
+pass. With v2's cosine-Sinkhorn applied to all 3 levels, codebook utilization
+should be substantially higher across all levels.
+
+| Level | v1 (relaxed) | v2 (recommended) | Source |
+|-------|--------------|-------------------|--------|
+| L1    | 0.50         | 0.80              | Original spec target |
+| L2    | 0.25         | 0.50              | Within published RQ-VAE range |
+| L3    | 0.15         | 0.30              | Within published RQ-VAE range |
+
+Purity: v1 used 0.20 (mean dominant-tag fraction); v2 raises to 0.30 so a
+"passing" bucket has at least 30% tag-share — meaningfully above random
+co-occurrence for common tags.
+"""
 from __future__ import annotations
 
 import random
+
+# Recommended thresholds (W1 v2). Build script imports these so tightening
+# happens in one place and tests can assert the values.
+RECOMMENDED_UTILIZATION_THRESHOLDS: list[float] = [0.80, 0.50, 0.30]
+RECOMMENDED_PURITY_THRESHOLD: float = 0.30
 
 
 def validate_codebook_utilization(

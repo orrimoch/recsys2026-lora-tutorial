@@ -33,6 +33,8 @@ from sklearn.decomposition import PCA
 from mcrs.sid.preprocessing import concat_modalities
 from mcrs.sid.quantizer import SIDQuantizer
 from mcrs.sid.validation import (
+    RECOMMENDED_PURITY_THRESHOLD,
+    RECOMMENDED_UTILIZATION_THRESHOLDS,
     compute_relative_mse_gate,
     validate_codebook_utilization,
     validate_cluster_purity,
@@ -191,14 +193,14 @@ def main():
     rqvae_mse = float(((recon - X) ** 2).mean())
     g1_pass, g1_ratio = compute_relative_mse_gate(rqvae_mse, pca_mse, multiplier=1.5)
 
-    # Gate 2: codebook utilization per level — level-aware thresholds (2026-05-16 v3.1).
-    # RQ-VAE residual layers naturally have lower utilization than the first level
-    # because they capture finer-grained variance. Uniform 80% threshold was wrong.
-    # Realistic targets per published configs: L1 50-90%, L2 25-50%, L3 15-35%.
-    LEVEL_THRESHOLDS = [0.50, 0.25, 0.15]  # one per level (must match num_levels)
+    # Gate 2: codebook utilization per level — level-aware thresholds (W1 v2 2026-05-17).
+    # Thresholds tightened after the Sinkhorn fix (cosine metric + all 3 levels);
+    # previously L1=0.50, L2=0.25, L3=0.15 to accommodate broken regularization.
+    # The canonical values now live in mcrs.sid.validation (one source of truth).
+    LEVEL_THRESHOLDS = RECOMMENDED_UTILIZATION_THRESHOLDS
     g2_results = []
     for level in range(args.num_levels):
-        threshold = LEVEL_THRESHOLDS[level] if level < len(LEVEL_THRESHOLDS) else 0.15
+        threshold = LEVEL_THRESHOLDS[level] if level < len(LEVEL_THRESHOLDS) else LEVEL_THRESHOLDS[-1]
         passed, util = validate_codebook_utilization(
             sids_arr[:, level].tolist(),
             codebook_size=args.codebook_size,
@@ -225,14 +227,14 @@ def main():
     level1_buckets: dict[int, list[str]] = {}
     for tid, sid_row in zip(track_ids, sids_arr):
         level1_buckets.setdefault(int(sid_row[0]), []).append(tid)
-    # Gate 3 threshold 0.20 = mean dominant-tag fraction across sampled buckets.
-    # See validation.validate_cluster_purity v2 docstring for why intersection-based
-    # purity (the v1 metric) is geometrically impossible at 184-tracks-per-bucket scale.
+    # Gate 3 threshold = mean dominant-tag fraction across sampled buckets.
+    # W1 v2 (2026-05-17): raised from 0.20 → RECOMMENDED_PURITY_THRESHOLD (0.30) after
+    # Sinkhorn fix. See validation.RECOMMENDED_PURITY_THRESHOLD for the source-of-truth.
     g3_pass, g3_purity = validate_cluster_purity(
         {str(k): v for k, v in level1_buckets.items()},
         tag_lookup,
         n_samples=100,
-        threshold=0.20,
+        threshold=RECOMMENDED_PURITY_THRESHOLD,
         seed=args.seed,
     )
 
