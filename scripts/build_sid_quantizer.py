@@ -134,9 +134,14 @@ def main():
 
     X_tensor = torch.from_numpy(X)
     n = X_tensor.shape[0]
+    SCALAR_LOSS_KEYS = ("mse_recon", "commitment", "sinkhorn")
     for epoch in range(args.epochs):
         perm = torch.randperm(n)
-        epoch_losses = {"mse_recon": 0.0, "commitment": 0.0, "sinkhorn": 0.0}
+        epoch_losses = {k: 0.0 for k in SCALAR_LOSS_KEYS}
+        # W1 v2: per-level Sinkhorn breakdown for visibility into which residual layer
+        # the regularization is acting on. Lets us spot if any single level is failing
+        # to spread its codebook (e.g. if L3 sinkhorn stays at ~0 while L1+L2 decrease).
+        epoch_sinkhorn_per_level = [0.0] * args.num_levels
         n_batches = 0
         for i in range(0, n, args.batch_size):
             idx = perm[i:i + args.batch_size]
@@ -146,14 +151,20 @@ def main():
             optimizer.zero_grad()
             total.backward()
             optimizer.step()
-            for k, v in losses.items():
-                epoch_losses[k] += float(v.item())
+            for k in SCALAR_LOSS_KEYS:
+                epoch_losses[k] += float(losses[k].item())
+            for lvl, lvl_loss in enumerate(losses.get("sinkhorn_per_level", [])):
+                epoch_sinkhorn_per_level[lvl] += float(lvl_loss.item())
             n_batches += 1
         avg = {k: v / max(n_batches, 1) for k, v in epoch_losses.items()}
+        per_level_str = " ".join(
+            f"L{lvl + 1}={epoch_sinkhorn_per_level[lvl] / max(n_batches, 1):.5f}"
+            for lvl in range(args.num_levels)
+        )
         print(
             f"[epoch {epoch+1:2d}/{args.epochs}] "
             f"mse={avg['mse_recon']:.5f} commit={avg['commitment']:.5f} "
-            f"sinkhorn={avg['sinkhorn']:.5f}",
+            f"sinkhorn={avg['sinkhorn']:.5f} [per-level: {per_level_str}]",
             file=sys.stderr,
         )
 
