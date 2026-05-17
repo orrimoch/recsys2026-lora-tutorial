@@ -385,6 +385,13 @@ class CMQR_REWRITER:
         queries: list[str],
         topk: int,
         user_ids: Optional[list] = None,
+        # Accept (but currently ignore) batch_context so CRS_BASELINE.batch_chat's
+        # primary call path doesn't TypeError out and force a fallback that drops
+        # the context entirely. Forwarding to the inner retriever happens in the
+        # try/except block below — when the inner's batch is built from
+        # flat_rewrites, each rewrite uses the original query's batch_context entry.
+        # Bug surfaced 2026-05-17 in first end-to-end run of notebook 63.
+        batch_context: Optional[list[dict]] = None,
     ) -> list[list[str]]:
         """Retriever-shape interface: for each query, return top-`topk` track ids.
 
@@ -413,17 +420,34 @@ class CMQR_REWRITER:
         # Step 2 — single batched call to the inner retriever for ALL flat rewrites.
         # This minimises the number of round-trips through dense encoders / BM25
         # bookkeeping. user_ids threaded through for cf-bpr-style retrievers.
+        # batch_context is duplicated across each rewrite of the same query so
+        # SID_GENERATOR (downstream of inner) sees its training-format context.
+        flat_batch_context: Optional[list[dict]] = None
+        if batch_context is not None:
+            flat_batch_context = []
+            for q_idx in range(len(queries)):
+                ctx = batch_context[q_idx]
+                for _ in per_query_rewrites[q_idx]:
+                    flat_batch_context.append(ctx)
         try:
             flat_results = self.inner.batch_text_to_item_retrieval(
                 flat_rewrites,
                 topk=self.topk_per_rewrite,
                 user_ids=flat_user_ids if user_ids else None,
+                batch_context=flat_batch_context,
             )
         except TypeError:
-            # Back-compat: inner predates user_ids kwarg.
-            flat_results = self.inner.batch_text_to_item_retrieval(
-                flat_rewrites, topk=self.topk_per_rewrite,
-            )
+            # Back-compat: inner predates user_ids/batch_context kwargs.
+            try:
+                flat_results = self.inner.batch_text_to_item_retrieval(
+                    flat_rewrites,
+                    topk=self.topk_per_rewrite,
+                    user_ids=flat_user_ids if user_ids else None,
+                )
+            except TypeError:
+                flat_results = self.inner.batch_text_to_item_retrieval(
+                    flat_rewrites, topk=self.topk_per_rewrite,
+                )
 
         # Step 3 — partition flat_results back per query and RRF-fuse.
         partitioned: list[list[list[str]]] = [[] for _ in queries]

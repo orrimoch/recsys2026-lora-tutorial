@@ -143,6 +143,11 @@ class SID_GENERATOR:
                     num_return_sequences=self.num_beams,
                     prefix_allowed_tokens_fn=prefix_fn,
                     do_sample=False,
+                    # Must be True for `out.sequences` access below. Without it,
+                    # generate() returns a bare Tensor and the next line raises
+                    # AttributeError. Bug surfaced 2026-05-17 in first end-to-end
+                    # run of notebook 63 with SID in the ensemble.
+                    return_dict_in_generate=True,
                 )
                 # Slice off the prompt → 3 SID tokens per beam.
                 beams = out.sequences[:, prompt_len:prompt_len + 3].cpu().tolist()
