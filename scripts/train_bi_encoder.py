@@ -9,9 +9,9 @@ Why a custom loop (not FlagEmbedding's CLI):
   plan calls for (r=32 / alpha=64 over attention+FFN projections).
 
 Hyperparameters (spec §6):
-  - lr 5e-6, per-device bs 2, train_group_size 8 (1 pos + 7 in-batch negs),
-    n_negatives_per_query 15 (sampled from the 15 mined negs per row),
-    temperature 0.05, epochs 2.
+  - lr 5e-6, per-device bs 2, train_group_size 8 (1 pos + 7 negs),
+    n_negatives_per_query 7 (randomly sampled per epoch from the 15 mined negs),
+    temperature 0.05, epochs 2, warmup_ratio 0.1.
   - LoRA r=32 alpha=64 over query/key/value/dense projections.
   - bf16 mixed precision via torch.cuda.amp.
   - After training: merge LoRA via peft_model.merge_and_unload(), push merged
@@ -48,7 +48,7 @@ class TripleJsonlDataset:
     Short neg-lists are upsampled by repeated random sampling from the same row.
     """
 
-    def __init__(self, path: str, n_negatives: int = 15, seed: int = 42):
+    def __init__(self, path: str, n_negatives: int = 7, seed: int = 42):
         import json as _json
         self.rows = []
         with open(path) as f:
@@ -66,9 +66,9 @@ class TripleJsonlDataset:
     def __getitem__(self, idx: int) -> dict:
         row = self.rows[idx]
         negs = list(row["neg"])
-        if len(negs) >= self.n_negatives:
-            negs = negs[: self.n_negatives]
-        else:
+        if len(negs) > self.n_negatives:
+            negs = self.rng.sample(negs, self.n_negatives)
+        elif len(negs) < self.n_negatives:
             pad_pool = list(negs) if negs else [""]
             while len(negs) < self.n_negatives:
                 negs.append(self.rng.choice(pad_pool))
@@ -96,16 +96,17 @@ def _collate_batch(batch: list[dict], tokenizer, max_q_len: int, max_p_len: int)
     return q_enc, d_enc, n_per
 
 
-def _mean_pool(last_hidden: "torch.Tensor", attention_mask: "torch.Tensor") -> "torch.Tensor":
-    """L2-normalized mean-pool over non-padding tokens. Matches BGE-M3 dense head."""
-    import torch
+def _cls_pool(last_hidden: "torch.Tensor") -> "torch.Tensor":
+    """L2-normalized CLS token. Matches BGE-M3 inference (CLS token, NOT mean).
+
+    BGEM3FlagModel.encode() reads last_hidden_state[:, 0] at inference time, so
+    training must pool the same way or LoRA-adapted weights won't be optimized
+    for what production reads.
+    """
     import torch.nn.functional as F
 
-    mask = attention_mask.unsqueeze(-1).float()
-    summed = (last_hidden * mask).sum(dim=1)
-    counts = mask.sum(dim=1).clamp(min=1e-9)
-    pooled = summed / counts
-    return F.normalize(pooled, p=2, dim=1)
+    cls = last_hidden[:, 0]
+    return F.normalize(cls, p=2, dim=1)
 
 
 def _info_nce_loss(q_emb: "torch.Tensor", d_emb: "torch.Tensor", n_per: int, temperature: float) -> "torch.Tensor":
@@ -132,6 +133,10 @@ def _train(args):
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     base_model = AutoModel.from_pretrained(args.base_model, torch_dtype=torch.bfloat16)
+    # I3: gradient checkpointing — must be enabled BEFORE get_peft_model,
+    # and enable_input_require_grads is required for PEFT compatibility.
+    base_model.gradient_checkpointing_enable()
+    base_model.enable_input_require_grads()
     lora_cfg = LoraConfig(
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,
@@ -139,6 +144,7 @@ def _train(args):
         lora_dropout=0.05,
         bias="none",
         task_type="FEATURE_EXTRACTION",
+        modules_to_save=["pooler"],  # I1: train pooler head in full precision per spec line 140
     )
     model = get_peft_model(base_model, lora_cfg)
     model.to(device)
@@ -155,9 +161,20 @@ def _train(args):
     )
 
     total_steps = len(loader) * args.epochs
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=1.0, end_factor=0.0, total_iters=total_steps,
+    # I4: only optimize trainable params (saves ~9GB of AdamW state on a 567M model).
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr)
+    # I2: warmup_ratio 0.1 → 10% linear warmup, then linear decay to zero.
+    from torch.optim.lr_scheduler import LinearLR, SequentialLR
+    warmup_steps = max(1, int(0.1 * total_steps))
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[
+            LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps),
+            LinearLR(optimizer, start_factor=1.0, end_factor=0.0,
+                     total_iters=max(1, total_steps - warmup_steps)),
+        ],
+        milestones=[warmup_steps],
     )
 
     output_dir = Path(args.output_dir)
@@ -174,8 +191,8 @@ def _train(args):
             with torch.autocast(device_type="cuda" if device == "cuda" else "cpu", dtype=torch.bfloat16):
                 q_out = model(**q_enc)
                 d_out = model(**d_enc)
-                q_emb = _mean_pool(q_out.last_hidden_state, q_enc["attention_mask"])
-                d_emb = _mean_pool(d_out.last_hidden_state, d_enc["attention_mask"])
+                q_emb = _cls_pool(q_out.last_hidden_state)
+                d_emb = _cls_pool(d_out.last_hidden_state)
                 loss = _info_nce_loss(q_emb, d_emb, n_per, args.temperature)
             optimizer.zero_grad()
             loss.backward()
@@ -230,7 +247,7 @@ def main():
     p.add_argument("--lr", type=float, default=5e-6)
     p.add_argument("--epochs", type=int, default=2)
     p.add_argument("--per-device-batch-size", type=int, default=2)
-    p.add_argument("--n-negatives", type=int, default=15)
+    p.add_argument("--n-negatives", type=int, default=7)
     p.add_argument("--temperature", type=float, default=0.05)
     p.add_argument("--query-max-len", type=int, default=512)
     p.add_argument("--passage-max-len", type=int, default=256)
