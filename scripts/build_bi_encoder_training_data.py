@@ -1,12 +1,24 @@
 """Stage A training data builder.
 
-Reads existing W2 train.parquet (raw subset) → mines hard negatives via
+Walks the HF conversation dataset (talkpl-ai/TalkPlayData-Challenge-Dataset,
+train split) → assembles per-music-turn tuples → mines hard negatives via
 zero-shot BGE-M3 → writes JSONL triples consumable by FlagEmbedding's
 unified_finetune.
 
+Why walk the raw HF dataset (NOT W2's train.parquet)? W2's train.parquet
+schema is (source, session_id, track_id, query, code_1, code_2, code_3) —
+it does NOT carry chat_history, current_user_query, user_profile_raw, or
+conversation_goal. Reading those from a row dict returns the defaults and
+silently produces useless queries (`"user: "` for every example).
+
+The walker mirrors `mcrs.sid.training_data.build_raw_conversation_pairs`'s
+iteration shape so the (history, query, profile, goal, gold_tid) tuples we
+build for bi-encoder fine-tuning are structurally identical to the ones
+SID training already uses.
+
 Usage:
   python scripts/build_bi_encoder_training_data.py \
-    --train-parquet experiments/cache/sid_training/train.parquet \
+    --train-conv-hf talkpl-ai/TalkPlayData-Challenge-Dataset \
     --track-meta-hf talkpl-ai/TalkPlayData-Challenge-Track-Metadata \
     --bge-m3-model BAAI/bge-m3 \
     --output experiments/cache/retrieval_v2/triples_bge_m3.jsonl \
@@ -17,13 +29,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
+from typing import Any, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "music-crs-baselines"))
 
 import numpy as np
-import pandas as pd
 from tqdm import tqdm
 
 from mcrs.retrieval_modules.bge_m3_format import format_query_text, format_track_text
@@ -54,9 +67,59 @@ def build_triples_for_row(
     }
 
 
+def _iter_conversation_turns(sessions) -> list[dict[str, Any]]:
+    """Walk the HF conversation dataset and emit one row per music-recommendation turn.
+
+    Mirrors `mcrs.sid.training_data.build_raw_conversation_pairs`'s iteration
+    logic exactly — at each music turn, emit a tuple carrying chat_history
+    (turns BEFORE this music turn), current_user_query (the most recent user
+    utterance), and gold_track_id (the recommended track at this turn).
+
+    Yields dicts with keys: chat_history, current_user_query, user_profile_raw,
+    conversation_goal, track_id, session_id.
+    """
+    rows: list[dict[str, Any]] = []
+    for sess_idx, session in enumerate(sessions):
+        convs = session.get("conversations", [])
+        user_profile = session.get("user_profile")
+        conversation_goal = session.get("conversation_goal")
+        session_id = (
+            session.get("session_id")
+            or session.get("id")
+            or session.get("conversation_id")
+            or f"session_{sess_idx}"
+        )
+        chat_history: list[dict[str, str]] = []
+        pending_user_query: Optional[str] = None
+        for turn in convs:
+            role = turn.get("role")
+            content = turn.get("content") or ""
+            if role == "user":
+                pending_user_query = content
+            elif role == "music":
+                if pending_user_query is not None and content:
+                    rows.append({
+                        "session_id": str(session_id),
+                        "chat_history": list(chat_history),
+                        "current_user_query": pending_user_query,
+                        "user_profile_raw": user_profile,
+                        "conversation_goal": conversation_goal,
+                        "track_id": content,
+                    })
+                if pending_user_query is not None:
+                    chat_history.append({"role": "user", "content": pending_user_query})
+                chat_history.append({"role": "assistant", "content": content})
+                pending_user_query = None
+    return rows
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train-parquet", required=True)
+    parser.add_argument(
+        "--train-conv-hf",
+        default="talkpl-ai/TalkPlayData-Challenge-Dataset",
+        help="HF conversation dataset to walk (train split).",
+    )
     parser.add_argument("--track-meta-hf", default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata")
     parser.add_argument("--bge-m3-model", default="BAAI/bge-m3")
     parser.add_argument("--output", required=True)
@@ -67,15 +130,21 @@ def main():
     parser.add_argument("--max-rows", type=int, default=0, help="Smoke cap; 0 = all")
     args = parser.parse_args()
 
-    # 1. Load train data (raw subset only — metadata-source rows aren't conversation→track pairs)
-    train = pd.read_parquet(args.train_parquet)
-    train = train[train["source"] == "raw"].reset_index(drop=True)
+    # Lazy imports — FlagEmbedding has a heavy CUDA-touching init; keeps unit tests fast.
+    from datasets import load_dataset
+
+    # 1. Load train conversations and assemble per-music-turn tuples.
+    print(
+        f"[hn-miner] loading conversations from {args.train_conv_hf} (train split)...",
+        file=sys.stderr,
+    )
+    conv_ds = load_dataset(args.train_conv_hf, split="train")
+    train_rows = _iter_conversation_turns(conv_ds)
     if args.max_rows > 0:
-        train = train.head(args.max_rows)
-    print(f"[hn-miner] {len(train)} raw conversation pairs", file=sys.stderr)
+        train_rows = train_rows[: args.max_rows]
+    print(f"[hn-miner] {len(train_rows)} raw conversation→track pairs", file=sys.stderr)
 
     # 2. Load track metadata + build text map
-    from datasets import load_dataset
     track_meta = load_dataset(args.track_meta_hf, split="all_tracks")
     track_ids: list[str] = []
     track_texts: list[str] = []
@@ -92,7 +161,18 @@ def main():
         track_texts.append(text)
     track_text_map = dict(zip(track_ids, track_texts))
 
+    # Validate catalog uniqueness ONCE up-front. `mine_negatives_for_query`
+    # raises on duplicates per query; doing it here turns N silent skips into
+    # one loud fail-fast at startup.
+    if len(set(track_ids)) != len(track_ids):
+        dupes = [tid for tid, c in Counter(track_ids).items() if c > 1]
+        raise RuntimeError(
+            f"track catalog has {len(dupes)} duplicate track_ids — first 5: {dupes[:5]}. "
+            "mine_negatives_for_query requires unique IDs."
+        )
+
     # 3. Encode all tracks with zero-shot BGE-M3
+    # Lazy imports — FlagEmbedding has a heavy CUDA-touching init; keeps unit tests fast.
     import torch
     from FlagEmbedding import BGEM3FlagModel
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -105,16 +185,18 @@ def main():
     # Ensure unit-norm (BGE-M3 should return L2-normalized; guard against version differences)
     norms = np.linalg.norm(track_embs, axis=1, keepdims=True)
     track_embs = track_embs / np.clip(norms, 1e-9, None)
-    np.save(str(Path(args.output).with_suffix(".track_embs.npy")), track_embs)
 
     # 4. Mine negatives per query, write JSONL
     print(f"[hn-miner] mining negatives per query → {args.output}", file=sys.stderr)
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     n_written = 0
-    n_skipped = 0
+    n_skipped_no_gold = 0
+    n_skipped_miner_error = 0
+    n_skipped_too_few_negs = 0
+    first_error_logged = False
     with open(args.output, "w") as f_out:
-        for i in tqdm(range(0, len(train), args.batch_size), desc="mine"):
-            batch_rows = train.iloc[i:i+args.batch_size].to_dict("records")
+        for i in tqdm(range(0, len(train_rows), args.batch_size), desc="mine"):
+            batch_rows = train_rows[i:i + args.batch_size]
             batch_queries = [
                 format_query_text(
                     chat_history=r.get("chat_history") or [],
@@ -135,7 +217,7 @@ def main():
             for j, row in enumerate(batch_rows):
                 gold_tid = row["track_id"]
                 if gold_tid not in track_text_map:
-                    n_skipped += 1
+                    n_skipped_no_gold += 1
                     continue
                 try:
                     negs = mine_negatives_for_query(
@@ -149,17 +231,25 @@ def main():
                         seed=42 + i + j,
                     )
                 except ValueError as e:
-                    n_skipped += 1
+                    n_skipped_miner_error += 1
+                    if not first_error_logged:
+                        print(f"[hn-miner] first miner ValueError: {e}", file=sys.stderr)
+                        first_error_logged = True
                     continue
                 if len(negs) < 2:
-                    n_skipped += 1
+                    n_skipped_too_few_negs += 1
                     continue
                 triple = build_triples_for_row(row, gold_tid, negs, track_text_map)
                 f_out.write(json.dumps(triple) + "\n")
                 n_written += 1
 
-    print(f"[hn-miner] DONE → {args.output} (wrote {n_written}, skipped {n_skipped})",
-          file=sys.stderr)
+    print(
+        f"[hn-miner] DONE → {args.output} (wrote {n_written}; "
+        f"skipped_no_gold={n_skipped_no_gold}, "
+        f"skipped_miner_error={n_skipped_miner_error}, "
+        f"skipped_too_few_negs={n_skipped_too_few_negs})",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":

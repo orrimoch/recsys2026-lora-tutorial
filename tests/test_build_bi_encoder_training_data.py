@@ -44,3 +44,28 @@ def test_build_triples_for_row_drops_negs_not_in_map():
     )
     assert len(triple["neg"]) == 1
     assert triple["neg"][0] == "n1"
+
+
+def test_build_triples_for_row_query_is_non_trivial():
+    """Regression: ensure the query field carries the user's actual content.
+
+    Previously the script silently produced empty queries because the row dict
+    didn't have the expected component keys. This test asserts the contract:
+    when components are present, the query string carries them.
+    """
+    from scripts.build_bi_encoder_training_data import build_triples_for_row
+    row = {
+        "chat_history": [{"role": "user", "content": "I like 70s rock"}],
+        "current_user_query": "play me something upbeat",
+        "user_profile_raw": {"age": 30},
+        "conversation_goal": {"listener_goal": "discover"},
+        "track_id": "t_gold",
+    }
+    triple = build_triples_for_row(
+        row, "t_gold", ["t_neg1"], {"t_gold": "G", "t_neg1": "N1"},
+    )
+    # The actual user content MUST appear in the query.
+    assert "play me something upbeat" in triple["query"], \
+        f"query is missing the current user content: {triple['query']!r}"
+    assert len(triple["query"]) > 20, \
+        f"query is suspiciously short (possible schema bug): {triple['query']!r}"
