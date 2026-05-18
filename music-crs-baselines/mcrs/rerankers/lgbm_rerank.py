@@ -25,9 +25,39 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
+
+
+_HELPERS_CACHE: Optional[dict] = None
+
+
+def _lgbm_feature_helpers() -> dict:
+    """Lazy import of feature helpers from scripts/build_lgbm_features.py.
+
+    Cached after first call. Keeps module load cheap and avoids importing
+    `lightgbm`-side dependencies when the reranker is constructed.
+    """
+    global _HELPERS_CACHE
+    if _HELPERS_CACHE is not None:
+        return _HELPERS_CACHE
+    repo_root = Path(__file__).resolve().parents[3]
+    scripts_dir = str(repo_root / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from build_lgbm_features import (
+        compute_release_year_cyclical, compute_tag_overlap,
+        last_turn_moved_toward_goal,
+    )
+    _HELPERS_CACHE = {
+        "release_year_cyclical": compute_release_year_cyclical,
+        "tag_overlap": compute_tag_overlap,
+        "last_goal": last_turn_moved_toward_goal,
+    }
+    return _HELPERS_CACHE
 
 
 FEATURES_NUMERIC = ["wrrf_rank", "cfbpr_score", "pop_log", "recency_years", "tag_count", "artist_in_query"]
@@ -159,8 +189,19 @@ class LGBM_RERANKER:
         goal_category: Optional[str],
         goal_specificity: Optional[str],
         user_profile_raw: Any,
+        extra_features_per_candidate: Optional[list[dict]] = None,
+        extra_session_info: Optional[dict] = None,
     ) -> np.ndarray:
-        """Build (N, F) feature matrix for N candidates."""
+        """Build (N, F) feature matrix for N candidates.
+
+        `extra_features_per_candidate[i]` (optional): per-candidate dict with any of
+            bm25_rank / dense_meta_rank / dense_lyrics_rank / ce_score / ce_rank.
+            Used only when the trained model lists those features in metadata.
+
+        `extra_session_info` (optional): per-turn dict with any of
+            goal_progress_assessments / prior_track_count / query_drift_score.
+            Used only for matching trained features.
+        """
         # User profile + metadata
         self._load_user_meta_if_needed()
         umeta = self._user_meta.get(user_id, {}) if user_id else {}
@@ -185,6 +226,19 @@ class LGBM_RERANKER:
         n = len(candidate_tids)
         X = np.zeros((n, len(self.features)), dtype=np.float64)
         f_idx = {f: i for i, f in enumerate(self.features)}
+
+        # Pull extended-feature helpers only if the trained model needs them.
+        extended_keys = {
+            "release_year_sin", "release_year_cos", "tag_overlap_count",
+            "last_turn_moved_toward_goal", "bm25_rank_inv", "dense_meta_rank_inv",
+            "dense_lyrics_rank_inv", "ce_score", "ce_rank_inv",
+            "turn_number_feat", "prior_track_count", "query_drift_score",
+            "pop_rank_pct", "is_warm_user",
+        }
+        need_helpers = any(k in f_idx for k in extended_keys)
+        helpers = _lgbm_feature_helpers() if need_helpers else None
+        sess = extra_session_info or {}
+        last_goal = helpers["last_goal"](sess.get("goal_progress_assessments")) if helpers else -1
 
         for rank, tid in enumerate(candidate_tids, start=1):
             m = self.tid_to_track.get(tid, {})
@@ -217,6 +271,47 @@ class LGBM_RERANKER:
             X[rank - 1, f_idx["user_country"]] = cc
             X[rank - 1, f_idx["user_gender"]] = gn
 
+            # Extended (Stage C) features — guarded by f_idx so 11-col models
+            # keep working unchanged.
+            if helpers is not None:
+                cand_extra = (extra_features_per_candidate[rank - 1]
+                              if extra_features_per_candidate else {})
+                if "release_year_sin" in f_idx or "release_year_cos" in f_idx:
+                    rs_sin, rs_cos = helpers["release_year_cyclical"](rd)
+                    if "release_year_sin" in f_idx:
+                        X[rank - 1, f_idx["release_year_sin"]] = rs_sin
+                    if "release_year_cos" in f_idx:
+                        X[rank - 1, f_idx["release_year_cos"]] = rs_cos
+                if "tag_overlap_count" in f_idx:
+                    X[rank - 1, f_idx["tag_overlap_count"]] = helpers["tag_overlap"](
+                        query, m.get("tag_list"))
+                if "last_turn_moved_toward_goal" in f_idx:
+                    X[rank - 1, f_idx["last_turn_moved_toward_goal"]] = last_goal
+                if "bm25_rank_inv" in f_idx:
+                    X[rank - 1, f_idx["bm25_rank_inv"]] = 1.0 / max(
+                        1, cand_extra.get("bm25_rank", rank))
+                if "dense_meta_rank_inv" in f_idx:
+                    X[rank - 1, f_idx["dense_meta_rank_inv"]] = 1.0 / max(
+                        1, cand_extra.get("dense_meta_rank", rank))
+                if "dense_lyrics_rank_inv" in f_idx:
+                    X[rank - 1, f_idx["dense_lyrics_rank_inv"]] = 1.0 / max(
+                        1, cand_extra.get("dense_lyrics_rank", rank))
+                if "ce_score" in f_idx:
+                    X[rank - 1, f_idx["ce_score"]] = float(cand_extra.get("ce_score", 0.0))
+                if "ce_rank_inv" in f_idx:
+                    X[rank - 1, f_idx["ce_rank_inv"]] = 1.0 / max(
+                        1, cand_extra.get("ce_rank", rank))
+                if "turn_number_feat" in f_idx:
+                    X[rank - 1, f_idx["turn_number_feat"]] = int(sess.get("turn_number", 0))
+                if "prior_track_count" in f_idx:
+                    X[rank - 1, f_idx["prior_track_count"]] = int(sess.get("prior_track_count", 0))
+                if "query_drift_score" in f_idx:
+                    X[rank - 1, f_idx["query_drift_score"]] = float(sess.get("query_drift_score", 1.0))
+                if "pop_rank_pct" in f_idx:
+                    X[rank - 1, f_idx["pop_rank_pct"]] = float(cand_extra.get("pop_rank_pct", 0.5))
+                if "is_warm_user" in f_idx:
+                    X[rank - 1, f_idx["is_warm_user"]] = int(cfbpr_user_vec is not None)
+
         return X
 
     def rerank(
@@ -228,6 +323,9 @@ class LGBM_RERANKER:
         goal_categories: Optional[list[Optional[str]]] = None,
         goal_specificities: Optional[list[Optional[str]]] = None,
         user_profiles_raw: Optional[list[Any]] = None,
+        # Stage C extended-feature inputs (back-compat default None).
+        extra_features_per_candidate: Optional[list[list[dict]]] = None,
+        extra_session_info: Optional[list[dict]] = None,
     ) -> list[list[str]]:
         n = len(queries)
         # Default-fill side channels (support BGE-reranker-style calls that
@@ -251,6 +349,10 @@ class LGBM_RERANKER:
                 goal_category=goal_categories[i],
                 goal_specificity=goal_specificities[i],
                 user_profile_raw=user_profiles_raw[i],
+                extra_features_per_candidate=(extra_features_per_candidate[i]
+                                              if extra_features_per_candidate else None),
+                extra_session_info=(extra_session_info[i]
+                                    if extra_session_info else None),
             )
             scores = self.booster.predict(X)
             order = np.argsort(-scores)[:topk]
