@@ -37,6 +37,7 @@ for validation.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import random
 import re
@@ -129,6 +130,63 @@ def _tokenize_simple(s: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", (s or "").lower()))
 
 
+def compute_release_year_cyclical(release_date):
+    """Sin/cos of year-mod-century. (0.0, 0.0) on missing/unparseable."""
+    if not release_date:
+        return 0.0, 0.0
+    try:
+        year = int(str(release_date)[:4])
+    except (ValueError, TypeError):
+        return 0.0, 0.0
+    phase = 2 * math.pi * (year % 100) / 100.0
+    return math.sin(phase), math.cos(phase)
+
+
+def compute_tag_overlap(query, tag_list):
+    """Count of tags present in the query (case-insensitive substring)."""
+    if not tag_list:
+        return 0
+    q_lower = (query or "").lower()
+    return sum(1 for t in tag_list if t and t.lower() in q_lower)
+
+
+def last_turn_moved_toward_goal(assessments):
+    """1 / 0 / -1 from the last assessment value. -1 for empty/None."""
+    if not assessments:
+        return -1
+    last = assessments[-1]
+    if last == "MOVES_TOWARD_GOAL":
+        return 1
+    if last == "DOES_NOT_MOVE_TOWARD_GOAL":
+        return 0
+    return -1
+
+
+def query_drift_score(current_query, prior_queries, embedder=None):
+    """Cosine sim between current and turn-1 query embeddings. 1.0 when no prior or no embedder."""
+    if not prior_queries or embedder is None:
+        return 1.0
+    embs = embedder.encode([current_query, prior_queries[0]], normalize_embeddings=True)
+    return float(embs[0] @ embs[1])
+
+
+def build_pop_rank_pct_map(track_meta):
+    """Returns {track_id: rank_pct in [0, 1]} where 0 = most popular, 1 = least.
+
+    Tracks with missing popularity get pct=0.5 (neutral).
+    """
+    items = [(tid, float(m.get("popularity") or 0.0)) for tid, m in track_meta.items()]
+    items.sort(key=lambda x: -x[1])
+    n = max(1, len(items))
+    out = {}
+    for rank, (tid, pop) in enumerate(items):
+        if pop <= 0.0:
+            out[tid] = 0.5
+        else:
+            out[tid] = rank / n
+    return out
+
+
 def extract_features(
     query: str,
     candidates: list[dict],
@@ -140,6 +198,7 @@ def extract_features(
     cfbpr_track_mat: np.ndarray,
     cfbpr_user_embs: dict[str, np.ndarray],
     query_tokens: set[str],
+    pop_rank_pct: dict[str, float] | None = None,
 ) -> list[dict]:
     """One dict per candidate — becomes one row in the parquet output."""
     user_id = session_info["user_id"]
@@ -172,6 +231,13 @@ def extract_features(
         else:
             cfbpr_score = 0.0
 
+        rs_sin, rs_cos = compute_release_year_cyclical(rd)
+        tag_overlap = compute_tag_overlap(query, m.get("tag_list"))
+        last_goal_move = last_turn_moved_toward_goal(
+            session_info.get("goal_progress_assessments")
+        )
+        pop_pct = pop_rank_pct.get(tid, 0.5) if pop_rank_pct is not None else 0.5
+
         rows.append({
             # ids
             "query_id": f"{session_info['session_id']}#{session_info['turn_number']}",
@@ -179,15 +245,36 @@ def extract_features(
             "user_id": user_id,
             "turn_number": session_info["turn_number"],
             "candidate_tid": tid,
-            # numeric features — all computable from just (wRRF-output, user_id,
-            # track metadata). No per-sub ranks needed -> same features at
-            # inference without re-running subs.
+            # existing numeric features
             "wrrf_rank": c["wrrf_rank"],
             "cfbpr_score": cfbpr_score,
             "pop_log": float(np.log1p(pop)),
             "recency_years": float(recency),
             "tag_count": tag_count,
             "artist_in_query": artist_in_query,
+            # NEW track-temporal features (15, 16)
+            "release_year_sin": rs_sin,
+            "release_year_cos": rs_cos,
+            # NEW query-track feature (17)
+            "tag_overlap_count": tag_overlap,
+            # NEW session-state feature (18)
+            "last_turn_moved_toward_goal": last_goal_move,
+            # NEW retrieval-rank features (19-21) — populated by caller; default to wrrf_rank.
+            "bm25_rank_inv": 1.0 / max(1, c.get("bm25_rank", c["wrrf_rank"])),
+            "dense_meta_rank_inv": 1.0 / max(1, c.get("dense_meta_rank", c["wrrf_rank"])),
+            "dense_lyrics_rank_inv": 1.0 / max(1, c.get("dense_lyrics_rank", c["wrrf_rank"])),
+            # NEW reranker-output features (22, 23) — caller supplies; default 0.
+            "ce_score": float(c.get("ce_score", 0.0)),
+            "ce_rank_inv": 1.0 / max(1, c.get("ce_rank", c["wrrf_rank"])),
+            # NEW session-position features (24, 25)
+            "turn_number_feat": int(session_info["turn_number"]),
+            "prior_track_count": int(session_info.get("prior_track_count", 0)),
+            # NEW session-state feature (26) — caller supplies precomputed drift score
+            "query_drift_score": float(session_info.get("query_drift_score", 1.0)),
+            # NEW track-popularity feature (27)
+            "pop_rank_pct": float(pop_pct),
+            # NEW user-state feature (28)
+            "is_warm_user": int(user_emb is not None),
             # categorical features (strings; LGBM can consume as category)
             "goal_category": str(goal_cat),
             "goal_specificity": str(goal_spec),
@@ -224,6 +311,7 @@ def build(
     track_meta = load_track_meta_lookup(item_db)
     user_meta = load_user_meta()
     cfbpr_tid_to_idx, cfbpr_track_mat, cfbpr_user_embs = load_track_cfbpr(cache_dir)
+    pop_rank_pct = build_pop_rank_pct_map(track_meta)
     scorer = WRRFRunner(
         cache_dir=cache_dir,
         corpus_types=["track_name", "artist_name", "album_name"],
@@ -288,6 +376,7 @@ def build(
                 cfbpr_track_mat=cfbpr_track_mat,
                 cfbpr_user_embs=cfbpr_user_embs,
                 query_tokens=query_tokens_list[i + j],
+                pop_rank_pct=pop_rank_pct,
             )
             all_rows.extend(rows)
 
