@@ -73,6 +73,7 @@ def main(args):
     response_prompt_name = config.get("response_prompt_name", "response_generation")
     reranker_type = config.get("reranker_type", None)
     reranker_model_path = config.get("reranker_model_path", None)
+    reranker_chain_cfg = config.get("reranker_chain", None)
     retrieval_topk = int(config.get("retrieval_topk", 20))
     response_max_new_tokens = int(config.get("response_max_new_tokens", 64))
     top_n_for_prompt = int(config.get("top_n_for_prompt", 1))
@@ -100,6 +101,22 @@ def main(args):
     cmqr_rrf_k = int(config.get("cmqr_rrf_k", 60))
     cmqr_max_new_tokens = int(config.get("cmqr_max_new_tokens", 96))
     extra_config_dict = OmegaConf.to_container(config, resolve=True)
+    # Stage C: if reranker_chain is set, pre-build the CHAIN_RERANKER here and
+    # monkeypatch it onto the loaded baseline below. Skip the single-reranker
+    # construction so crs_baseline.__init__ doesn't double-load.
+    pre_built_reranker = None
+    if reranker_chain_cfg is not None:
+        from mcrs.rerankers import load_chain_reranker
+        chain_spec_list = [OmegaConf.to_container(c, resolve=True) for c in reranker_chain_cfg]
+        pre_built_reranker = load_chain_reranker(
+            chain_spec=chain_spec_list,
+            item_db_name=config.item_db_name,
+            track_split_types=list(config.track_split_types),
+            corpus_types=list(config.corpus_types),
+            cache_dir=config.cache_dir,
+        )
+        reranker_type = None
+        reranker_model_path = None
     music_crs = load_crs_baseline(
         lm_type=config.lm_type,
         retrieval_type=config.retrieval_type,
@@ -137,6 +154,11 @@ def main(args):
         cmqr_max_new_tokens=cmqr_max_new_tokens,
         extra_config=extra_config_dict,
     )
+    if pre_built_reranker is not None:
+        music_crs.reranker = pre_built_reranker
+        music_crs.reranker_type = "chain"
+        print(f"[run_inference_blindset] using chain reranker with "
+              f"{len(reranker_chain_cfg)} stages")
     db = load_dataset(config.test_dataset_name, split="test")
     # Phase 1 Bundle C: chat_history_window (per-config field, default None = full history)
     # limits the chat history passed downstream to the last N user+assistant message pairs.

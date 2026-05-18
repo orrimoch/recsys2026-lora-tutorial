@@ -67,4 +67,44 @@ def load_reranker_module(
             cache_dir=cache_dir,
             model_path=model_path,
         )
+    if reranker_type == "chain":
+        # 'chain' configs require a list-of-dicts spec that load_reranker_module's
+        # current signature doesn't carry. The clean path is to call
+        # load_chain_reranker (below) explicitly from the inference driver
+        # (run_inference_blindset.py) which forwards the YAML list.
+        raise NotImplementedError(
+            "load_reranker_module: 'chain' requires reranker_chain spec; "
+            "call load_chain_reranker directly from run_inference_blindset.py "
+            "which forwards the YAML list."
+        )
     raise ValueError(f"Unsupported reranker type: {reranker_type}")
+
+
+def load_chain_reranker(
+    chain_spec: list[dict],
+    item_db_name: str,
+    track_split_types: list[str],
+    corpus_types: list[str],
+    cache_dir: str = "./cache",
+):
+    """Build a CHAIN_RERANKER from a YAML list-of-dicts spec.
+
+    Each spec dict: {"type": "<reranker_type>", "model_path": "<...>", "topk": <int>}.
+    """
+    from .chain import CHAIN_RERANKER
+
+    stages = []
+    for stage_cfg in chain_spec:
+        stage_type = stage_cfg["type"]
+        stage_topk = int(stage_cfg.get("topk", 20))
+        stage_model_path = stage_cfg.get("model_path")
+        sub = load_reranker_module(
+            reranker_type=stage_type,
+            item_db_name=item_db_name,
+            track_split_types=track_split_types,
+            corpus_types=corpus_types,
+            cache_dir=cache_dir,
+            model_path=stage_model_path,
+        )
+        stages.append((stage_type, stage_topk, sub))
+    return CHAIN_RERANKER(stages=stages)
