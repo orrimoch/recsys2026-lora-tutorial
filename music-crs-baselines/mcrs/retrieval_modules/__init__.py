@@ -74,6 +74,16 @@ def load_retrieval_module(
             model_name="BAAI/bge-m3",
             embed_label="bge-m3-metadata",
         )
+    # nDCG-stretch Stage A — fine-tuned BGE-M3 (merged Hub repo). Reuses
+    # DENSE_LOCAL; the embed_label distinguishes its precomputed catalog
+    # pickle from the zero-shot BGE-M3 cache.
+    elif retrieval_type == "dense_metadata_bge_m3_ft_local":
+        hub_repo = extra_config.get("hub_repo", "OrRim123/recsys2026-bge-m3-music-v1-merged")
+        return DENSE_LOCAL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            model_name=hub_repo,
+            embed_label="bge-m3-music-v1-merged",
+        )
     # Phase 1 Bundle B — Qwen3-Embedding-4B over track metadata.
     # Same family as the current 0.6B; tests "is the dense just under-powered?"
     # Qwen3-Embedding asymmetric — apply the music instruct prefix.
@@ -160,6 +170,46 @@ def load_retrieval_module(
                     "corpus_types": corpus_types,
                     "topk_internal": 20,
                     "weight": 0.4,
+                },
+                {
+                    "type": "dense_lyrics_qwen3_instruct",
+                    "corpus_types": corpus_types,
+                    "topk_internal": 20,
+                    "weight": 0.4,
+                },
+            ],
+            k=60,
+        )
+    # nDCG-stretch Stage A factory. Same shape as wrrf_bm25_dense_lyrics_bge_m3_v1
+    # but the metadata-dense sub uses our FINE-TUNED merged BGE-M3 model loaded
+    # by DENSE_LOCAL (model_name=<hub_repo>, embed_label='bge-m3-music-v1-merged').
+    #
+    # `extra_config["bge_m3_hub_repo"]` overrides the default Hub path. The key
+    # MUST be at YAML top level (run_inference_blindset.py forwards the entire
+    # YAML dict as extra_config); do NOT nest under `extra_config:` in the YAML.
+    elif retrieval_type == "wrrf_bm25_dense_lyrics_bge_m3_ft_v1":
+        bge_m3_hub = extra_config.get(
+            "bge_m3_hub_repo",
+            "OrRim123/recsys2026-bge-m3-music-v1-merged",
+        )
+        return RRF_MODEL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            sub_specs=[
+                {
+                    "type": "bm25",
+                    "corpus_types": [
+                        "track_name", "artist_name", "album_name",
+                        "release_date", "tag_list",
+                    ],
+                    "topk_internal": 60,
+                    "weight": 1.0,
+                },
+                {
+                    "type": "dense_metadata_bge_m3_ft_local",
+                    "corpus_types": corpus_types,
+                    "topk_internal": 20,
+                    "weight": 0.6,
+                    "extra_config": {"hub_repo": bge_m3_hub},
                 },
                 {
                     "type": "dense_lyrics_qwen3_instruct",
