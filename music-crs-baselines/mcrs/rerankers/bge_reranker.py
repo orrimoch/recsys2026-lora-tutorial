@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import pickle
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 
@@ -27,6 +27,7 @@ class BGE_RERANKER:
         track_split_types: list[str],
         corpus_types: list[str],
         cache_dir: str = "./cache",
+        model_name: Optional[str] = None,
     ) -> None:
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -43,11 +44,14 @@ class BGE_RERANKER:
             dtype = torch.float32
         self.dtype = dtype
 
-        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        # Default to MODEL_NAME (public BGE reranker); override via `model_name`
+        # to load our fine-tuned Hub weights.
+        resolved = model_name or MODEL_NAME
+        self.tokenizer = AutoTokenizer.from_pretrained(resolved)
         self.model = AutoModelForSequenceClassification.from_pretrained(
-            MODEL_NAME, torch_dtype=dtype
+            resolved, torch_dtype=dtype
         ).to(self.device).eval()
-        print(f"[bge-rerank] loaded {MODEL_NAME} on {self.device} dtype={dtype}")
+        print(f"[bge-rerank] loaded {resolved} on {self.device} dtype={dtype}")
 
         self.tid_to_text = self._load_or_build_tid_text(
             item_db_name, track_split_types, corpus_types, cache_dir

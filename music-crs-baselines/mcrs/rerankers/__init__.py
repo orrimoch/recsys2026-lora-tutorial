@@ -30,12 +30,13 @@ def load_reranker_module(
     if not reranker_type:
         return None
     if reranker_type == "bge_reranker_v2_m3":
-        from .bge_reranker import BGE_RERANKER
-        return BGE_RERANKER(
+        from . import bge_reranker as _bge_mod
+        return _bge_mod.BGE_RERANKER(
             item_db_name=item_db_name,
             track_split_types=track_split_types,
             corpus_types=corpus_types,
             cache_dir=cache_dir,
+            model_name=model_path,  # None → keep default; Hub repo → override.
         )
     if reranker_type == "lgbm_rerank":
         from .lgbm_rerank import LGBM_RERANKER
