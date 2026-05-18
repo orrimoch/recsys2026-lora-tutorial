@@ -1,0 +1,56 @@
+# Submission 3: Stage A + B + C — full v2 stack.
+#
+# Single-axis change vs config 181: reranker_type switches from
+# "bge_reranker_v2_m3" (single CE) to "chain" (CE → LGBM).
+# The chain runs the FT cross-encoder first to trim 100→50, then
+# LGBM LambdaRank to trim 50→20 with the extended 28-feature vector.
+
+lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
+lora_path: null
+lora_max_rank: 32
+
+retrieval_type: "wrrf_bm25_dense_lyrics_bge_m3_ft_v1"
+bge_m3_hub_repo: "OrRim123/recsys2026-bge-m3-music-v1-merged"
+
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+retrieval_topk: 100
+reranker_type: "chain"
+reranker_chain:
+  - type: "bge_reranker_v2_m3"
+    model_path: "OrRim123/recsys2026-bge-reranker-music-v1"
+    topk: 50
+  - type: "lgbm_rerank"
+    model_path: "/content/drive/MyDrive/recsys2026_retrieval_v2_cache/lgbm/lgbm_v1"
+    topk: 20
+
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 320
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw"
+
+use_vllm: false
+
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+use_cmqr: true
+cmqr_prompt_name: "cmqr_rewrites"
+cmqr_n_rewrites: 4
+cmqr_topk_per_rewrite: 50
+cmqr_rrf_k: 60
+cmqr_max_new_tokens: 96
