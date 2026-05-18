@@ -7,7 +7,6 @@ Task 5 + spec §6 reviewer finding).
 from __future__ import annotations
 
 import random
-from typing import Optional
 
 import numpy as np
 
@@ -67,6 +66,14 @@ def mine_negatives_for_query(
     """
     if len(track_ids) != track_embs.shape[0]:
         raise ValueError("track_ids and track_embs length mismatch")
+    if len(set(track_ids)) != len(track_ids):
+        raise ValueError("track_ids must be unique (duplicate IDs would leak gold as a negative)")
+    track_norms = np.linalg.norm(track_embs, axis=1)
+    if not np.allclose(track_norms, 1.0, atol=1e-3):
+        raise ValueError("track_embs must be unit-normed (rows of L2-norm ≈ 1.0)")
+    query_norm = float(np.linalg.norm(query_emb))
+    if not (0.99 <= query_norm <= 1.01):
+        raise ValueError(f"query_emb must be unit-normed (got L2-norm {query_norm:.4f})")
     sims = track_embs @ query_emb
     try:
         gold_idx = track_ids.index(gold_track_id)

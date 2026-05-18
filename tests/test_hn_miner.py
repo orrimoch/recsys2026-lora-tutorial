@@ -49,6 +49,7 @@ def test_mine_negatives_for_query_returns_negs_aligned_to_track_ids():
         [0.50, 0.87], # t4 — far
         [0.0, 1.0],   # t5 — orthogonal
     ])
+    track_embs = track_embs / np.linalg.norm(track_embs, axis=1, keepdims=True)
     negs = mine_negatives_for_query(
         query_emb=query_emb, track_embs=track_embs, track_ids=track_ids,
         gold_track_id="t1", percpos_threshold=0.97, k_negs=2, seed=42,
@@ -57,3 +58,44 @@ def test_mine_negatives_for_query_returns_negs_aligned_to_track_ids():
     assert "t1" not in negs
     for n in negs:
         assert n in track_ids
+
+
+def test_mine_negatives_raises_on_duplicate_track_ids():
+    """Catch silent label corruption: duplicate gold ID would leak as a negative."""
+    from mcrs.retrieval_modules.hn_miner import mine_negatives_for_query
+    track_ids = ["t1", "t1", "t3"]  # duplicate
+    query_emb = np.array([1.0, 0.0])
+    track_embs = np.array([[1.0, 0.0], [0.9, 0.43], [0.0, 1.0]])
+    track_embs = track_embs / np.linalg.norm(track_embs, axis=1, keepdims=True)
+    with pytest.raises(ValueError, match="track_ids must be unique"):
+        mine_negatives_for_query(
+            query_emb=query_emb, track_embs=track_embs, track_ids=track_ids,
+            gold_track_id="t1", k_negs=2,
+        )
+
+
+def test_mine_negatives_raises_on_non_unit_normed_track_embs():
+    """Catch silent semantic bugs: cosine sim assumes unit-norm rows."""
+    from mcrs.retrieval_modules.hn_miner import mine_negatives_for_query
+    track_ids = ["t1", "t2", "t3"]
+    query_emb = np.array([1.0, 0.0])
+    track_embs = np.array([[2.0, 0.0], [0.0, 2.0], [1.0, 1.0]])  # NOT unit-normed
+    with pytest.raises(ValueError, match="unit-normed"):
+        mine_negatives_for_query(
+            query_emb=query_emb, track_embs=track_embs, track_ids=track_ids,
+            gold_track_id="t1", k_negs=2,
+        )
+
+
+def test_mine_negatives_k_negs_zero_returns_empty():
+    """k_negs=0 is a valid no-op (contract pin)."""
+    from mcrs.retrieval_modules.hn_miner import mine_negatives_for_query
+    track_ids = ["t1", "t2", "t3"]
+    query_emb = np.array([1.0, 0.0])
+    track_embs = np.array([[1.0, 0.0], [0.0, 1.0], [0.6, 0.8]])
+    track_embs = track_embs / np.linalg.norm(track_embs, axis=1, keepdims=True)
+    result = mine_negatives_for_query(
+        query_emb=query_emb, track_embs=track_embs, track_ids=track_ids,
+        gold_track_id="t1", k_negs=0,
+    )
+    assert result == []
