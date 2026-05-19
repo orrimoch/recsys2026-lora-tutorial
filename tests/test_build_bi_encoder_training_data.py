@@ -109,6 +109,26 @@ def test_iter_conversation_turns_drops_empty_user_query():
     assert rows[0]["track_id"] == "track_Y"
 
 
+def test_build_triples_for_row_emits_session_id():
+    """Sub 2 fix: emit session_id so TripleJsonlDataset can split val
+    SESSION-disjoint. Without this, row-shuffle val splits create 95%+
+    session overlap with train (Sub 1 leak)."""
+    from scripts.build_bi_encoder_training_data import build_triples_for_row
+    row = {
+        "session_id": "session_42",
+        "chat_history": [{"role": "user", "content": "hi"}],
+        "current_user_query": "play rock",
+        "user_profile_raw": None,
+        "conversation_goal": None,
+        "track_id": "t_gold",
+    }
+    triple = build_triples_for_row(
+        row, "t_gold", ["n1"], {"t_gold": "G", "n1": "N"},
+    )
+    assert "session_id" in triple, "build_triples_for_row must emit session_id"
+    assert triple["session_id"] == "session_42"
+
+
 def test_build_triples_for_row_query_is_non_trivial():
     """Regression: ensure the query field carries the user's actual content.
 

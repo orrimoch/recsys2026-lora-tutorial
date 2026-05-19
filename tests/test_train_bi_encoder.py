@@ -191,6 +191,66 @@ def test_cli_has_in_batch_negs_and_full_catalog_args():
     assert "--track-meta-hf" in src, "missing --track-meta-hf flag"
 
 
+def test_dataset_session_disjoint_split_no_session_overlap():
+    """CRITICAL: Sub 1 had 95% session-level leak in val split (row-shuffle
+    placed multiple turns from same session in both train and val). With
+    session_disjoint=True, NO session can appear in both train and val."""
+    import json
+    import tempfile
+    from scripts.train_bi_encoder import TripleJsonlDataset
+
+    # 5 sessions, ~5 rows each = 25 total. Row-shuffle would put rows from
+    # the SAME session in both train and val. Session-disjoint must not.
+    rows = []
+    for sid in range(5):
+        for turn in range(5):
+            rows.append({
+                "query": f"session_{sid}_turn_{turn}_query",
+                "pos": [f"track_{sid}_{turn}"],
+                "neg": [f"n{i}" for i in range(15)],
+                "pos_tid": f"track_{sid}_{turn}",
+                "session_id": f"sess_{sid}",
+            })
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+        path = f.name
+
+    train = TripleJsonlDataset(path, split="train", val_fraction=0.4, seed=42,
+                                session_disjoint=True)
+    val = TripleJsonlDataset(path, split="val", val_fraction=0.4, seed=42,
+                              session_disjoint=True)
+
+    train_sids = {r["session_id"] for r in train.rows}
+    val_sids = {r["session_id"] for r in val.rows}
+    assert train_sids.isdisjoint(val_sids), \
+        f"session leak detected: {train_sids & val_sids} appears in both train and val"
+    # All rows from each session land entirely on one side.
+    assert len(train) + len(val) == 25, \
+        f"expected 25 total rows across splits, got {len(train) + len(val)}"
+
+
+def test_dataset_session_disjoint_falls_back_to_row_shuffle_without_session_id():
+    """Back-compat: older triples files (no session_id) silently fall back to
+    row-level shuffle so existing callers keep working."""
+    import json
+    import tempfile
+    from scripts.train_bi_encoder import TripleJsonlDataset
+
+    rows = [{"query": f"q{i}", "pos": [f"p{i}"], "neg": [f"n{j}" for j in range(15)]}
+            for i in range(20)]
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+        path = f.name
+    # session_disjoint=True but no session_id field → falls back to row shuffle.
+    train = TripleJsonlDataset(path, split="train", val_fraction=0.2, seed=42,
+                                session_disjoint=True)
+    val = TripleJsonlDataset(path, split="val", val_fraction=0.2, seed=42,
+                              session_disjoint=True)
+    assert len(train) + len(val) == 20
+
+
 def test_dataset_carries_pos_tid_when_present():
     """I-3: TripleJsonlDataset surfaces pos_tid via .pos_tids() and __getitem__
     when the on-disk triples carry it. Older triples without pos_tid: pos_tids()

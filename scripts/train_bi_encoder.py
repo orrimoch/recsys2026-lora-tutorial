@@ -62,7 +62,8 @@ class TripleJsonlDataset:
     """
 
     def __init__(self, path: str, n_negatives: int = 15, seed: int = 42,
-                 split: str = "all", val_fraction: float = 0.0):
+                 split: str = "all", val_fraction: float = 0.0,
+                 session_disjoint: bool = True):
         """Args:
             split: 'all' (default; load every row), 'train' (first 1-val_fraction
                 fraction by shuffled order), or 'val' (last val_fraction).
@@ -71,6 +72,13 @@ class TripleJsonlDataset:
             seed: governs both the shuffle ordering AND the per-row neg sampling.
                 A fixed seed makes the train/val split deterministic across
                 runs and machines.
+            session_disjoint: if True AND triples carry `session_id` (new builder
+                schema), split by SESSION rather than by row. Without this,
+                row-level shuffling places multiple rows from the same session
+                in both train and val (95%+ session-level leak observed in
+                Sub 1) — val metric becomes mostly memorization rather than
+                true generalization. Default True; only takes effect when
+                session_id field is present in triples.
         """
         import json as _json
         all_rows = []
@@ -84,16 +92,41 @@ class TripleJsonlDataset:
             # No val split → no need to shuffle, preserves on-disk order.
             self.rows = all_rows
         elif split in ("train", "val"):
-            # Deterministic shuffle so the val slice is representative, not just
-            # the tail of the file (HN mining writes rows in dataset-walk order).
-            shuffle_rng = random.Random(seed)
-            shuffle_rng.shuffle(all_rows)
-            n_val = int(round(float(val_fraction) * len(all_rows)))
-            n_val = max(0, min(n_val, len(all_rows) - 1))
-            if split == "val":
-                self.rows = all_rows[len(all_rows) - n_val:] if n_val > 0 else []
-            else:  # train
-                self.rows = all_rows[: len(all_rows) - n_val]
+            # Detect whether session_id is present (new schema). If yes AND
+            # session_disjoint is True, do session-level split. Otherwise
+            # fall back to row-level shuffle (legacy behavior).
+            has_session = all_rows and "session_id" in all_rows[0] and all_rows[0]["session_id"]
+            if session_disjoint and has_session:
+                from collections import defaultdict
+                by_session = defaultdict(list)
+                for r in all_rows:
+                    by_session[str(r["session_id"])].append(r)
+                session_ids = sorted(by_session.keys())  # deterministic starting order
+                shuffle_rng = random.Random(seed)
+                shuffle_rng.shuffle(session_ids)
+                n_val_sessions = int(round(float(val_fraction) * len(session_ids)))
+                n_val_sessions = max(0, min(n_val_sessions, len(session_ids) - 1))
+                if split == "val":
+                    val_sids = session_ids[-n_val_sessions:] if n_val_sessions > 0 else []
+                    self.rows = [r for sid in val_sids for r in by_session[sid]]
+                else:  # train
+                    train_sids = session_ids[:-n_val_sessions] if n_val_sessions > 0 else session_ids
+                    self.rows = [r for sid in train_sids for r in by_session[sid]]
+            else:
+                # Legacy row-level shuffle. Warn if triples have session_id but
+                # caller explicitly disabled session_disjoint.
+                if has_session and not session_disjoint:
+                    print(f"[TripleJsonlDataset] WARNING: triples have session_id "
+                          f"but session_disjoint=False — val split will LEAK "
+                          f"session-level info into train.")
+                shuffle_rng = random.Random(seed)
+                shuffle_rng.shuffle(all_rows)
+                n_val = int(round(float(val_fraction) * len(all_rows)))
+                n_val = max(0, min(n_val, len(all_rows) - 1))
+                if split == "val":
+                    self.rows = all_rows[len(all_rows) - n_val:] if n_val > 0 else []
+                else:  # train
+                    self.rows = all_rows[: len(all_rows) - n_val]
         else:
             raise ValueError(f"unknown split: {split!r} (expected 'all'/'train'/'val')")
         self.n_negatives = int(n_negatives)

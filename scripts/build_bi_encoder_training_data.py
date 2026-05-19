@@ -72,6 +72,12 @@ def build_triples_for_row(
         # nDCG eval (in train_bi_encoder.py) can score against the actual ~50k
         # catalog instead of just the 16 mined candidates.
         "pos_tid": gold_track_id,
+        # Session-level data leak fix: emit session_id so TripleJsonlDataset can
+        # split val SESSION-disjoint from train. Without this, row-shuffle val
+        # splits create 95%+ session overlap with train -> model memorizes
+        # session-level patterns -> in-training val metric is inflated relative
+        # to true dev generalization (observed: val=0.24 but dev=0.11).
+        "session_id": row.get("session_id"),
     }
 
 
