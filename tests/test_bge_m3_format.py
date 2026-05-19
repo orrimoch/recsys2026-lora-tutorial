@@ -243,15 +243,17 @@ def test_format_track_text_handles_multi_element_artist_list():
     assert "[" not in text and "]" not in text
 
 
-def test_format_query_text_default_max_history_is_4():
-    """Sub 2 fix: max_history_turns 6 -> 4. Long [HISTORY]: blocks at 6 turns
-    push p90 query length to 1772 chars, truncating [QUERY]: at the end with
-    max_query_len=384. 4 turns keeps p90 below 1100 chars (within budget)."""
+def test_format_query_text_default_max_history_is_6():
+    """Reverted the 6->4 change after Sub 1 data showed 6-turn histories
+    work well combined with truncation_side='left' (which preserves [QUERY]:
+    at the end and drops low-signal [USER]:/[GOAL]: from the front when
+    queries exceed --query-max-len). Going back to 6 preserves more
+    conversational context for the queries that fit within the budget."""
     import inspect
     from mcrs.retrieval_modules.bge_m3_format import format_query_text
     sig = inspect.signature(format_query_text)
-    assert sig.parameters['max_history_turns'].default == 4, \
-        f"format_query_text max_history_turns default should be 4 (Sub 2), got {sig.parameters['max_history_turns'].default}"
+    assert sig.parameters['max_history_turns'].default == 6, \
+        f"format_query_text max_history_turns default should be 6, got {sig.parameters['max_history_turns'].default}"
 
 
 def test_format_track_text_pins_separator_and_field_order():
