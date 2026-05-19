@@ -132,7 +132,14 @@ class TripleJsonlDataset:
 
 
 def _collate_batch(batch: list[dict], tokenizer, max_q_len: int, max_p_len: int):
-    """Tokenize a list of {query, positive, negatives} rows into tensors."""
+    """Tokenize a list of {query, positive, negatives} rows into tensors.
+
+    Queries truncate from the LEFT so the [QUERY]: block at the end is
+    preserved (it carries the current user turn — the most informative
+    signal). Long queries lose [USER]:/[GOAL]: tokens at the front instead.
+    Docs truncate from the right (default) since track text starts with
+    the most informative field (track_name | artist_name | ...).
+    """
     import torch
 
     queries = [b["query"] for b in batch]
@@ -143,8 +150,14 @@ def _collate_batch(batch: list[dict], tokenizer, max_q_len: int, max_p_len: int)
         docs.append(b["positive"])
         docs.extend(b["negatives"])
 
+    # Save and swap truncation_side per call. Tokenizers read the attribute
+    # at tokenize() time, so this is thread-safe within a single worker.
+    _original_side = tokenizer.truncation_side
+    tokenizer.truncation_side = "left"
     q_enc = tokenizer(queries, max_length=max_q_len, padding=True, truncation=True, return_tensors="pt")
+    tokenizer.truncation_side = "right"
     d_enc = tokenizer(docs, max_length=max_p_len, padding=True, truncation=True, return_tensors="pt")
+    tokenizer.truncation_side = _original_side
     return q_enc, d_enc, n_per
 
 
@@ -426,24 +439,34 @@ def _train(args):
             float(ndcg_sum) / max(1, n_total),
         )
 
-    def _encode_texts(texts: list[str], max_len: int) -> "torch.Tensor":
-        """Forward-only encode for full-catalog val. Mean-pools at the CLS token
-        + L2-normalizes, matching the training-time pooling contract."""
+    def _encode_texts(texts: list[str], max_len: int,
+                      truncation_side: str = "right") -> "torch.Tensor":
+        """Forward-only encode for full-catalog val. Pools at the CLS token
+        + L2-normalizes, matching the training-time pooling contract.
+
+        `truncation_side`: 'left' for queries (preserves [QUERY]: block at end),
+        'right' for catalog tracks (preserves track_name at the start).
+        """
         import math as _math
         model.eval()
         BATCH = max(1, args.val_encode_batch_size)
+        _original_side = tokenizer.truncation_side
+        tokenizer.truncation_side = truncation_side
         out_chunks: list[torch.Tensor] = []
-        with torch.no_grad():
-            for i in range(0, len(texts), BATCH):
-                chunk = texts[i:i + BATCH]
-                enc = tokenizer(chunk, max_length=max_len, padding=True,
-                                truncation=True, return_tensors="pt")
-                enc = {k: v.to(device) for k, v in enc.items()}
-                with torch.autocast(device_type="cuda" if device == "cuda" else "cpu",
-                                    dtype=torch.bfloat16):
-                    o = model(**enc)
-                emb = _cls_pool(o.last_hidden_state).float().cpu()
-                out_chunks.append(emb)
+        try:
+            with torch.no_grad():
+                for i in range(0, len(texts), BATCH):
+                    chunk = texts[i:i + BATCH]
+                    enc = tokenizer(chunk, max_length=max_len, padding=True,
+                                    truncation=True, return_tensors="pt")
+                    enc = {k: v.to(device) for k, v in enc.items()}
+                    with torch.autocast(device_type="cuda" if device == "cuda" else "cpu",
+                                        dtype=torch.bfloat16):
+                        o = model(**enc)
+                    emb = _cls_pool(o.last_hidden_state).float().cpu()
+                    out_chunks.append(emb)
+        finally:
+            tokenizer.truncation_side = _original_side
         model.train()
         return torch.cat(out_chunks, dim=0)
 
@@ -457,8 +480,10 @@ def _train(args):
         if not full_cat_enabled:
             return None
         try:
-            cat_emb = _encode_texts(catalog_texts, args.passage_max_len)  # (N, D)
-            q_emb_full = _encode_texts(val_queries_text, args.query_max_len)  # (Q, D)
+            cat_emb = _encode_texts(catalog_texts, args.passage_max_len,
+                                    truncation_side="right")  # (N, D)
+            q_emb_full = _encode_texts(val_queries_text, args.query_max_len,
+                                       truncation_side="left")  # (Q, D)
             sims = q_emb_full @ cat_emb.T  # (Q, N)
             # top-K indices per query (any order), then sort within top-K.
             topk_idx = torch.topk(sims, k=min(k, sims.size(1)), dim=1).indices  # (Q, k)

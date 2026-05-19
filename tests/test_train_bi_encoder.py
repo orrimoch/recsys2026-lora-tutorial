@@ -82,6 +82,20 @@ def test_dataset_default_n_negatives_is_15():
     assert len(item["negatives"]) == 15
 
 
+def test_collate_batch_truncates_queries_from_left():
+    """Long queries truncate from the LEFT to preserve [QUERY]: at the end —
+    that block carries the current user turn (most informative). Right
+    truncation would silently cut [QUERY]: for ~10-20% of long queries."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+    src = inspect.getsource(mod._collate_batch)
+    assert 'truncation_side = "left"' in src or "truncation_side = 'left'" in src, \
+        "_collate_batch should set tokenizer.truncation_side = 'left' for queries"
+    # Doc tokenization should remain right-truncate (default)
+    assert 'truncation_side = "right"' in src or "truncation_side = 'right'" in src, \
+        "_collate_batch should restore truncation_side = 'right' for docs"
+
+
 def test_info_nce_loss_in_batch_uses_full_batch_denominator():
     """I-1: in-batch InfoNCE contrasts each query against ALL B*n_per docs.
     With B=2 queries and n_per=3 (1 pos + 2 negs each), the score matrix
