@@ -141,11 +141,25 @@ def main():
     parser.add_argument("--track-meta-hf", default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata")
     parser.add_argument("--bge-m3-model", default="BAAI/bge-m3")
     parser.add_argument("--output", required=True)
-    parser.add_argument("--percpos-threshold", type=float, default=0.80)
+    parser.add_argument("--percpos-threshold", type=float, default=0.80,
+                        help="Only used when --mining-strategy=percpos.")
     parser.add_argument("--k-negs", type=int, default=15)
     parser.add_argument("--pool-size", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--max-rows", type=int, default=0, help="Smoke cap; 0 = all")
+    parser.add_argument("--mining-strategy", type=str, default="percpos",
+                        choices=["percpos", "simans"],
+                        help="percpos: NV-Retriever filter then uniform sample "
+                             "(skips queries with insufficient surviving negatives). "
+                             "simans: Gaussian-weighted sample without filter "
+                             "(no skip; targets moderate-difficulty negatives via "
+                             "exp(-(s_i - s_pos + a)^2/b); see Zhou et al. EMNLP 2022).")
+    parser.add_argument("--simans-a", type=float, default=0.1,
+                        help="SimANS target offset: peak weight at s_pos - a. "
+                             "Only used when --mining-strategy=simans.")
+    parser.add_argument("--simans-b", type=float, default=0.05,
+                        help="SimANS spread (smaller = narrower peak). "
+                             "Only used when --mining-strategy=simans.")
     parser.add_argument("--query-mode", type=str, default="bge_m3_structured",
                         choices=["raw", "last_user", "last_user_with_goal", "bge_m3_structured"],
                         help="Query format for HN-mining queries AND emitted training "
@@ -254,6 +268,9 @@ def main():
                         k_negs=args.k_negs,
                         pool_size=args.pool_size,
                         seed=42 + i + j,
+                        strategy=args.mining_strategy,
+                        simans_a=args.simans_a,
+                        simans_b=args.simans_b,
                     )
                 except ValueError as e:
                     n_skipped_miner_error += 1

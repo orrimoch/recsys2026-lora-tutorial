@@ -1,8 +1,18 @@
 """Hard-negative miner for bi-encoder fine-tuning.
 
-Implements NV-Retriever's TopK-PercPos filtering [arXiv 2407.15831] adapted for
-small catalogs (47K tracks): threshold defaults to 0.80 (not 0.95 — see plan
-Task 5 + spec §6 reviewer finding).
+Two mining strategies are supported:
+
+- "percpos" (default): NV-Retriever's TopK-PercPos filtering [arXiv 2407.15831].
+  Drops candidates scoring within `(1 - threshold)` of the positive as likely
+  false negatives, then uniformly samples from the surviving pool. Clean labels
+  but excludes queries where the positive doesn't stand out — the structural-
+  ceiling problem for sparse-label catalogs.
+
+- "simans": SimANS sampling [Zhou et al. EMNLP 2022, arXiv 2210.11773]. No
+  filter; samples negatives with Gaussian weight peaked at `s_pos - a` so
+  near-positive (likely false-negative) candidates and far-positive (trivial)
+  candidates both get low weight. Includes every query in training, addresses
+  false negatives via per-sample down-weighting rather than a hard cutoff.
 """
 from __future__ import annotations
 
@@ -46,6 +56,44 @@ def sample_hard_negatives(
     return sorted(rng.sample(in_range, k))
 
 
+def sample_simans_negatives(
+    pool_scores: list[float] | np.ndarray,
+    positive_score: float,
+    k: int,
+    a: float = 0.1,
+    b: float = 0.05,
+    seed: int = 42,
+) -> list[int]:
+    """SimANS Gaussian-weighted negative sampling [Zhou et al. EMNLP 2022].
+
+    Each pool candidate i receives weight
+        w_i ∝ exp(- (s_i - s_pos + a)^2 / b)
+    and `k` candidates are sampled without replacement from this distribution.
+
+    The peak weight is at s_i = s_pos - a — i.e., the sampler targets
+    candidates that score `a` BELOW the positive. `b` controls the spread:
+    smaller b → narrower peak around target difficulty.
+
+    Returns indices INTO pool_scores (not catalog indices).
+    """
+    scores = np.asarray(pool_scores, dtype=np.float64)
+    if scores.ndim != 1:
+        raise ValueError("pool_scores must be 1-D")
+    if len(scores) == 0:
+        return []
+    weights = np.exp(-((scores - positive_score + a) ** 2) / b)
+    total = float(weights.sum())
+    if total <= 0.0 or not np.isfinite(total):
+        # Degenerate (e.g. all weights underflowed to 0): uniform fallback.
+        weights = np.ones_like(scores)
+        total = float(weights.sum())
+    weights = weights / total
+    take = min(k, len(scores))
+    rng = np.random.default_rng(seed)
+    chosen = rng.choice(len(scores), size=take, replace=False, p=weights)
+    return [int(i) for i in chosen]
+
+
 def mine_negatives_for_query(
     query_emb: np.ndarray,
     track_embs: np.ndarray,
@@ -55,14 +103,21 @@ def mine_negatives_for_query(
     k_negs: int = 15,
     pool_size: int = 200,
     seed: int = 42,
+    strategy: str = "percpos",
+    simans_a: float = 0.1,
+    simans_b: float = 0.05,
 ) -> list[str]:
     """Mine hard negatives for one query.
 
-    1. Compute cosine similarities query × all tracks (assumes unit-normed).
-    2. Identify the positive_score (sim to gold_track_id).
-    3. Take top-`pool_size` candidates (excluding the gold).
-    4. Apply PercPos filter at `percpos_threshold`.
-    5. Sample up to k_negs from the filtered list.
+    strategy="percpos" (default):
+      1. Top `pool_size` candidates (excluding gold).
+      2. PercPos filter at `percpos_threshold`.
+      3. Uniform sample up to k_negs from survivors.
+
+    strategy="simans":
+      1. Top `pool_size` candidates (excluding gold).
+      2. SimANS-weighted sample of k_negs (no filter; near-positives are
+         down-weighted, not dropped — see `sample_simans_negatives`).
     """
     if len(track_ids) != track_embs.shape[0]:
         raise ValueError("track_ids and track_embs length mismatch")
@@ -83,6 +138,17 @@ def mine_negatives_for_query(
     ranked_idxs = np.argsort(-sims)
     pool = [int(i) for i in ranked_idxs if i != gold_idx][:pool_size]
     pool_scores = [float(sims[i]) for i in pool]
+
+    if strategy == "simans":
+        chosen_pool_idxs = sample_simans_negatives(
+            pool_scores, positive_score, k=k_negs,
+            a=simans_a, b=simans_b, seed=seed,
+        )
+        return [track_ids[pool[i]] for i in chosen_pool_idxs]
+
+    if strategy != "percpos":
+        raise ValueError(f"unknown mining strategy: {strategy!r}")
+
     keep_mask = percpos_filter(pool_scores, positive_score, percpos_threshold)
     filtered_track_ids = [track_ids[pool[i]] for i, keep in enumerate(keep_mask) if keep]
     filtered_ranks_in_pool = [i + 2 for i, keep in enumerate(keep_mask) if keep]
