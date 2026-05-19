@@ -82,6 +82,119 @@ def test_dataset_default_n_negatives_is_15():
     assert len(item["negatives"]) == 15
 
 
+def test_info_nce_loss_in_batch_uses_full_batch_denominator():
+    """I-1: in-batch InfoNCE contrasts each query against ALL B*n_per docs.
+    With B=2 queries and n_per=3 (1 pos + 2 negs each), the score matrix
+    must be shape (2, 6) and labels must point to columns 0 and 3 (positions
+    of each query's positive in the flat doc layout)."""
+    import torch
+    from scripts.train_bi_encoder import _info_nce_loss_in_batch
+
+    # B=2, n_per=3, D=4.
+    q_emb = torch.tensor([[1.0, 0.0, 0.0, 0.0],
+                          [0.0, 1.0, 0.0, 0.0]])
+    # docs: [pos_0, neg_0_0, neg_0_1, pos_1, neg_1_0, neg_1_1]
+    # Each query's positive aligned with its query embedding → high score.
+    d_emb = torch.tensor([[1.0, 0.0, 0.0, 0.0],  # pos_0 — matches q_0
+                          [0.0, 0.0, 1.0, 0.0],  # neg_0_0
+                          [0.0, 0.0, 0.0, 1.0],  # neg_0_1
+                          [0.0, 1.0, 0.0, 0.0],  # pos_1 — matches q_1
+                          [0.5, 0.0, 0.5, 0.0],  # neg_1_0
+                          [0.0, 0.5, 0.0, 0.5]]) # neg_1_1
+    loss = _info_nce_loss_in_batch(q_emb, d_emb, n_per=3, temperature=0.05)
+    # With pos perfectly aligned and negs orthogonal/half-aligned at temp 0.05,
+    # the cross-entropy should be near zero — the positive's logit dominates.
+    assert float(loss.item()) < 0.5, \
+        f"in-batch InfoNCE on perfectly aligned positives is too high: {loss.item():.4f}"
+
+
+def test_info_nce_loss_in_batch_penalizes_wrong_positive():
+    """I-1: when a NEGATIVE (column 1, which is one of query 0's own negs)
+    has a HIGHER score than query 0's positive (column 0), the loss must
+    be large (>1.0 in log-space). Sanity check that the label index is right."""
+    import torch
+    from scripts.train_bi_encoder import _info_nce_loss_in_batch
+
+    q_emb = torch.tensor([[1.0, 0.0]])
+    # B=1, n_per=2 → 2 docs. Positive is at col 0, but neg has higher dot.
+    d_emb = torch.tensor([[0.0, 0.0],   # pos (zero vector → score 0)
+                          [10.0, 0.0]]) # neg (high score)
+    loss = _info_nce_loss_in_batch(q_emb, d_emb, n_per=2, temperature=1.0)
+    assert float(loss.item()) > 5.0, \
+        f"in-batch InfoNCE didn't penalize wrong-positive scoring: {loss.item():.4f}"
+
+
+def test_info_nce_loss_in_batch_treats_other_queries_pos_as_neg():
+    """I-1: false-negative behavior — confirm that for query 0, the docs
+    associated with query 1 (including query 1's positive at col n_per)
+    appear in the denominator. We test this by checking that the score at
+    column n_per influences the loss."""
+    import torch
+    from scripts.train_bi_encoder import _info_nce_loss_in_batch
+
+    # B=2, n_per=2: cols 0,1 belong to q0; cols 2,3 belong to q1.
+    # q0's pos is at col 0; q1's pos is at col 2.
+    q_emb = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    # q1's positive (col 2) is highly aligned with q0 — should hurt q0's loss.
+    d_emb_bad = torch.tensor([[1.0, 0.0],   # q0 pos
+                              [0.0, 0.0],   # q0 neg
+                              [10.0, 0.0],  # q1 pos — but aligned with q0!
+                              [0.0, 1.0]])  # q1 neg
+    d_emb_good = torch.tensor([[1.0, 0.0],
+                                [0.0, 0.0],
+                                [0.0, 10.0],  # q1 pos aligned with q1, not q0
+                                [0.0, 1.0]])
+    loss_bad = _info_nce_loss_in_batch(q_emb, d_emb_bad, n_per=2, temperature=1.0)
+    loss_good = _info_nce_loss_in_batch(q_emb, d_emb_good, n_per=2, temperature=1.0)
+    assert float(loss_bad.item()) > float(loss_good.item()), \
+        f"in-batch loss isn't sensitive to other-query positives: bad={loss_bad.item():.4f} vs good={loss_good.item():.4f}"
+
+
+def test_cli_has_in_batch_negs_and_full_catalog_args():
+    """I-1 + I-3: new CLI flags exist."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+    src = inspect.getsource(mod.main)
+    assert "--in-batch-negs" in src, "missing --in-batch-negs flag"
+    assert "--no-in-batch-negs" in src, "missing --no-in-batch-negs flag"
+    assert "--val-full-catalog-every-n-steps" in src, \
+        "missing --val-full-catalog-every-n-steps flag"
+    assert "--track-meta-hf" in src, "missing --track-meta-hf flag"
+
+
+def test_dataset_carries_pos_tid_when_present():
+    """I-3: TripleJsonlDataset surfaces pos_tid via .pos_tids() and __getitem__
+    when the on-disk triples carry it. Older triples without pos_tid: pos_tids()
+    returns [] and full-catalog val is silently skipped (back-compat)."""
+    import json
+    import tempfile
+    from scripts.train_bi_encoder import TripleJsonlDataset
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        for i in range(3):
+            row = {
+                "query": f"q{i}", "pos": [f"p{i}"],
+                "neg": [f"n{j}" for j in range(15)],
+                "pos_tid": f"track_{i}",
+            }
+            f.write(json.dumps(row) + "\n")
+        with_tid_path = f.name
+    ds = TripleJsonlDataset(with_tid_path)
+    assert ds.pos_tids() == ["track_0", "track_1", "track_2"]
+    assert ds[0]["pos_tid"] == "track_0"
+
+    # Back-compat: older triples file with no pos_tid.
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        for i in range(3):
+            row = {"query": f"q{i}", "pos": [f"p{i}"],
+                   "neg": [f"n{j}" for j in range(15)]}
+            f.write(json.dumps(row) + "\n")
+        no_tid_path = f.name
+    ds_old = TripleJsonlDataset(no_tid_path)
+    assert ds_old.pos_tids() == []
+    assert "pos_tid" not in ds_old[0]
+
+
 def test_val_metrics_perfect_ranking():
     """If positive (col 0) has the highest score for every row → top1=1, ndcg=1."""
     import torch

@@ -68,6 +68,10 @@ def build_triples_for_row(
         "query": query,
         "pos": [track_text_map[gold_track_id]],
         "neg": [track_text_map[tid] for tid in neg_track_ids if tid in track_text_map],
+        # ML-reviewer I-3: carry the gold track_id so training-time full-catalog
+        # nDCG eval (in train_bi_encoder.py) can score against the actual ~50k
+        # catalog instead of just the 16 mined candidates.
+        "pos_tid": gold_track_id,
     }
 
 

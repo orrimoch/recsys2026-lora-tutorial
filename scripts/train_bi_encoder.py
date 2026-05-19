@@ -99,11 +99,24 @@ class TripleJsonlDataset:
             pad_pool = list(negs) if negs else [""]
             while len(negs) < self.n_negatives:
                 negs.append(self.rng.choice(pad_pool))
-        return {
+        out = {
             "query": row["query"],
             "positive": row["pos"][0],
             "negatives": negs,
         }
+        # pos_tid is optional — older triple files won't have it. Without it,
+        # full-catalog val eval is silently disabled.
+        if "pos_tid" in row:
+            out["pos_tid"] = row["pos_tid"]
+        return out
+
+    def pos_tids(self) -> list[str]:
+        """All gold track_ids in row order. Returns [] if triples don't carry pos_tid."""
+        return [r["pos_tid"] for r in self.rows if "pos_tid" in r]
+
+    def queries(self) -> list[str]:
+        """All query strings in row order. Used for full-catalog val eval."""
+        return [r["query"] for r in self.rows]
 
 
 def _collate_batch(batch: list[dict], tokenizer, max_q_len: int, max_p_len: int):
@@ -137,7 +150,8 @@ def _cls_pool(last_hidden: "torch.Tensor") -> "torch.Tensor":
 
 
 def _info_nce_loss(q_emb: "torch.Tensor", d_emb: "torch.Tensor", n_per: int, temperature: float) -> "torch.Tensor":
-    """InfoNCE: each query has 1 positive + (n_per - 1) negatives, contiguous in d_emb."""
+    """Per-row InfoNCE: each query contrasted against ONLY its own 1 pos + (n_per-1) negs.
+    Denominator = n_per (e.g., 16). Used when --in-batch-negs is disabled."""
     import torch
     import torch.nn.functional as F
 
@@ -145,6 +159,31 @@ def _info_nce_loss(q_emb: "torch.Tensor", d_emb: "torch.Tensor", n_per: int, tem
     d_emb = d_emb.view(B, n_per, -1)             # (B, n_per, D)
     scores = torch.einsum("bd,bnd->bn", q_emb, d_emb) / temperature  # (B, n_per)
     labels = torch.zeros(B, dtype=torch.long, device=scores.device)  # positive is index 0
+    return F.cross_entropy(scores, labels)
+
+
+def _info_nce_loss_in_batch(q_emb: "torch.Tensor", d_emb: "torch.Tensor",
+                            n_per: int, temperature: float) -> "torch.Tensor":
+    """In-batch-negative InfoNCE: each query contrasted against ALL docs in the
+    micro-batch (= B * n_per), not just its own row. Standard recipe for
+    modern dense retrievers (BGE-M3, E5, GTE).
+
+    Denominator: B * n_per (e.g., 32 at bs=2). Per-query positive sits at
+    column `i * n_per` of the score matrix (docs are laid out as
+    [pos_0, neg_0_0..14, pos_1, neg_1_0..14, ...] by the collator).
+
+    False-negative risk: if track X is the positive for query A and was mined
+    as a negative for query B, the loss pushes X UP for A and DOWN for B
+    simultaneously. In music CRS this happens for popular tracks. Literature
+    accepts this — the signal boost (denominator size) dominates the noise.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    B = q_emb.size(0)
+    # d_emb is already (B * n_per, D) from the collator — no reshape needed.
+    scores = (q_emb @ d_emb.T) / temperature      # (B, B * n_per)
+    labels = torch.arange(B, device=scores.device) * n_per  # each query's positive idx
     return F.cross_entropy(scores, labels)
 
 
@@ -226,6 +265,56 @@ def _train(args):
     n_val = len(val_ds) if val_ds is not None else 0
     print(f"[train-bi-encoder] {len(train_ds)} train triples, {n_val} val triples",
           file=sys.stderr)
+
+    # ML-reviewer I-1: route to in-batch-negs InfoNCE (denominator = B * n_per,
+    # standard recipe) or fall back to per-row InfoNCE (denominator = n_per).
+    if args.in_batch_negs:
+        _loss_fn = _info_nce_loss_in_batch
+        print(f"[train-bi-encoder] InfoNCE: IN-BATCH negatives "
+              f"(denominator = {args.per_device_batch_size * args.n_negatives} "
+              f"per query at bs={args.per_device_batch_size})", file=sys.stderr)
+    else:
+        _loss_fn = _info_nce_loss
+        print(f"[train-bi-encoder] InfoNCE: per-row only "
+              f"(denominator = {1 + args.n_negatives} per query)", file=sys.stderr)
+
+    # ML-reviewer I-3: full-catalog val nDCG@K. Requires val triples carrying
+    # pos_tid (new builder schema). On every --val-full-catalog-every-n-steps
+    # opt-step, encode the FULL catalog + all val queries, compute nDCG@K
+    # against the actual ~50k corpus (not just the 16 mined cands).
+    catalog_texts: Optional[list[str]] = None
+    catalog_tids: Optional[list[str]] = None
+    val_queries_text: Optional[list[str]] = None
+    val_gold_tids: Optional[list[str]] = None
+    full_cat_enabled = (
+        args.val_full_catalog_every_n_steps > 0
+        and val_ds is not None
+        and len(val_ds.pos_tids()) == len(val_ds)
+    )
+    if args.val_full_catalog_every_n_steps > 0 and not full_cat_enabled:
+        print("[train-bi-encoder] --val-full-catalog-every-n-steps requested but "
+              "val triples lack pos_tid (older mining run?). Skipping full-catalog "
+              "val. Re-mine with the latest builder to enable.", file=sys.stderr)
+    if full_cat_enabled:
+        from datasets import load_dataset as _load_dataset
+        REPO_ROOT_LOCAL = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(REPO_ROOT_LOCAL / "music-crs-baselines"))
+        from mcrs.retrieval_modules.bge_m3_format import format_track_text as _fmt
+        print("[train-bi-encoder] loading catalog for full-catalog val eval",
+              file=sys.stderr)
+        tm = _load_dataset(args.track_meta_hf, split="all_tracks")
+        catalog_tids = [r["track_id"] for r in tm]
+        catalog_texts = [_fmt(
+            r.get("track_name", "unknown"), r.get("artist_name"),
+            r.get("album_name"), r.get("release_date"), r.get("tag_list"),
+        ) for r in tm]
+        val_queries_text = val_ds.queries()
+        val_gold_tids = val_ds.pos_tids()
+        print(f"[train-bi-encoder] full-catalog val ENABLED: "
+              f"{len(catalog_tids)} catalog tracks × {len(val_queries_text)} "
+              f"val queries, every {args.val_full_catalog_every_n_steps} opt-steps "
+              f"(~{len(catalog_tids) / 64 * 0.05:.0f} sec/eval on Blackwell)",
+              file=sys.stderr)
     loader = DataLoader(
         train_ds,
         batch_size=args.per_device_batch_size,
@@ -301,7 +390,7 @@ def _train(args):
                     vd_out = model(**vd)
                     vq_emb = _cls_pool(vq_out.last_hidden_state)
                     vd_emb = _cls_pool(vd_out.last_hidden_state)
-                    vloss = _info_nce_loss(vq_emb, vd_emb, vn, args.temperature)
+                    vloss = _loss_fn(vq_emb, vd_emb, vn, args.temperature)
                 # Re-compute per-query top-1 + nDCG from the same embeddings.
                 B = vq_emb.size(0)
                 d_emb_grouped = vd_emb.view(B, vn, -1)
@@ -320,6 +409,62 @@ def _train(args):
             float(ndcg_sum) / max(1, n_total),
         )
 
+    def _encode_texts(texts: list[str], max_len: int) -> "torch.Tensor":
+        """Forward-only encode for full-catalog val. Mean-pools at the CLS token
+        + L2-normalizes, matching the training-time pooling contract."""
+        import math as _math
+        model.eval()
+        BATCH = max(1, args.val_encode_batch_size)
+        out_chunks: list[torch.Tensor] = []
+        with torch.no_grad():
+            for i in range(0, len(texts), BATCH):
+                chunk = texts[i:i + BATCH]
+                enc = tokenizer(chunk, max_length=max_len, padding=True,
+                                truncation=True, return_tensors="pt")
+                enc = {k: v.to(device) for k, v in enc.items()}
+                with torch.autocast(device_type="cuda" if device == "cuda" else "cpu",
+                                    dtype=torch.bfloat16):
+                    o = model(**enc)
+                emb = _cls_pool(o.last_hidden_state).float().cpu()
+                out_chunks.append(emb)
+        model.train()
+        return torch.cat(out_chunks, dim=0)
+
+    def _val_full_catalog_ndcg(k: int = 20) -> Optional[float]:
+        """Re-encode the full catalog + val queries with the current model,
+        compute nDCG@K for each val query against the full catalog, return mean.
+
+        This is the ML-reviewer I-3 fix: the per-row val/ndcg over 16 cands is
+        a training-set echo; this metric scores against the real ~50k corpus.
+        """
+        if not full_cat_enabled:
+            return None
+        try:
+            cat_emb = _encode_texts(catalog_texts, args.passage_max_len)  # (N, D)
+            q_emb_full = _encode_texts(val_queries_text, args.query_max_len)  # (Q, D)
+            sims = q_emb_full @ cat_emb.T  # (Q, N)
+            # top-K indices per query (any order), then sort within top-K.
+            topk_idx = torch.topk(sims, k=min(k, sims.size(1)), dim=1).indices  # (Q, k)
+            tid_to_idx = {tid: i for i, tid in enumerate(catalog_tids)}
+            import math as _math
+            ndcgs: list[float] = []
+            for qi, gold_tid in enumerate(val_gold_tids):
+                if gold_tid not in tid_to_idx:
+                    ndcgs.append(0.0)
+                    continue
+                gold_cat_idx = tid_to_idx[gold_tid]
+                row = topk_idx[qi].tolist()
+                if gold_cat_idx in row:
+                    rank = row.index(gold_cat_idx) + 1
+                    ndcgs.append(1.0 / _math.log2(rank + 1))
+                else:
+                    ndcgs.append(0.0)
+            return float(sum(ndcgs) / len(ndcgs)) if ndcgs else None
+        except Exception as e:
+            print(f"[train-bi-encoder] WARN: full-catalog val failed: {e!r}",
+                  file=sys.stderr)
+            return None
+
     # Gradient-accumulation training loop. Loss is divided by `accum` so the
     # accumulated gradient matches what a single bs=(per_device*accum) step
     # would produce; optimizer steps only every `accum` micro-batches.
@@ -336,7 +481,7 @@ def _train(args):
                 d_out = model(**d_enc)
                 q_emb = _cls_pool(q_out.last_hidden_state)
                 d_emb = _cls_pool(d_out.last_hidden_state)
-                loss = _info_nce_loss(q_emb, d_emb, n_per, args.temperature) / accum
+                loss = _loss_fn(q_emb, d_emb, n_per, args.temperature) / accum
             loss.backward()
             micro_step += 1
             if micro_step % accum == 0:
@@ -376,6 +521,20 @@ def _train(args):
                               f"val_ndcg={vndcg:.4f}"
                               f"{' (new best)' if improved else ''}",
                               file=sys.stderr)
+                # ML-reviewer I-3: full-catalog val nDCG@20 (much more honest
+                # than the 16-cand val/ndcg). Slower (~20-40 sec on Blackwell);
+                # gate behind --val-full-catalog-every-n-steps.
+                if full_cat_enabled and args.val_full_catalog_every_n_steps > 0 \
+                        and opt_step % args.val_full_catalog_every_n_steps == 0:
+                    fc_ndcg = _val_full_catalog_ndcg(k=20)
+                    if fc_ndcg is not None:
+                        writer.add_scalar("val/full_catalog_ndcg_at_20",
+                                          fc_ndcg, opt_step)
+                        print(f"[train-bi-encoder] opt_step={opt_step}/{total_steps} "
+                              f"val_full_ndcg@20={fc_ndcg:.4f} "
+                              f"(over {len(val_gold_tids)} val queries × "
+                              f"{len(catalog_tids)} catalog tracks)",
+                              file=sys.stderr)
         # End-of-epoch checkpoint (warm-startable via --resume-from).
         if args.checkpoint_every_n_epochs > 0 \
                 and (epoch + 1) % args.checkpoint_every_n_epochs == 0:
@@ -408,6 +567,12 @@ def _train(args):
             print(f"[train-bi-encoder] FINAL opt_step={opt_step} "
                   f"val_loss={fvl:.4f} val_top1={fvacc:.3f} "
                   f"val_ndcg={fvndcg:.4f} (best_loss={best_val_loss:.4f})",
+                  file=sys.stderr)
+    if full_cat_enabled:
+        final_fc = _val_full_catalog_ndcg(k=20)
+        if final_fc is not None:
+            writer.add_scalar("val/full_catalog_ndcg_at_20", final_fc, opt_step)
+            print(f"[train-bi-encoder] FINAL val_full_ndcg@20={final_fc:.4f}",
                   file=sys.stderr)
     writer.close()
     # Save the adapter
@@ -520,6 +685,29 @@ def main():
     p.add_argument("--lora-rank", type=int, default=32)
     p.add_argument("--lora-alpha", type=int, default=64)
     p.add_argument("--logging-steps", type=int, default=50)
+    # ML-reviewer I-1: in-batch negatives for stronger contrastive signal.
+    p.add_argument("--in-batch-negs", dest="in_batch_negs", action="store_true",
+                   default=True,
+                   help="Use in-batch InfoNCE (each query contrasted against ALL "
+                        "docs in the micro-batch, not just its own 1 pos + 15 negs). "
+                        "Standard modern recipe; default ON. Disable via "
+                        "--no-in-batch-negs to reproduce per-row contrastive.")
+    p.add_argument("--no-in-batch-negs", dest="in_batch_negs", action="store_false",
+                   help="See --in-batch-negs.")
+    # ML-reviewer I-3: full-catalog val nDCG.
+    p.add_argument("--val-full-catalog-every-n-steps", type=int, default=0,
+                   help="Periodically encode the FULL ~50k catalog + val queries "
+                        "and compute val/full_catalog_ndcg_at_20 vs the actual "
+                        "corpus (not just the 16 mined cands). 0 disables. "
+                        "Recommended 200 for production (~20-40 sec/eval). Requires "
+                        "val triples carrying pos_tid (new builder schema).")
+    p.add_argument("--track-meta-hf", type=str,
+                   default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
+                   help="Catalog dataset for full-catalog val eval. Ignored "
+                        "unless --val-full-catalog-every-n-steps > 0.")
+    p.add_argument("--val-encode-batch-size", type=int, default=64,
+                   help="Batch size for val-time encoding (full catalog + val "
+                        "queries). 64 is safe on Blackwell-95GB.")
     # ML-reviewer N1: held-out val InfoNCE during training.
     p.add_argument("--val-fraction", type=float, default=0.05,
                    help="Fraction of triples held out from training for periodic "
