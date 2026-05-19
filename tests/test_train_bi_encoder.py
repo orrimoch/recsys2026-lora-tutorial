@@ -82,6 +82,61 @@ def test_dataset_default_n_negatives_is_15():
     assert len(item["negatives"]) == 15
 
 
+def test_dataset_train_val_split_sizes_match_fraction():
+    """ML-reviewer N1: split='train'/'val' partitions rows by fraction.
+    Train + val sizes should equal total; val ~= round(N * val_fraction)."""
+    import json
+    import tempfile
+    from scripts.train_bi_encoder import TripleJsonlDataset
+
+    rows = [{"query": f"q{i}", "pos": [f"p{i}"], "neg": [f"n{i}_{j}" for j in range(15)]}
+            for i in range(100)]
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+        path = f.name
+    train = TripleJsonlDataset(path, split="train", val_fraction=0.1)
+    val = TripleJsonlDataset(path, split="val", val_fraction=0.1)
+    assert len(train) + len(val) == 100
+    assert len(val) == 10  # round(100 * 0.1)
+
+
+def test_dataset_train_val_split_is_disjoint():
+    """No query should appear in both train and val with the same seed."""
+    import json
+    import tempfile
+    from scripts.train_bi_encoder import TripleJsonlDataset
+
+    rows = [{"query": f"q{i}", "pos": [f"p{i}"], "neg": [f"n{i}_{j}" for j in range(15)]}
+            for i in range(50)]
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+        path = f.name
+    train = TripleJsonlDataset(path, split="train", val_fraction=0.2, seed=42)
+    val = TripleJsonlDataset(path, split="val", val_fraction=0.2, seed=42)
+    train_qs = {train[i]["query"] for i in range(len(train))}
+    val_qs = {val[i]["query"] for i in range(len(val))}
+    assert train_qs.isdisjoint(val_qs)
+    assert len(train_qs | val_qs) == 50
+
+
+def test_dataset_default_split_loads_everything():
+    """Back-compat: omitting split + val_fraction loads the full file."""
+    import json
+    import tempfile
+    from scripts.train_bi_encoder import TripleJsonlDataset
+
+    rows = [{"query": f"q{i}", "pos": [f"p{i}"], "neg": [f"n{j}" for j in range(15)]}
+            for i in range(20)]
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+        path = f.name
+    ds = TripleJsonlDataset(path)
+    assert len(ds) == 20
+
+
 def test_dataset_samples_negs_randomly_not_first_n():
     """C2 regression: epoch 2 should see different negs than epoch 1 (random sample)."""
     import json

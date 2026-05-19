@@ -49,15 +49,41 @@ class TripleJsonlDataset:
     Short neg-lists are upsampled by repeated random sampling from the same row.
     """
 
-    def __init__(self, path: str, n_negatives: int = 15, seed: int = 42):
+    def __init__(self, path: str, n_negatives: int = 15, seed: int = 42,
+                 split: str = "all", val_fraction: float = 0.0):
+        """Args:
+            split: 'all' (default; load every row), 'train' (first 1-val_fraction
+                fraction by shuffled order), or 'val' (last val_fraction).
+            val_fraction: only used when split in ('train','val'). Default 0.0
+                preserves back-compat for callers that want the whole file.
+            seed: governs both the shuffle ordering AND the per-row neg sampling.
+                A fixed seed makes the train/val split deterministic across
+                runs and machines.
+        """
         import json as _json
-        self.rows = []
+        all_rows = []
         with open(path) as f:
             for line in f:
                 obj = _json.loads(line)
                 if not obj.get("pos") or not obj.get("neg"):
                     continue
-                self.rows.append(obj)
+                all_rows.append(obj)
+        if split == "all":
+            # No val split → no need to shuffle, preserves on-disk order.
+            self.rows = all_rows
+        elif split in ("train", "val"):
+            # Deterministic shuffle so the val slice is representative, not just
+            # the tail of the file (HN mining writes rows in dataset-walk order).
+            shuffle_rng = random.Random(seed)
+            shuffle_rng.shuffle(all_rows)
+            n_val = int(round(float(val_fraction) * len(all_rows)))
+            n_val = max(0, min(n_val, len(all_rows) - 1))
+            if split == "val":
+                self.rows = all_rows[len(all_rows) - n_val:] if n_val > 0 else []
+            else:  # train
+                self.rows = all_rows[: len(all_rows) - n_val]
+        else:
+            raise ValueError(f"unknown split: {split!r} (expected 'all'/'train'/'val')")
         self.n_negatives = int(n_negatives)
         self.rng = random.Random(seed)
 
@@ -155,15 +181,35 @@ def _train(args):
     model.to(device)
     model.print_trainable_parameters()
 
-    ds = TripleJsonlDataset(args.triples, n_negatives=args.n_negatives)
-    print(f"[train-bi-encoder] {len(ds)} training triples", file=sys.stderr)
+    # ML-reviewer N1: hold out `val_fraction` of triples for periodic InfoNCE
+    # eval during training. Catches overfitting at epoch 2 without waiting for
+    # the dev-nDCG cell after 6-10 GPU-hr.
+    train_ds = TripleJsonlDataset(
+        args.triples, n_negatives=args.n_negatives,
+        split="train" if args.val_fraction > 0 else "all",
+        val_fraction=args.val_fraction,
+    )
+    val_ds = (TripleJsonlDataset(
+        args.triples, n_negatives=args.n_negatives,
+        split="val", val_fraction=args.val_fraction,
+    ) if args.val_fraction > 0 else None)
+    n_val = len(val_ds) if val_ds is not None else 0
+    print(f"[train-bi-encoder] {len(train_ds)} train triples, {n_val} val triples",
+          file=sys.stderr)
     loader = DataLoader(
-        ds,
+        train_ds,
         batch_size=args.per_device_batch_size,
         shuffle=True,
         num_workers=2,
         collate_fn=lambda b: _collate_batch(b, tokenizer, args.query_max_len, args.passage_max_len),
     )
+    val_loader = (DataLoader(
+        val_ds,
+        batch_size=args.per_device_batch_size,
+        shuffle=False,
+        num_workers=0,  # avoid spawning workers we'll only use periodically
+        collate_fn=lambda b: _collate_batch(b, tokenizer, args.query_max_len, args.passage_max_len),
+    ) if val_ds is not None and n_val > 0 else None)
 
     # Optimizer steps after grad-accum: total_micro_batches / accum_steps.
     accum = max(1, int(args.gradient_accumulation_steps))
@@ -192,11 +238,34 @@ def _train(args):
     log_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(log_dir))
 
+    def _val_loss_now() -> Optional[float]:
+        """Forward-only pass over the full val_loader. Returns mean InfoNCE
+        loss (effective-batch scale, NOT divided by accum). Restores model to
+        train mode on exit."""
+        if val_loader is None:
+            return None
+        model.eval()
+        losses = []
+        with torch.no_grad():
+            for vq, vd, vn in val_loader:
+                vq = {k: v.to(device) for k, v in vq.items()}
+                vd = {k: v.to(device) for k, v in vd.items()}
+                with torch.autocast(device_type="cuda" if device == "cuda" else "cpu", dtype=torch.bfloat16):
+                    vq_out = model(**vq)
+                    vd_out = model(**vd)
+                    vq_emb = _cls_pool(vq_out.last_hidden_state)
+                    vd_emb = _cls_pool(vd_out.last_hidden_state)
+                    vloss = _info_nce_loss(vq_emb, vd_emb, vn, args.temperature)
+                losses.append(float(vloss.item()))
+        model.train()
+        return float(sum(losses) / len(losses)) if losses else None
+
     # Gradient-accumulation training loop. Loss is divided by `accum` so the
     # accumulated gradient matches what a single bs=(per_device*accum) step
     # would produce; optimizer steps only every `accum` micro-batches.
     micro_step = 0
     opt_step = 0
+    best_val_loss = float("inf")
     optimizer.zero_grad()
     for epoch in range(args.epochs):
         for q_enc, d_enc, n_per in loader:
@@ -222,12 +291,40 @@ def _train(args):
                     writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], opt_step)
                     print(f"[train-bi-encoder] opt_step={opt_step}/{total_steps} "
                           f"loss={float(loss.item()) * accum:.4f}", file=sys.stderr)
+                # ML-reviewer N1: periodic val InfoNCE every --val-every-n-steps.
+                # Fires AFTER the optimizer step so the loss reflects the latest
+                # parameter update.
+                if val_loader is not None and args.val_every_n_steps > 0 \
+                        and opt_step % args.val_every_n_steps == 0:
+                    vl = _val_loss_now()
+                    if vl is not None:
+                        writer.add_scalar("val/loss", vl, opt_step)
+                        improved = vl < best_val_loss
+                        if improved:
+                            best_val_loss = vl
+                        print(f"[train-bi-encoder] opt_step={opt_step}/{total_steps} "
+                              f"val_loss={vl:.4f}"
+                              f"{' (new best)' if improved else ''}",
+                              file=sys.stderr)
     # Flush any partial accumulation at end of training.
     if micro_step % accum != 0:
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad()
 
+    # Final val-loss pass (logged at opt_step so it lands on the same x-axis
+    # as the periodic val curve). Useful when --val-every-n-steps would have
+    # missed the very last step of training.
+    if val_loader is not None:
+        final_vl = _val_loss_now()
+        if final_vl is not None:
+            writer.add_scalar("val/loss", final_vl, opt_step)
+            improved = final_vl < best_val_loss
+            if improved:
+                best_val_loss = final_vl
+            print(f"[train-bi-encoder] FINAL opt_step={opt_step} "
+                  f"val_loss={final_vl:.4f} (best={best_val_loss:.4f})",
+                  file=sys.stderr)
     writer.close()
     # Save the adapter
     model.save_pretrained(str(output_dir))
@@ -339,6 +436,15 @@ def main():
     p.add_argument("--lora-rank", type=int, default=32)
     p.add_argument("--lora-alpha", type=int, default=64)
     p.add_argument("--logging-steps", type=int, default=50)
+    # ML-reviewer N1: held-out val InfoNCE during training.
+    p.add_argument("--val-fraction", type=float, default=0.05,
+                   help="Fraction of triples held out from training for periodic "
+                        "val-InfoNCE eval. 0.0 disables val tracking. Default 0.05 "
+                        "(5%% of mined triples; tens to hundreds of rows).")
+    p.add_argument("--val-every-n-steps", type=int, default=100,
+                   help="Run val pass every N optimizer steps. 0 disables. "
+                        "Default 100 → roughly every ~10 minutes on Blackwell "
+                        "for the production config.")
     args = p.parse_args()
 
     _train(args)
