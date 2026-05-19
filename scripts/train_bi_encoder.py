@@ -218,10 +218,15 @@ def _train(args):
 
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     base_model = AutoModel.from_pretrained(args.base_model, torch_dtype=torch.bfloat16)
-    # I3: gradient checkpointing — must be enabled BEFORE get_peft_model,
-    # and enable_input_require_grads is required for PEFT compatibility.
-    base_model.gradient_checkpointing_enable()
-    base_model.enable_input_require_grads()
+    # Gradient checkpointing recomputes activations on backward → saves
+    # memory but costs ~30% wallclock. Worth it at bs=2 on small GPUs;
+    # wasted overhead at bs=8+ on Blackwell-95GB. Toggle via CLI flag.
+    if args.gradient_checkpointing:
+        base_model.gradient_checkpointing_enable()
+        base_model.enable_input_require_grads()
+        print("[train-bi-encoder] gradient checkpointing: ON", file=sys.stderr)
+    else:
+        print("[train-bi-encoder] gradient checkpointing: OFF (~30% faster; needs more VRAM)", file=sys.stderr)
 
     # Warm-start: if --resume-from is set, load an existing LoRA adapter
     # instead of creating a fresh one. Use case: train 1 epoch → evaluate →
@@ -694,6 +699,15 @@ def main():
                         "--no-in-batch-negs to reproduce per-row contrastive.")
     p.add_argument("--no-in-batch-negs", dest="in_batch_negs", action="store_false",
                    help="See --in-batch-negs.")
+    p.add_argument("--gradient-checkpointing", dest="gradient_checkpointing",
+                   action="store_true", default=True,
+                   help="Enable gradient checkpointing (saves VRAM, ~30%% slower). "
+                        "Default ON for back-compat with bs=2. Disable via "
+                        "--no-gradient-checkpointing when running bs=8+ on "
+                        "Blackwell-95GB to recover the wallclock.")
+    p.add_argument("--no-gradient-checkpointing", dest="gradient_checkpointing",
+                   action="store_false",
+                   help="See --gradient-checkpointing.")
     # ML-reviewer I-3: full-catalog val nDCG.
     p.add_argument("--val-full-catalog-every-n-steps", type=int, default=0,
                    help="Periodically encode the FULL ~50k catalog + val queries "

@@ -150,6 +150,21 @@ def test_info_nce_loss_in_batch_treats_other_queries_pos_as_neg():
         f"in-batch loss isn't sensitive to other-query positives: bad={loss_bad.item():.4f} vs good={loss_good.item():.4f}"
 
 
+def test_cli_has_gradient_checkpointing_toggle():
+    """Speed knob: --gradient-checkpointing / --no-gradient-checkpointing.
+    Default ON for back-compat at small per_device_batch_size; at bs=8 on
+    Blackwell-95GB we want it OFF for ~30% speedup."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+    src_main = inspect.getsource(mod.main)
+    src_train = inspect.getsource(mod._train)
+    assert "--gradient-checkpointing" in src_main, "missing --gradient-checkpointing CLI flag"
+    assert "--no-gradient-checkpointing" in src_main, "missing --no-gradient-checkpointing CLI flag"
+    # _train must gate the call on the flag, not call unconditionally.
+    assert "args.gradient_checkpointing" in src_train, \
+        "_train does not honor args.gradient_checkpointing"
+
+
 def test_cli_has_in_batch_negs_and_full_catalog_args():
     """I-1 + I-3: new CLI flags exist."""
     import inspect
