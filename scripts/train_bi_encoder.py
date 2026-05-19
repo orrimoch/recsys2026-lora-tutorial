@@ -148,6 +148,25 @@ def _info_nce_loss(q_emb: "torch.Tensor", d_emb: "torch.Tensor", n_per: int, tem
     return F.cross_entropy(scores, labels)
 
 
+def _val_metrics_from_scores(scores: "torch.Tensor") -> tuple[float, float]:
+    """Compute (top1_accuracy, mean_nDCG) given a (B, n_per) score matrix
+    where column 0 is the positive. Pure tensor op; no model required.
+
+    Extracted from _val_loss_now so we can unit-test the nDCG formula
+    without spinning up a real encoder.
+    """
+    import torch
+
+    preds = scores.argmax(dim=-1)
+    top1 = float((preds == 0).float().mean().item())
+    pos_scores = scores[:, 0:1]
+    # rank of the positive = 1 + (# candidates with strictly higher score).
+    ranks = (scores > pos_scores).sum(dim=-1).float() + 1.0
+    # nDCG with single relevant item: 1 / log2(rank + 1). Ideal at rank 1 = 1.0.
+    ndcg = 1.0 / torch.log2(ranks + 1.0)
+    return top1, float(ndcg.mean().item())
+
+
 def _train(args):
     import torch
     from torch.utils.data import DataLoader
@@ -164,20 +183,31 @@ def _train(args):
     # and enable_input_require_grads is required for PEFT compatibility.
     base_model.gradient_checkpointing_enable()
     base_model.enable_input_require_grads()
-    # Training does CLS-pool on last_hidden_state directly (see _cls_pool), so
-    # XLM-RoBERTa's `pooler` submodule is never on the gradient path. Earlier
-    # versions added `modules_to_save=["pooler"]` per spec line 140's wording,
-    # but that wrapped a module the loss never touches AND collided with the
-    # `dense` substring in `target_modules` (peft would also LoRA-wrap pooler.dense).
-    lora_cfg = LoraConfig(
-        r=args.lora_rank,
-        lora_alpha=args.lora_alpha,
-        target_modules=_BGE_M3_LORA_TARGETS,
-        lora_dropout=0.05,
-        bias="none",
-        task_type="FEATURE_EXTRACTION",
-    )
-    model = get_peft_model(base_model, lora_cfg)
+
+    # Warm-start: if --resume-from is set, load an existing LoRA adapter
+    # instead of creating a fresh one. Use case: train 1 epoch → evaluate →
+    # decide to train another epoch from that checkpoint. Optimizer +
+    # scheduler restart fresh (intentionally: a new warmup is healthier than
+    # bit-exact continuation, and we always know what schedule we ran).
+    if args.resume_from:
+        from peft import PeftModel
+        print(f"[train-bi-encoder] WARM START from {args.resume_from}", file=sys.stderr)
+        model = PeftModel.from_pretrained(base_model, args.resume_from, is_trainable=True)
+    else:
+        # Training does CLS-pool on last_hidden_state directly (see _cls_pool), so
+        # XLM-RoBERTa's `pooler` submodule is never on the gradient path. Earlier
+        # versions added `modules_to_save=["pooler"]` per spec line 140's wording,
+        # but that wrapped a module the loss never touches AND collided with the
+        # `dense` substring in `target_modules` (peft would also LoRA-wrap pooler.dense).
+        lora_cfg = LoraConfig(
+            r=args.lora_rank,
+            lora_alpha=args.lora_alpha,
+            target_modules=_BGE_M3_LORA_TARGETS,
+            lora_dropout=0.05,
+            bias="none",
+            task_type="FEATURE_EXTRACTION",
+        )
+        model = get_peft_model(base_model, lora_cfg)
     model.to(device)
     model.print_trainable_parameters()
 
@@ -238,14 +268,30 @@ def _train(args):
     log_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(log_dir))
 
-    def _val_loss_now() -> Optional[float]:
-        """Forward-only pass over the full val_loader. Returns mean InfoNCE
-        loss (effective-batch scale, NOT divided by accum). Restores model to
-        train mode on exit."""
+    def _val_loss_now() -> Optional[tuple[float, float, float]]:
+        """Forward-only pass over the full val_loader.
+
+        Returns (mean_loss, top1_accuracy, mean_ndcg) where:
+          - mean_loss: InfoNCE loss on the val triples (effective-batch scale).
+          - top1_accuracy: fraction of val queries whose positive (always at
+            index 0 of the 1+n_negatives candidates) is ranked first.
+          - mean_ndcg: per-query nDCG over the 16 candidates, computed as
+            1/log2(rank_of_positive + 1) and averaged. Direct retrieval-quality
+            proxy that complements loss (loss can plateau while ranking still
+            sharpens, or vice versa). Note: this is nDCG over the val-triple
+            16-candidate set, NOT the full ~50k catalog — useful as a relative
+            indicator of improvement, not directly comparable to the dev
+            nDCG@20 cell that scores against the full catalog.
+
+        Restores model.train() on exit.
+        """
         if val_loader is None:
             return None
         model.eval()
-        losses = []
+        losses: list[float] = []
+        n_correct = 0
+        n_total = 0
+        ndcg_sum = 0.0
         with torch.no_grad():
             for vq, vd, vn in val_loader:
                 vq = {k: v.to(device) for k, v in vq.items()}
@@ -256,9 +302,23 @@ def _train(args):
                     vq_emb = _cls_pool(vq_out.last_hidden_state)
                     vd_emb = _cls_pool(vd_out.last_hidden_state)
                     vloss = _info_nce_loss(vq_emb, vd_emb, vn, args.temperature)
+                # Re-compute per-query top-1 + nDCG from the same embeddings.
+                B = vq_emb.size(0)
+                d_emb_grouped = vd_emb.view(B, vn, -1)
+                scores = torch.einsum("bd,bnd->bn", vq_emb, d_emb_grouped)
+                batch_top1, batch_ndcg = _val_metrics_from_scores(scores)
+                n_correct += int(round(batch_top1 * B))
+                ndcg_sum += float(batch_ndcg) * B
+                n_total += B
                 losses.append(float(vloss.item()))
         model.train()
-        return float(sum(losses) / len(losses)) if losses else None
+        if not losses:
+            return None
+        return (
+            float(sum(losses) / len(losses)),
+            float(n_correct) / max(1, n_total),
+            float(ndcg_sum) / max(1, n_total),
+        )
 
     # Gradient-accumulation training loop. Loss is divided by `accum` so the
     # accumulated gradient matches what a single bs=(per_device*accum) step
@@ -280,6 +340,10 @@ def _train(args):
             loss.backward()
             micro_step += 1
             if micro_step % accum == 0:
+                # Compute (and log) the gradient norm BEFORE optimizer.step()
+                # so we see the unclipped magnitude. max_norm=inf → measure only.
+                grad_norm = float(torch.nn.utils.clip_grad_norm_(
+                    trainable_params, max_norm=float("inf")))
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
@@ -289,41 +353,61 @@ def _train(args):
                     # back by accum to get the effective-batch loss for logging.
                     writer.add_scalar("train/loss", float(loss.item()) * accum, opt_step)
                     writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], opt_step)
+                    writer.add_scalar("train/grad_norm", grad_norm, opt_step)
                     print(f"[train-bi-encoder] opt_step={opt_step}/{total_steps} "
-                          f"loss={float(loss.item()) * accum:.4f}", file=sys.stderr)
+                          f"loss={float(loss.item()) * accum:.4f} "
+                          f"grad_norm={grad_norm:.3f}", file=sys.stderr)
                 # ML-reviewer N1: periodic val InfoNCE every --val-every-n-steps.
                 # Fires AFTER the optimizer step so the loss reflects the latest
                 # parameter update.
                 if val_loader is not None and args.val_every_n_steps > 0 \
                         and opt_step % args.val_every_n_steps == 0:
-                    vl = _val_loss_now()
-                    if vl is not None:
+                    vresult = _val_loss_now()
+                    if vresult is not None:
+                        vl, vacc, vndcg = vresult
                         writer.add_scalar("val/loss", vl, opt_step)
+                        writer.add_scalar("val/top1_acc", vacc, opt_step)
+                        writer.add_scalar("val/ndcg", vndcg, opt_step)
                         improved = vl < best_val_loss
                         if improved:
                             best_val_loss = vl
                         print(f"[train-bi-encoder] opt_step={opt_step}/{total_steps} "
-                              f"val_loss={vl:.4f}"
+                              f"val_loss={vl:.4f} val_top1={vacc:.3f} "
+                              f"val_ndcg={vndcg:.4f}"
                               f"{' (new best)' if improved else ''}",
                               file=sys.stderr)
+        # End-of-epoch checkpoint (warm-startable via --resume-from).
+        if args.checkpoint_every_n_epochs > 0 \
+                and (epoch + 1) % args.checkpoint_every_n_epochs == 0:
+            ckpt_dir = output_dir / f"checkpoint_epoch_{epoch + 1}"
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(str(ckpt_dir))
+            tokenizer.save_pretrained(str(ckpt_dir))
+            print(f"[train-bi-encoder] checkpoint saved → {ckpt_dir} "
+                  f"(use --resume-from {ckpt_dir} to continue from here)",
+                  file=sys.stderr)
     # Flush any partial accumulation at end of training.
     if micro_step % accum != 0:
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad()
 
-    # Final val-loss pass (logged at opt_step so it lands on the same x-axis
+    # Final val pass (logged at opt_step so it lands on the same x-axis
     # as the periodic val curve). Useful when --val-every-n-steps would have
     # missed the very last step of training.
     if val_loader is not None:
-        final_vl = _val_loss_now()
-        if final_vl is not None:
-            writer.add_scalar("val/loss", final_vl, opt_step)
-            improved = final_vl < best_val_loss
+        final_result = _val_loss_now()
+        if final_result is not None:
+            fvl, fvacc, fvndcg = final_result
+            writer.add_scalar("val/loss", fvl, opt_step)
+            writer.add_scalar("val/top1_acc", fvacc, opt_step)
+            writer.add_scalar("val/ndcg", fvndcg, opt_step)
+            improved = fvl < best_val_loss
             if improved:
-                best_val_loss = final_vl
+                best_val_loss = fvl
             print(f"[train-bi-encoder] FINAL opt_step={opt_step} "
-                  f"val_loss={final_vl:.4f} (best={best_val_loss:.4f})",
+                  f"val_loss={fvl:.4f} val_top1={fvacc:.3f} "
+                  f"val_ndcg={fvndcg:.4f} (best_loss={best_val_loss:.4f})",
                   file=sys.stderr)
     writer.close()
     # Save the adapter
@@ -445,6 +529,20 @@ def main():
                    help="Run val pass every N optimizer steps. 0 disables. "
                         "Default 100 → roughly every ~10 minutes on Blackwell "
                         "for the production config.")
+    # Checkpointing / warm-start.
+    p.add_argument("--checkpoint-every-n-epochs", type=int, default=1,
+                   help="Save an adapter checkpoint to "
+                        "{output_dir}/checkpoint_epoch_{N}/ at the end of every "
+                        "Nth epoch. 0 disables. Default 1 (every epoch). "
+                        "Each checkpoint is ~30 MB; use --resume-from <ckpt_dir> "
+                        "later to warm-start another training run from it.")
+    p.add_argument("--resume-from", type=str, default=None,
+                   help="Path to a previously saved adapter checkpoint (e.g. "
+                        "{output_dir}/checkpoint_epoch_3/). When set, loads "
+                        "that adapter as the starting point instead of creating "
+                        "a fresh LoRA. Optimizer + scheduler restart fresh "
+                        "(intentional: clean warmup is healthier than bit-exact "
+                        "continuation; --epochs counts ADDITIONAL epochs).")
     args = p.parse_args()
 
     _train(args)

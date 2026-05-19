@@ -82,6 +82,91 @@ def test_dataset_default_n_negatives_is_15():
     assert len(item["negatives"]) == 15
 
 
+def test_val_metrics_perfect_ranking():
+    """If positive (col 0) has the highest score for every row → top1=1, ndcg=1."""
+    import torch
+    from scripts.train_bi_encoder import _val_metrics_from_scores
+
+    # Each row: positive at index 0 has score 10, others have 0.
+    scores = torch.zeros(4, 16)
+    scores[:, 0] = 10.0
+    top1, ndcg = _val_metrics_from_scores(scores)
+    assert abs(top1 - 1.0) < 1e-6
+    assert abs(ndcg - 1.0) < 1e-6
+
+
+def test_val_metrics_positive_at_rank_2_drops_ndcg():
+    """Positive ranked 2 → ndcg = 1/log2(3) ≈ 0.6309."""
+    import math
+    import torch
+    from scripts.train_bi_encoder import _val_metrics_from_scores
+
+    scores = torch.zeros(1, 16)
+    scores[0, 0] = 5.0   # positive
+    scores[0, 1] = 10.0  # one negative beats it → positive ranks 2
+    top1, ndcg = _val_metrics_from_scores(scores)
+    assert top1 == 0.0
+    assert abs(ndcg - (1.0 / math.log2(3))) < 1e-6
+
+
+def test_val_metrics_positive_at_worst_rank():
+    """Positive ranked last (rank 16) → ndcg = 1/log2(17)."""
+    import math
+    import torch
+    from scripts.train_bi_encoder import _val_metrics_from_scores
+
+    scores = torch.zeros(1, 16)
+    scores[0, 0] = -100.0   # positive lowest
+    scores[0, 1:] = torch.arange(1, 16).float()  # all negs higher
+    top1, ndcg = _val_metrics_from_scores(scores)
+    assert top1 == 0.0
+    assert abs(ndcg - (1.0 / math.log2(17))) < 1e-6
+
+
+def test_val_metrics_mean_over_batch():
+    """Half rows perfect, half worst → top1 = 0.5, ndcg = mean of (1.0, 1/log2(17))."""
+    import math
+    import torch
+    from scripts.train_bi_encoder import _val_metrics_from_scores
+
+    scores = torch.zeros(4, 16)
+    scores[0:2, 0] = 10.0  # rows 0,1: positive has highest score
+    scores[2:4, 0] = -100.0
+    scores[2:4, 1:] = torch.arange(1, 16).float().unsqueeze(0).expand(2, -1)
+    top1, ndcg = _val_metrics_from_scores(scores)
+    assert abs(top1 - 0.5) < 1e-6
+    expected_ndcg = (1.0 + 1.0 + 1.0/math.log2(17) + 1.0/math.log2(17)) / 4
+    assert abs(ndcg - expected_ndcg) < 1e-6
+
+
+def test_cli_has_checkpoint_and_resume_args():
+    """Checkpointing + warm-start CLI flags exist with documented defaults."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+
+    src = inspect.getsource(mod.main)
+    assert "--checkpoint-every-n-epochs" in src, \
+        "missing --checkpoint-every-n-epochs CLI arg"
+    assert "--resume-from" in src, "missing --resume-from CLI arg"
+    assert "--val-every-n-steps" in src, "missing --val-every-n-steps CLI arg"
+    assert "--val-fraction" in src, "missing --val-fraction CLI arg"
+
+
+def test_train_loop_uses_resume_from_when_set():
+    """The _train function branches on args.resume_from to load an existing
+    adapter instead of creating a fresh LoRA. Source-level smoke check so we
+    don't accidentally regress the warm-start path."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+
+    src = inspect.getsource(mod._train)
+    assert "resume_from" in src, "_train does not reference resume_from"
+    assert "PeftModel.from_pretrained" in src, \
+        "_train does not call PeftModel.from_pretrained for warm-start"
+    assert "checkpoint_epoch_" in src, \
+        "_train does not emit per-epoch checkpoints"
+
+
 def test_dataset_train_val_split_sizes_match_fraction():
     """ML-reviewer N1: split='train'/'val' partitions rows by fraction.
     Train + val sizes should equal total; val ~= round(N * val_fraction)."""
