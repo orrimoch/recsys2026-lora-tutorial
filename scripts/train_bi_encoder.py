@@ -28,6 +28,18 @@ Usage:
 """
 from __future__ import annotations
 
+# CRITICAL: set BEFORE any other import. The `tensorboard` package (pulled by
+# torch.utils.tensorboard.SummaryWriter), and `datasets` (which may pull JAX),
+# preallocate GPU memory aggressively by default (TF grabs ~80%, JAX grabs 90%).
+# On Blackwell-95GB this leaves PyTorch with ~20 GB → OOM at bs=32. Setting
+# these env vars early disables that preallocation so PyTorch gets the full GPU.
+import os as _os_early
+_os_early.environ.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
+_os_early.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+_os_early.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+# Also: better PyTorch allocator behavior under fragmentation pressure.
+_os_early.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import argparse
 import json
 import random
