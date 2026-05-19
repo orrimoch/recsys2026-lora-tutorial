@@ -48,8 +48,12 @@ def build_triples_for_row(
     gold_track_id: str,
     neg_track_ids: list[str],
     track_text_map: dict[str, str],
+    query_mode: str = "bge_m3_structured",
 ) -> dict:
     """Build one JSONL triple for a (query, gold, negs) tuple.
+
+    `query_mode` MUST match the deployment YAML's query_preprocessing_mode or
+    the fine-tune is optimized for a distribution the runtime never sees.
 
     Negatives not present in track_text_map are silently dropped (catalog drift guard).
     """
@@ -58,7 +62,7 @@ def build_triples_for_row(
         current_user_query=row.get("current_user_query", ""),
         user_profile=row.get("user_profile_raw"),
         conversation_goal=row.get("conversation_goal"),
-        mode="raw",  # match production's default in build_retrieval_query
+        mode=query_mode,
     )
     return {
         "query": query,
@@ -97,7 +101,11 @@ def _iter_conversation_turns(sessions) -> list[dict[str, Any]]:
             if role == "user":
                 pending_user_query = content
             elif role == "music":
-                if pending_user_query is not None and content:
+                # ML-reviewer I-2: truthy check (NOT `is not None`) so empty-string
+                # user content doesn't produce a degenerate row mapping a blank
+                # [QUERY]:  prefix to a specific track. `"" is not None` was True,
+                # silently injecting noise rows.
+                if pending_user_query and content:
                     rows.append({
                         "session_id": str(session_id),
                         "chat_history": list(chat_history),
@@ -106,7 +114,7 @@ def _iter_conversation_turns(sessions) -> list[dict[str, Any]]:
                         "conversation_goal": conversation_goal,
                         "track_id": content,
                     })
-                if pending_user_query is not None:
+                if pending_user_query:
                     chat_history.append({"role": "user", "content": pending_user_query})
                 chat_history.append({"role": "assistant", "content": content})
                 pending_user_query = None
@@ -128,6 +136,13 @@ def main():
     parser.add_argument("--pool-size", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--max-rows", type=int, default=0, help="Smoke cap; 0 = all")
+    parser.add_argument("--query-mode", type=str, default="bge_m3_structured",
+                        choices=["raw", "last_user", "last_user_with_goal", "bge_m3_structured"],
+                        help="Query format for HN-mining queries AND emitted training "
+                             "queries. MUST match query_preprocessing_mode in the "
+                             "deployment YAML or the fine-tune is optimized for a "
+                             "distribution the runtime never sees. Default "
+                             "bge_m3_structured = matches config 180.")
     args = parser.parse_args()
 
     # Lazy imports — FlagEmbedding has a heavy CUDA-touching init; keeps unit tests fast.
@@ -203,7 +218,7 @@ def main():
                     current_user_query=r.get("current_user_query", ""),
                     user_profile=r.get("user_profile_raw"),
                     conversation_goal=r.get("conversation_goal"),
-                    mode="raw",
+                    mode=args.query_mode,
                 )
                 for r in batch_rows
             ]
@@ -239,7 +254,8 @@ def main():
                 if len(negs) < 2:
                     n_skipped_too_few_negs += 1
                     continue
-                triple = build_triples_for_row(row, gold_tid, negs, track_text_map)
+                triple = build_triples_for_row(row, gold_tid, negs, track_text_map,
+                                                query_mode=args.query_mode)
                 f_out.write(json.dumps(triple) + "\n")
                 n_written += 1
 

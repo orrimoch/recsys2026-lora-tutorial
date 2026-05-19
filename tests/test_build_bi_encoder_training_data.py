@@ -46,6 +46,69 @@ def test_build_triples_for_row_drops_negs_not_in_map():
     assert triple["neg"][0] == "n1"
 
 
+def test_build_triples_for_row_default_mode_is_bge_m3_structured():
+    """B-1 regression: training-time query format MUST match production
+    config 180's query_preprocessing_mode (bge_m3_structured). If this
+    drifts, the fine-tune is optimized for a distribution the runtime
+    never sees → near-zero or negative leaderboard lift after ~10 GPU-hr."""
+    from scripts.build_bi_encoder_training_data import build_triples_for_row
+    row = {
+        "chat_history": [{"role": "user", "content": "I like 70s rock"}],
+        "current_user_query": "play me upbeat",
+        "user_profile_raw": {"age_group": "25-34", "country_code": "US"},
+        "conversation_goal": {"listener_goal": "discover"},
+        "track_id": "t_gold",
+    }
+    triple = build_triples_for_row(
+        row, "t_gold", ["t_neg1"], {"t_gold": "G", "t_neg1": "N1"},
+    )
+    # Default mode must emit the structured 4-block format.
+    assert "[USER]:" in triple["query"], \
+        f"default mode is not bge_m3_structured: {triple['query']!r}"
+    assert "[GOAL]:" in triple["query"]
+    assert "[HISTORY]:" in triple["query"]
+    assert "[QUERY]:" in triple["query"]
+
+
+def test_build_triples_for_row_explicit_raw_mode_still_works():
+    """Back-compat: callers can opt into the old raw mode via query_mode='raw'."""
+    from scripts.build_bi_encoder_training_data import build_triples_for_row
+    row = {
+        "chat_history": [], "current_user_query": "q",
+        "user_profile_raw": None, "conversation_goal": None, "track_id": "t1",
+    }
+    triple = build_triples_for_row(
+        row, "t1", ["n1"], {"t1": "G", "n1": "N"}, query_mode="raw",
+    )
+    assert "[USER]:" not in triple["query"]
+    assert "user: q" in triple["query"]
+
+
+def test_iter_conversation_turns_drops_empty_user_query():
+    """I-2 regression: a 'user' turn with empty content followed by a 'music'
+    turn must NOT produce a degenerate training row (would teach the model
+    to map a blank query to a specific track)."""
+    from scripts.build_bi_encoder_training_data import _iter_conversation_turns
+
+    sessions = [{
+        "session_id": "s1",
+        "user_profile": None,
+        "conversation_goal": None,
+        "conversations": [
+            {"role": "user", "content": ""},          # blank — must be skipped
+            {"role": "music", "content": "track_X"},  # gold
+            {"role": "user", "content": "real query"},
+            {"role": "music", "content": "track_Y"},
+        ],
+    }]
+    rows = _iter_conversation_turns(sessions)
+    # Only ONE row should emit (the real query → track_Y); the blank→track_X
+    # is dropped because its user content was empty.
+    assert len(rows) == 1
+    assert rows[0]["current_user_query"] == "real query"
+    assert rows[0]["track_id"] == "track_Y"
+
+
 def test_build_triples_for_row_query_is_non_trivial():
     """Regression: ensure the query field carries the user's actual content.
 
