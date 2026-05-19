@@ -62,8 +62,10 @@ def test_cls_pool_returns_cls_token_not_mean():
     assert torch.allclose(out[1], torch.tensor([0.0, 1.0]), atol=1e-6)
 
 
-def test_dataset_default_n_negatives_is_7():
-    """C2 regression: spec says train_group_size=8 (1 pos + 7 negs)."""
+def test_dataset_default_n_negatives_is_15():
+    """ML-reviewer I1: spec §6 line 1042 says n_negatives_per_query=15. The bigger
+    per-row contrastive denominator (no cross-row in-batch negs in our InfoNCE)
+    materially improves loss quality vs 7."""
     import json
     from pathlib import Path
     import tempfile
@@ -74,9 +76,10 @@ def test_dataset_default_n_negatives_is_7():
         for r in rows:
             f.write(json.dumps(r) + "\n")
         path = f.name
-    ds = TripleJsonlDataset(Path(path), n_negatives=7, seed=42)
+    # Default n_negatives constructor arg should now be 15 (was 7 pre-ML-review).
+    ds = TripleJsonlDataset(Path(path))
     item = ds[0]
-    assert len(item["negatives"]) == 7
+    assert len(item["negatives"]) == 15
 
 
 def test_dataset_samples_negs_randomly_not_first_n():

@@ -10,7 +10,8 @@ Why a custom loop (not FlagEmbedding's CLI):
 
 Hyperparameters (spec §6):
   - lr 5e-6, per-device bs 2, train_group_size 8 (1 pos + 7 negs),
-    n_negatives_per_query 7 (randomly sampled per epoch from the 15 mined negs),
+    n_negatives_per_query 15 (all mined negs used; tiny per-row denominator hurts
+    contrastive signal — ML reviewer I1, restored from spec §6),
     temperature 0.05, epochs 2, warmup_ratio 0.1.
   - LoRA r=32 alpha=64 over query/key/value/dense projections.
   - bf16 mixed precision via torch.cuda.amp.
@@ -48,7 +49,7 @@ class TripleJsonlDataset:
     Short neg-lists are upsampled by repeated random sampling from the same row.
     """
 
-    def __init__(self, path: str, n_negatives: int = 7, seed: int = 42):
+    def __init__(self, path: str, n_negatives: int = 15, seed: int = 42):
         import json as _json
         self.rows = []
         with open(path) as f:
@@ -164,18 +165,22 @@ def _train(args):
         collate_fn=lambda b: _collate_batch(b, tokenizer, args.query_max_len, args.passage_max_len),
     )
 
-    total_steps = len(loader) * args.epochs
+    # Optimizer steps after grad-accum: total_micro_batches / accum_steps.
+    accum = max(1, int(args.gradient_accumulation_steps))
+    total_micro = len(loader) * args.epochs
+    total_steps = max(1, total_micro // accum)
     # I4: only optimize trainable params (saves ~9GB of AdamW state on a 567M model).
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr)
-    # I2: warmup_ratio 0.1 → 10% linear warmup, then linear decay to zero.
+    # I2: warmup_ratio 0.1 → 10% linear warmup, then linear decay.
+    # N5: end_factor=0.1 (not 0.0) so the final ~10% of steps still updates.
     from torch.optim.lr_scheduler import LinearLR, SequentialLR
     warmup_steps = max(1, int(0.1 * total_steps))
     scheduler = SequentialLR(
         optimizer,
         schedulers=[
             LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps),
-            LinearLR(optimizer, start_factor=1.0, end_factor=0.0,
+            LinearLR(optimizer, start_factor=1.0, end_factor=0.1,
                      total_iters=max(1, total_steps - warmup_steps)),
         ],
         milestones=[warmup_steps],
@@ -187,7 +192,12 @@ def _train(args):
     log_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(log_dir))
 
-    step = 0
+    # Gradient-accumulation training loop. Loss is divided by `accum` so the
+    # accumulated gradient matches what a single bs=(per_device*accum) step
+    # would produce; optimizer steps only every `accum` micro-batches.
+    micro_step = 0
+    opt_step = 0
+    optimizer.zero_grad()
     for epoch in range(args.epochs):
         for q_enc, d_enc, n_per in loader:
             q_enc = {k: v.to(device) for k, v in q_enc.items()}
@@ -197,16 +207,26 @@ def _train(args):
                 d_out = model(**d_enc)
                 q_emb = _cls_pool(q_out.last_hidden_state)
                 d_emb = _cls_pool(d_out.last_hidden_state)
-                loss = _info_nce_loss(q_emb, d_emb, n_per, args.temperature)
-            optimizer.zero_grad()
+                loss = _info_nce_loss(q_emb, d_emb, n_per, args.temperature) / accum
             loss.backward()
-            optimizer.step()
-            scheduler.step()
-            step += 1
-            if step % args.logging_steps == 0:
-                writer.add_scalar("train/loss", float(loss.item()), step)
-                writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], step)
-                print(f"[train-bi-encoder] step={step}/{total_steps} loss={float(loss.item()):.4f}", file=sys.stderr)
+            micro_step += 1
+            if micro_step % accum == 0:
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                opt_step += 1
+                if opt_step % args.logging_steps == 0:
+                    # `loss.item()` is the per-micro-batch contribution; multiply
+                    # back by accum to get the effective-batch loss for logging.
+                    writer.add_scalar("train/loss", float(loss.item()) * accum, opt_step)
+                    writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], opt_step)
+                    print(f"[train-bi-encoder] opt_step={opt_step}/{total_steps} "
+                          f"loss={float(loss.item()) * accum:.4f}", file=sys.stderr)
+    # Flush any partial accumulation at end of training.
+    if micro_step % accum != 0:
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad()
 
     writer.close()
     # Save the adapter
@@ -271,6 +291,20 @@ def _merge_and_push(args):
           sorted(p.name for p in merged_dir.iterdir() if p.name.startswith(("1_", "2_", "modules", "sentence", "config_sentence"))),
           file=sys.stderr)
 
+    # ML-reviewer I3: pin the pool mode in case the upstream BGE-M3 config
+    # ever changes. Training optimizes CLS; if the scaffolding ever ships with
+    # mean-pool, the merged model deploys wrong.
+    import json as _json
+    pool_cfg_path = merged_dir / "1_Pooling" / "config.json"
+    if pool_cfg_path.exists():
+        pool_cfg = _json.loads(pool_cfg_path.read_text())
+        assert pool_cfg.get("pooling_mode_cls_token") is True, (
+            f"BAAI/bge-m3 ST scaffolding shipped with non-CLS pooling: "
+            f"{pool_cfg}. Training used CLS; deploy would mismatch."
+        )
+        print(f"[train-bi-encoder] pooling pinned: CLS=True ({pool_cfg_path})",
+              file=sys.stderr)
+
     hub_target = f"{args.hub_repo}-merged"
     print(f"[train-bi-encoder] uploading merged folder → {hub_target}", file=sys.stderr)
     api = HfApi()
@@ -293,7 +327,12 @@ def main():
     p.add_argument("--lr", type=float, default=5e-6)
     p.add_argument("--epochs", type=int, default=2)
     p.add_argument("--per-device-batch-size", type=int, default=2)
-    p.add_argument("--n-negatives", type=int, default=7)
+    p.add_argument("--n-negatives", type=int, default=15)
+    p.add_argument("--gradient-accumulation-steps", type=int, default=16,
+                   help="Micro-batches accumulated per optimizer step. With "
+                        "per-device-batch-size=2, default 16 → effective batch 32. "
+                        "ML reviewer I2: bs=2 + no in-batch negs → very noisy "
+                        "InfoNCE signal; accumulating recovers a usable denominator.")
     p.add_argument("--temperature", type=float, default=0.05)
     p.add_argument("--query-max-len", type=int, default=512)
     p.add_argument("--passage-max-len", type=int, default=256)
