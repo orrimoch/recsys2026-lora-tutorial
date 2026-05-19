@@ -210,6 +210,50 @@ def test_format_query_text_truncates_history_to_max_turns():
     assert "q" in text
 
 
+def test_format_track_text_unwraps_single_element_lists():
+    """Sub 2 fix: HF catalog returns single-element lists for some fields
+    (e.g. track_name=['A Forbidden Dance']). Must render as plain string,
+    NOT as Python list-repr. Brackets in track text add ~6-8 noise tokens
+    per track that the encoder has to learn to ignore."""
+    from mcrs.retrieval_modules.bge_m3_format import format_track_text
+    text = format_track_text(
+        track_name=["A Forbidden Dance"],
+        artist_name=["Alesana"],
+        album_name=["A Place Where The Sun Is Silent"],
+        release_date=["2011-10-18"],
+        tag_list=["metalcore", "post-hardcore"],
+    )
+    # No Python list brackets in the output.
+    assert "[" not in text and "]" not in text, \
+        f"track text has list-repr brackets: {text!r}"
+    assert "track_name: A Forbidden Dance" in text
+    assert "artist_name: Alesana" in text
+    assert "tag_list: metalcore, post-hardcore" in text
+
+
+def test_format_track_text_handles_multi_element_artist_list():
+    """For genuine multi-element lists (rare but real: collaborations),
+    join with comma rather than rendering list-repr."""
+    from mcrs.retrieval_modules.bge_m3_format import format_track_text
+    text = format_track_text(
+        track_name="Collab Song",
+        artist_name=["Artist A", "Artist B"],
+    )
+    assert "artist_name: Artist A, Artist B" in text
+    assert "[" not in text and "]" not in text
+
+
+def test_format_query_text_default_max_history_is_4():
+    """Sub 2 fix: max_history_turns 6 -> 4. Long [HISTORY]: blocks at 6 turns
+    push p90 query length to 1772 chars, truncating [QUERY]: at the end with
+    max_query_len=384. 4 turns keeps p90 below 1100 chars (within budget)."""
+    import inspect
+    from mcrs.retrieval_modules.bge_m3_format import format_query_text
+    sig = inspect.signature(format_query_text)
+    assert sig.parameters['max_history_turns'].default == 4, \
+        f"format_query_text max_history_turns default should be 4 (Sub 2), got {sig.parameters['max_history_turns'].default}"
+
+
 def test_format_track_text_pins_separator_and_field_order():
     """Exact-string pin for the 5-field track corpus format."""
     from mcrs.retrieval_modules.bge_m3_format import format_track_text

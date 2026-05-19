@@ -724,8 +724,13 @@ def main():
     p.add_argument("--temperature", type=float, default=0.05)
     p.add_argument("--query-max-len", type=int, default=512)
     p.add_argument("--passage-max-len", type=int, default=256)
-    p.add_argument("--lora-rank", type=int, default=32)
-    p.add_argument("--lora-alpha", type=int, default=64)
+    p.add_argument("--lora-rank", type=int, default=64,
+                   help="LoRA rank. Sub 2 default 64 (was 32 in Sub 1). Bumped "
+                        "alongside the 6x data expansion (~50-65k triples) to "
+                        "give more capacity for richer patterns. ~28M trainable "
+                        "params (~5%% of base model).")
+    p.add_argument("--lora-alpha", type=int, default=128,
+                   help="LoRA alpha. Convention is 2*rank (so 128 for r=64).")
     p.add_argument("--logging-steps", type=int, default=50)
     # ML-reviewer I-1: in-batch negatives for stronger contrastive signal.
     p.add_argument("--in-batch-negs", dest="in_batch_negs", action="store_true",

@@ -17,12 +17,28 @@ from typing import Optional
 from mcrs.crs_baseline import build_retrieval_query
 
 
+def _unwrap_field(v):
+    """The HF TalkPlay catalog returns string fields as single-element lists
+    sometimes (e.g. track_name=['A Forbidden Dance'] instead of 'A Forbidden Dance').
+    Unwrap single-element lists to their string value so the formatter doesn't
+    emit Python list-repr brackets in the track text (which add noise tokens
+    the encoder has to learn to ignore)."""
+    if isinstance(v, list):
+        if len(v) == 0:
+            return None
+        if len(v) == 1:
+            return v[0]
+        # Multi-element list: join with comma (rare; e.g. multi-artist tracks).
+        return ", ".join(str(x) for x in v)
+    return v
+
+
 def format_track_text(
-    track_name: str,
-    artist_name: Optional[str] = None,
-    album_name: Optional[str] = None,
-    release_date: Optional[str] = None,
-    tag_list: Optional[list[str]] = None,
+    track_name,
+    artist_name=None,
+    album_name=None,
+    release_date=None,
+    tag_list=None,
 ) -> str:
     """5-field pipe-separated track text for the BGE-M3 corpus.
 
@@ -38,13 +54,26 @@ def format_track_text(
     Missing optional fields render as the field name followed by 'unknown'
     (or empty for `tag_list`) rather than being dropped, so the field
     order and separator count are stable for every row.
+
+    Single-element lists in any field (a known TalkPlay catalog quirk) are
+    unwrapped — so `track_name=['A Forbidden Dance']` renders as
+    `track_name: A Forbidden Dance`, NOT `track_name: ['A Forbidden Dance']`.
     """
-    parts = [f"track_name: {track_name}"]
-    parts.append(f"artist_name: {artist_name or 'unknown'}")
-    parts.append(f"album_name: {album_name or 'unknown'}")
-    parts.append(f"release_date: {release_date or 'unknown'}")
-    if tag_list:
-        parts.append(f"tag_list: {', '.join(tag_list)}")
+    tn = _unwrap_field(track_name) or "unknown"
+    an = _unwrap_field(artist_name) or "unknown"
+    al = _unwrap_field(album_name) or "unknown"
+    rd = _unwrap_field(release_date) or "unknown"
+    parts = [f"track_name: {tn}"]
+    parts.append(f"artist_name: {an}")
+    parts.append(f"album_name: {al}")
+    parts.append(f"release_date: {rd}")
+    # tag_list may be a list of strings (preferred) or a single-element list
+    # wrapping a list (rare). Unwrap once, then join.
+    tags = tag_list
+    if isinstance(tags, list) and len(tags) == 1 and isinstance(tags[0], list):
+        tags = tags[0]
+    if tags:
+        parts.append(f"tag_list: {', '.join(str(t) for t in tags)}")
     else:
         parts.append("tag_list: ")
     return " | ".join(parts)
@@ -55,7 +84,7 @@ def format_query_text(
     current_user_query: str,
     user_profile: Optional[dict] = None,
     conversation_goal: Optional[dict] = None,
-    max_history_turns: int = 6,
+    max_history_turns: int = 4,
     mode: str = "raw",
 ) -> str:
     """Build retriever query by delegating to production's `build_retrieval_query`.

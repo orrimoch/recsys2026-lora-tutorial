@@ -50,7 +50,7 @@ def build_retrieval_query(
     mode: str = "raw",
     goal_text: Optional[str] = None,
     user_profile: Optional[dict] = None,
-    max_history_turns: int = 6,
+    max_history_turns: int = 4,
 ) -> str:
     """Format the conversation history for the retriever.
 
