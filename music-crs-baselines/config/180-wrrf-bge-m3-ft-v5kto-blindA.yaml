@@ -33,7 +33,9 @@ reranker_type: "pro_rank"
 response_prompt_name: "response_generation_cot_user_state"
 response_max_new_tokens: 320
 top_n_for_prompt: 1
-query_preprocessing_mode: "raw"
+# ML-reviewer B1: train + inference both use the structured 4-block format so
+# the fine-tuned encoder sees the same distribution at deploy as during training.
+query_preprocessing_mode: "bge_m3_structured"
 
 use_vllm: false
 
@@ -41,7 +43,12 @@ use_state_tracker: true
 state_tracker_prompt_name: "state_extraction"
 state_tracker_max_new_tokens: 96
 
-use_cmqr: true
+# ML-reviewer B2: CMQR OFF for Submission 1. CMQR rewrites queries into 4 short
+# 3-20-word paraphrases, but training queries are multi-turn structured blobs —
+# leaving CMQR on at inference would break train/inference distribution match.
+# Disabling here gives a clean axis read on whether the fine-tune helped.
+# Re-enable for Sub 2/3 after we know FT contribution in isolation.
+use_cmqr: false
 cmqr_prompt_name: "cmqr_rewrites"
 cmqr_n_rewrites: 4
 cmqr_topk_per_rewrite: 50

@@ -91,9 +91,8 @@ def format_query_text(
     Returns:
         The query string produced by `build_retrieval_query`.
     """
-    # user_profile is intentionally not used — production does not consume it.
-    _ = user_profile
-
+    # user_profile is forwarded only for mode='bge_m3_structured' (the [USER]
+    # block needs age/country/gender). Other modes ignore it.
     trimmed_history = chat_history[-max_history_turns:] if chat_history else []
     session_memory = trimmed_history + [
         {"role": "user", "content": current_user_query}
@@ -107,4 +106,6 @@ def format_query_text(
         session_memory,
         mode=mode,
         goal_text=goal_text,
+        user_profile=user_profile,
+        max_history_turns=max_history_turns,
     )

@@ -49,6 +49,8 @@ def build_retrieval_query(
     session_memory: list[dict],
     mode: str = "raw",
     goal_text: Optional[str] = None,
+    user_profile: Optional[dict] = None,
+    max_history_turns: int = 6,
 ) -> str:
     """Format the conversation history for the retriever.
 
@@ -64,6 +66,17 @@ def build_retrieval_query(
       'last_user_with_goal': last_user + ' || goal: <listener_goal>' when
                            goal_text is provided. Adds light context useful
                            when the user query is short.
+      'bge_m3_structured': Structured 4-block format (plan §Task 4 step 3) used
+                           for the BGE-M3-FT fine-tune + matching inference. Layout:
+                             [USER]: age=<X> country=<Y> gender=<Z>
+                             [GOAL]: <listener_goal>
+                             [HISTORY]: U: <content> | A: <content> | ...
+                             [QUERY]: <last user content>
+                           History is the last `max_history_turns` BEFORE the
+                           final user turn (which becomes [QUERY]). Missing
+                           fields render as 'unknown' or empty rather than
+                           dropping the block — keeps the format positionally
+                           stable so the encoder can learn the sections.
 
     Returns the formatted query string.
     """
@@ -73,10 +86,43 @@ def build_retrieval_query(
         )
     # Last user turn — find it from the END of session_memory.
     last_user = ""
-    for t in reversed(session_memory):
-        if t.get("role") == "user":
-            last_user = str(t.get("content", "")).strip()
+    last_user_idx: Optional[int] = None
+    for i in range(len(session_memory) - 1, -1, -1):
+        if session_memory[i].get("role") == "user":
+            last_user = str(session_memory[i].get("content", "")).strip()
+            last_user_idx = i
             break
+    if mode == "bge_m3_structured":
+        # User block (age/country/gender from user_profile if present).
+        up = user_profile if isinstance(user_profile, dict) else {}
+        age = up.get("age_group") or up.get("age") or "unknown"
+        country = up.get("country_code") or up.get("country") or "unknown"
+        gender = up.get("gender") or "unknown"
+        # History block: turns BEFORE the final user, last N kept.
+        if last_user_idx is None:
+            history_turns = session_memory[-max_history_turns:]
+        else:
+            history_turns = session_memory[:last_user_idx][-max_history_turns:]
+        history_parts = []
+        for t in history_turns:
+            role = t.get("role", "")
+            content = str(t.get("content", "")).strip().replace("|", "/")
+            if role == "user":
+                history_parts.append(f"U: {content}")
+            elif role == "assistant":
+                history_parts.append(f"A: {content}")
+            elif role == "music":
+                # Music-turn content is a track_id; downstream callers may have
+                # already expanded it to metadata, but keep the role marker.
+                history_parts.append(f"A: {content}")
+        history_block = " | ".join(history_parts)
+        goal_block = (goal_text or "").strip()
+        return (
+            f"[USER]: age={age} country={country} gender={gender}\n"
+            f"[GOAL]: {goal_block}\n"
+            f"[HISTORY]: {history_block}\n"
+            f"[QUERY]: {last_user}"
+        )
     if not last_user:
         # Fallback to raw if there's no user turn (shouldn't happen on inference).
         return "\n".join(
@@ -220,7 +266,9 @@ class CRS_BASELINE:
         # champion behaviour. 'last_user' / 'last_user_with_goal' clean the
         # query — strip role prefixes + drop multi-turn assistant/music noise.
         # See build_retrieval_query() above for the modes.
-        if query_preprocessing_mode not in ("raw", "last_user", "last_user_with_goal"):
+        if query_preprocessing_mode not in (
+            "raw", "last_user", "last_user_with_goal", "bge_m3_structured",
+        ):
             raise ValueError(f"unknown query_preprocessing_mode: {query_preprocessing_mode!r}")
         self.query_preprocessing_mode = query_preprocessing_mode
         # Response reranker (exp 026+): sample K responses and pick the best via
@@ -403,10 +451,25 @@ class CRS_BASELINE:
             sys_prompts.append(self._get_system_prompt(user_id))
             cg = data.get('conversation_goal') or {}
             goal_text = (cg.get('listener_goal') or "").strip() or None
+            # bge_m3_structured needs user_profile too; pass it through so the
+            # structured [USER] block renders age/country/gender. Other modes
+            # ignore the kwarg.
+            user_profile_for_query = data.get('user_profile_raw')
+            if isinstance(user_profile_for_query, str):
+                try:
+                    import json as _json
+                    user_profile_for_query = _json.loads(user_profile_for_query)
+                except Exception:
+                    try:
+                        import ast as _ast
+                        user_profile_for_query = _ast.literal_eval(user_profile_for_query)
+                    except Exception:
+                        user_profile_for_query = None
             retrieval_input = build_retrieval_query(
                 session_memory,
                 mode=self.query_preprocessing_mode,
                 goal_text=goal_text,
+                user_profile=user_profile_for_query,
             )
             retrieval_inputs.append(retrieval_input)
             session_memories.append(session_memory)

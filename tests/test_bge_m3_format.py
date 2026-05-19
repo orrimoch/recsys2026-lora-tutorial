@@ -55,6 +55,95 @@ def test_format_query_text_uses_inference_pipeline_format():
     assert "user: Yes, more like that" in text
 
 
+def test_format_query_text_mode_bge_m3_structured_emits_4_blocks():
+    """ML-reviewer B1: structured 4-block format ([USER]/[GOAL]/[HISTORY]/[QUERY])
+    is the spec'd train+inference format for the BGE-M3 fine-tune."""
+    from mcrs.retrieval_modules.bge_m3_format import format_query_text
+    text = format_query_text(
+        chat_history=[
+            {"role": "user", "content": "I like 70s rock"},
+            {"role": "assistant", "content": "How about CSN?"},
+        ],
+        current_user_query="Yes, more like that",
+        user_profile={"age_group": "35-44", "country_code": "US", "gender": "F"},
+        conversation_goal={"listener_goal": "find 70s folk-rock"},
+        mode="bge_m3_structured",
+    )
+    # Four ordered blocks present.
+    assert "[USER]:" in text
+    assert "[GOAL]:" in text
+    assert "[HISTORY]:" in text
+    assert "[QUERY]:" in text
+    # User-block fields rendered.
+    assert "age=35-44" in text
+    assert "country=US" in text
+    assert "gender=F" in text
+    # Goal block carries listener_goal.
+    assert "find 70s folk-rock" in text
+    # History uses U:/A: turn markers and " | " separator (not raw "role: content").
+    assert "U: I like 70s rock" in text
+    assert "A: How about CSN?" in text
+    # Final user turn lands in [QUERY], NOT [HISTORY].
+    assert "[QUERY]: Yes, more like that" in text
+    # The current query must NOT appear in the history section.
+    history_block = text.split("[HISTORY]:")[1].split("[QUERY]:")[0]
+    assert "Yes, more like that" not in history_block
+
+
+def test_format_query_text_bge_m3_structured_missing_fields_render_unknown():
+    """Missing user_profile / goal must still produce all 4 blocks (positional
+    stability lets the encoder learn section boundaries)."""
+    from mcrs.retrieval_modules.bge_m3_format import format_query_text
+    text = format_query_text(
+        chat_history=[],
+        current_user_query="play me jazz",
+        user_profile=None,
+        conversation_goal=None,
+        mode="bge_m3_structured",
+    )
+    assert "[USER]: age=unknown country=unknown gender=unknown" in text
+    assert "[GOAL]: \n" in text or text.rstrip().count("[GOAL]: ") == 1
+    assert "[HISTORY]: " in text
+    assert "[QUERY]: play me jazz" in text
+
+
+def test_build_retrieval_query_bge_m3_structured_caps_history():
+    """[HISTORY] block keeps only the last `max_history_turns` turns BEFORE the
+    final user turn (which becomes [QUERY])."""
+    from mcrs.crs_baseline import build_retrieval_query
+    sm = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"}
+          for i in range(10)]
+    sm.append({"role": "user", "content": "current"})
+    text = build_retrieval_query(
+        sm, mode="bge_m3_structured", goal_text="g",
+        user_profile={"age_group": "25-34"}, max_history_turns=3,
+    )
+    # Only the last 3 PRIOR turns appear in history; earlier ones don't.
+    assert "m7" in text and "m8" in text and "m9" in text
+    assert "m0" not in text and "m1" not in text
+    # Current query is in [QUERY], not [HISTORY].
+    assert "[QUERY]: current" in text
+    assert "current" not in text.split("[HISTORY]:")[1].split("[QUERY]:")[0]
+
+
+def test_build_retrieval_query_bge_m3_structured_sanitizes_pipe_in_content():
+    """User-supplied pipe chars in content must not collide with the ` | ` separator."""
+    from mcrs.crs_baseline import build_retrieval_query
+    sm = [
+        {"role": "user", "content": "I want a | b | c"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "go"},
+    ]
+    text = build_retrieval_query(sm, mode="bge_m3_structured")
+    history = text.split("[HISTORY]:")[1].split("[QUERY]:")[0]
+    # The user content's `|` chars are replaced; only the section separator
+    # ` | ` remains between turns. Count of ` | ` between U: and A:.
+    assert "U: I want a / b / c" in history
+    assert "A: ok" in history
+    # Exactly one ` | ` separator between the two history turns.
+    assert history.count(" | ") == 1
+
+
 def test_format_query_handles_empty_history():
     """First-turn case: chat_history is empty list."""
     from mcrs.retrieval_modules.bge_m3_format import format_query_text
