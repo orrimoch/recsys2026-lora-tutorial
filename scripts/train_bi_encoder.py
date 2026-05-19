@@ -137,6 +137,11 @@ def _train(args):
     # and enable_input_require_grads is required for PEFT compatibility.
     base_model.gradient_checkpointing_enable()
     base_model.enable_input_require_grads()
+    # Training does CLS-pool on last_hidden_state directly (see _cls_pool), so
+    # XLM-RoBERTa's `pooler` submodule is never on the gradient path. Earlier
+    # versions added `modules_to_save=["pooler"]` per spec line 140's wording,
+    # but that wrapped a module the loss never touches AND collided with the
+    # `dense` substring in `target_modules` (peft would also LoRA-wrap pooler.dense).
     lora_cfg = LoraConfig(
         r=args.lora_rank,
         lora_alpha=args.lora_alpha,
@@ -144,7 +149,6 @@ def _train(args):
         lora_dropout=0.05,
         bias="none",
         task_type="FEATURE_EXTRACTION",
-        modules_to_save=["pooler"],  # I1: train pooler head in full precision per spec line 140
     )
     model = get_peft_model(base_model, lora_cfg)
     model.to(device)
@@ -212,7 +216,21 @@ def _train(args):
 
 
 def _merge_and_push(args):
+    """Merge LoRA → base, copy sentence-transformers scaffolding from BAAI/bge-m3
+    so the merged repo deploys with CLS-pool + L2-normalize, then upload the whole
+    folder (not just the HF model files) to the Hub.
+
+    Why the scaffolding copy: training pools `last_hidden_state[:, 0]` (CLS),
+    matching BGE-M3's native head. But `merged.push_to_hub` uploads only the
+    HF AutoModel artifacts. Without `modules.json` + `1_Pooling/` + `2_Normalize/`
+    in the repo, `SentenceTransformer(<hub_repo>)` silently falls back to mean-pool
+    + no-normalize defaults → inference uses mean-pool while training used CLS,
+    destroying the fine-tune signal.
+    """
+    import shutil
+
     import torch
+    from huggingface_hub import HfApi, snapshot_download
     from transformers import AutoModel, AutoTokenizer
     from peft import PeftModel
 
@@ -226,10 +244,38 @@ def _merge_and_push(args):
     tok.save_pretrained(str(merged_dir))
     print(f"[train-bi-encoder] merged → {merged_dir}", file=sys.stderr)
 
+    # Pull only the sentence-transformers scaffolding files from the base repo
+    # (model weights/tokenizer already saved by save_pretrained above).
+    print(f"[train-bi-encoder] copying ST scaffolding from {args.base_model}",
+          file=sys.stderr)
+    st_src = snapshot_download(
+        args.base_model,
+        allow_patterns=[
+            "modules.json",
+            "sentence_bert_config.json",
+            "config_sentence_transformers.json",
+            "1_Pooling/*",
+            "2_Normalize/*",
+        ],
+    )
+    for fname in ("modules.json", "sentence_bert_config.json",
+                  "config_sentence_transformers.json"):
+        src = Path(st_src) / fname
+        if src.exists():
+            shutil.copy(src, merged_dir / fname)
+    for subdir in ("1_Pooling", "2_Normalize"):
+        src = Path(st_src) / subdir
+        if src.is_dir():
+            shutil.copytree(src, merged_dir / subdir, dirs_exist_ok=True)
+    print("[train-bi-encoder] ST scaffolding present:",
+          sorted(p.name for p in merged_dir.iterdir() if p.name.startswith(("1_", "2_", "modules", "sentence", "config_sentence"))),
+          file=sys.stderr)
+
     hub_target = f"{args.hub_repo}-merged"
-    print(f"[train-bi-encoder] pushing to {hub_target}", file=sys.stderr)
-    merged.push_to_hub(hub_target, private=False)
-    tok.push_to_hub(hub_target, private=False)
+    print(f"[train-bi-encoder] uploading merged folder → {hub_target}", file=sys.stderr)
+    api = HfApi()
+    api.create_repo(repo_id=hub_target, exist_ok=True, private=False)
+    api.upload_folder(folder_path=str(merged_dir), repo_id=hub_target, repo_type="model")
     return merged_dir
 
 
