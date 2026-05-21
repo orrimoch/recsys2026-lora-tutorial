@@ -912,6 +912,53 @@ def test_dataset_neg_tids_stay_aligned_under_subsampling(tmp_path):
             f"slot {k}: text {item['negatives'][k]} but tid {item['neg_tids'][k]}"
 
 
+def test_cli_has_seed_flag():
+    """Reproducibility: --seed CLI arg with default 42 (matches the
+    previously-hardcoded values for back-compat)."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+    src = inspect.getsource(mod.main)
+    assert "--seed" in src, "missing --seed CLI flag"
+    assert "default=42" in src, "expected --seed default=42"
+
+
+def test_train_sets_all_random_seeds_before_lora_init():
+    """All four RNGs (python random, numpy, torch CPU, torch CUDA) are seeded
+    at the TOP of _train, BEFORE LoraConfig / get_peft_model — so the LoRA
+    weight init is deterministic. Source inspection."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+    src = inspect.getsource(mod._train)
+    # All four seed lines must appear.
+    assert "_random.seed(args.seed)" in src
+    assert "np.random.seed(args.seed)" in src
+    assert "torch.manual_seed(args.seed)" in src
+    assert "torch.cuda.manual_seed_all(args.seed)" in src
+    # Order check: the seeding block must come BEFORE the actual get_peft_model
+    # CALL (not the import line, which is also `from peft import ... get_peft_model`).
+    seed_idx = src.find("torch.manual_seed(args.seed)")
+    peft_call_idx = src.find("get_peft_model(base_model")
+    assert seed_idx > 0 and peft_call_idx > 0, \
+        f"could not locate both anchors (seed={seed_idx}, peft_call={peft_call_idx})"
+    assert seed_idx < peft_call_idx, \
+        "seeds must be set BEFORE the get_peft_model(...) call so LoRA init is deterministic"
+
+
+def test_train_forwards_seed_to_dataset_and_samplers():
+    """args.seed is forwarded to TripleJsonlDataset + train UserDisjointBatchSampler;
+    val sampler uses args.seed+1 to remain independent of train batch composition."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+    src = inspect.getsource(mod._train)
+    # Dataset constructor calls must pass seed=args.seed.
+    # (Two TripleJsonlDataset calls — train split + val split.)
+    assert src.count("seed=args.seed,") + src.count("seed=args.seed)") >= 3, \
+        "expected args.seed passed to TripleJsonlDataset (×2) + train sampler"
+    # Val sampler offsets by +1 for independence.
+    assert "seed=args.seed + 1" in src, \
+        "val sampler must use args.seed + 1 (not args.seed) to stay independent"
+
+
 def test_train_loop_emits_train_inbatch_ndcg_metric():
     """Quick-iter diagnostic (user request): train loop logs `train/ndcg_inbatch`
     every --logging-steps using the SAME (B, n_per) per-row score matrix that
