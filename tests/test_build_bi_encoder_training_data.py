@@ -212,6 +212,142 @@ def test_build_triples_for_row_neg_tids_filter_matches_neg_filter():
     assert triple["neg_tids"][0] == "t_n1"
 
 
+def test_format_history_music_turn_matches_id_to_metadata():
+    """The builder's history expander must produce BYTE-IDENTICAL output to
+    `mcrs.db_item.music_catalog.MusicCatalogDB.id_to_metadata` so training-
+    time [HISTORY] music turns match Blind-A / devset inference exactly."""
+    from scripts.build_bi_encoder_training_data import _format_history_music_turn
+
+    metadata_dict = {
+        "tk_a14b7": {
+            "track_id": "tk_a14b7",
+            "track_name": ["Hotel California"],
+            "artist_name": ["Eagles"],
+            "album_name": ["Hotel California"],
+        }
+    }
+    corpus_types = ["track_name", "artist_name", "album_name"]
+    out = _format_history_music_turn("tk_a14b7", metadata_dict, corpus_types)
+    # Matches id_to_metadata exactly: track_id prefix, comma+space separator,
+    # lowercased values, fields in corpus_types order.
+    assert out == (
+        "track_id: tk_a14b7, "
+        "track_name: hotel california, "
+        "artist_name: eagles, "
+        "album_name: hotel california"
+    )
+
+
+def test_format_history_music_turn_falls_back_to_raw_id_when_missing():
+    """Catalog drift: a track_id that's not in metadata_dict gets emitted
+    as-is so the row doesn't disappear silently."""
+    from scripts.build_bi_encoder_training_data import _format_history_music_turn
+
+    metadata_dict = {}
+    out = _format_history_music_turn("tk_unknown", metadata_dict,
+                                      ["track_name", "artist_name", "album_name"])
+    assert out == "tk_unknown"
+
+
+def test_iter_conversation_turns_expands_music_history_when_metadata_provided():
+    """Training-history music turns get expanded to id_to_metadata format
+    when metadata_dict is passed — matches Blind-A inference exactly."""
+    from scripts.build_bi_encoder_training_data import _iter_conversation_turns
+
+    sessions = [{
+        "session_id": "s1", "user_id": "u1",
+        "user_profile": None, "conversation_goal": None,
+        "conversations": [
+            {"role": "user",  "content": "play rock"},
+            {"role": "music", "content": "tk_A"},
+            {"role": "user",  "content": "more drums"},
+            {"role": "music", "content": "tk_B"},
+        ],
+    }]
+    metadata_dict = {
+        "tk_A": {"track_id": "tk_A",
+                 "track_name": ["Hotel California"],
+                 "artist_name": ["Eagles"],
+                 "album_name": ["Hotel California"]},
+        "tk_B": {"track_id": "tk_B",
+                 "track_name": ["Free Bird"],
+                 "artist_name": ["Lynyrd Skynyrd"],
+                 "album_name": ["Pronounced Leh-Nerd Skin-Nerd"]},
+    }
+    corpus_types = ["track_name", "artist_name", "album_name"]
+    rows = _iter_conversation_turns(
+        sessions,
+        metadata_dict=metadata_dict,
+        corpus_types=corpus_types,
+    )
+    # Row 0 emits the gold track for the first user→music pair (gold=tk_A,
+    # chat_history empty at the time of emission).
+    # Row 1 emits gold=tk_B with chat_history containing the previous user
+    # turn and the previous music turn (expanded).
+    assert len(rows) == 2
+    # Row 1's chat_history MUST have tk_A expanded to id_to_metadata format.
+    hist = rows[1]["chat_history"]
+    music_turn_content = hist[1]["content"]  # second entry is the music turn
+    assert music_turn_content.startswith("track_id: tk_A"), \
+        f"music turn not expanded: {music_turn_content!r}"
+    assert "track_name: hotel california" in music_turn_content
+    assert "artist_name: eagles" in music_turn_content
+
+
+def test_iter_conversation_turns_keeps_raw_ids_when_no_metadata_provided():
+    """Back-compat: callers (e.g. existing dev-eval cells) that don't pass
+    metadata_dict get the historical behavior (raw track_id in history)."""
+    from scripts.build_bi_encoder_training_data import _iter_conversation_turns
+
+    sessions = [{
+        "session_id": "s1", "user_id": "u1",
+        "user_profile": None, "conversation_goal": None,
+        "conversations": [
+            {"role": "user",  "content": "play rock"},
+            {"role": "music", "content": "tk_A"},
+            {"role": "user",  "content": "more drums"},
+            {"role": "music", "content": "tk_B"},
+        ],
+    }]
+    rows = _iter_conversation_turns(sessions)
+    assert len(rows) == 2
+    # No metadata → raw IDs stay (legacy behavior).
+    assert rows[1]["chat_history"][1]["content"] == "tk_A"
+
+
+def test_iter_conversation_turns_expansion_falls_back_per_id():
+    """A single unknown track_id falls back to the raw ID without breaking
+    the rest of the row."""
+    from scripts.build_bi_encoder_training_data import _iter_conversation_turns
+
+    sessions = [{
+        "session_id": "s1", "user_id": "u1",
+        "user_profile": None, "conversation_goal": None,
+        "conversations": [
+            {"role": "user",  "content": "q1"},
+            {"role": "music", "content": "tk_KNOWN"},
+            {"role": "user",  "content": "q2"},
+            {"role": "music", "content": "tk_UNKNOWN_TO_CATALOG"},
+            {"role": "user",  "content": "q3"},
+            {"role": "music", "content": "tk_KNOWN2"},
+        ],
+    }]
+    metadata_dict = {
+        "tk_KNOWN": {"track_id": "tk_KNOWN", "track_name": ["A"], "artist_name": ["x"], "album_name": ["m"]},
+        "tk_KNOWN2": {"track_id": "tk_KNOWN2", "track_name": ["B"], "artist_name": ["y"], "album_name": ["n"]},
+    }
+    rows = _iter_conversation_turns(
+        sessions, metadata_dict=metadata_dict,
+        corpus_types=["track_name", "artist_name", "album_name"],
+    )
+    # Row 2 has all three music turns in history (gold = tk_KNOWN2).
+    hist = rows[2]["chat_history"]
+    # Known IDs expanded.
+    assert hist[1]["content"].startswith("track_id: tk_KNOWN,")
+    # Unknown ID kept as-is.
+    assert hist[3]["content"] == "tk_UNKNOWN_TO_CATALOG"
+
+
 def test_build_triples_for_row_query_is_non_trivial():
     """Regression: ensure the query field carries the user's actual content.
 

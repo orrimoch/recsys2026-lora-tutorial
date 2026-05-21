@@ -85,24 +85,68 @@ def build_triples_for_row(
     }
 
 
-def _iter_conversation_turns(sessions) -> list[dict[str, Any]]:
+def _format_history_music_turn(
+    track_id: str,
+    metadata_dict: dict,
+    corpus_types: list,
+) -> str:
+    """Mirror `MusicCatalogDB.id_to_metadata` byte-for-byte so the
+    [HISTORY]: music-turn text matches what Blind-A / devset inference
+    feeds the encoder via `chat_history_parser` -> `id_to_metadata`.
+
+    Format (matches mcrs/db_item/music_catalog.py:id_to_metadata):
+        'track_id: <id>, <ct1>: <vals>, <ct2>: <vals>, ...'
+    where each `<vals>` is `", ".join(metadata[ct]).lower()`.
+
+    Falls back to the raw track_id when metadata_dict doesn't have the
+    track (catalog drift). Same fallback shape as `id_to_metadata` would
+    behave under a missing key, except we return the bare ID instead of
+    raising — the train builder shouldn't crash on one stale conv row.
+    """
+    if track_id not in metadata_dict:
+        return track_id
+    md = metadata_dict[track_id]
+    parts = [f"track_id: {track_id}"]
+    for ct in corpus_types:
+        val = md.get(ct)
+        if val is None:
+            joined = ""
+        elif isinstance(val, list):
+            joined = ", ".join(str(v) for v in val)
+        else:
+            joined = str(val)
+        parts.append(f"{ct}: {joined.lower()}")
+    return ", ".join(parts)
+
+
+def _iter_conversation_turns(
+    sessions,
+    metadata_dict: Optional[dict] = None,
+    corpus_types: Optional[list] = None,
+) -> list[dict[str, Any]]:
     """Walk the HF conversation dataset and emit one row per music-recommendation turn.
 
-    Mirrors `mcrs.sid.training_data.build_raw_conversation_pairs`'s iteration
-    logic exactly — at each music turn, emit a tuple carrying chat_history
-    (turns BEFORE this music turn), current_user_query (the most recent user
-    utterance), and gold_track_id (the recommended track at this turn).
+    At each music turn: emit a row carrying chat_history (turns BEFORE this
+    music turn), current_user_query, and gold_track_id.
 
-    Yields dicts with keys: chat_history, current_user_query, user_profile_raw,
-    conversation_goal, track_id, session_id.
+    `metadata_dict` + `corpus_types` (optional): when provided, music turns
+    appended to chat_history are EXPANDED via `_format_history_music_turn`
+    (mirrors `id_to_metadata`). This matches production inference exactly,
+    closing the train/eval feature-parity gap surfaced by the chat_history
+    raw-ID-vs-metadata-text discussion.
+
+    Back-compat: when `metadata_dict` is None, music turns are appended as
+    raw track_ids (legacy behavior; preserves existing dev-eval callers).
+
+    Yields dicts with keys: user_id, session_id, chat_history,
+    current_user_query, user_profile_raw, conversation_goal, track_id.
     """
+    expand_history = metadata_dict is not None and corpus_types is not None
     rows: list[dict[str, Any]] = []
     for sess_idx, session in enumerate(sessions):
         convs = session.get("conversations", [])
         user_profile = session.get("user_profile")
         conversation_goal = session.get("conversation_goal")
-        # Δ1 (§6.5): user_id propagation. user_id is the user-disjoint split
-        # key downstream; carry it on every row.
         user_id = session.get("user_id")
         session_id = (
             session.get("session_id")
@@ -120,8 +164,7 @@ def _iter_conversation_turns(sessions) -> list[dict[str, Any]]:
             elif role == "music":
                 # ML-reviewer I-2: truthy check (NOT `is not None`) so empty-string
                 # user content doesn't produce a degenerate row mapping a blank
-                # [QUERY]:  prefix to a specific track. `"" is not None` was True,
-                # silently injecting noise rows.
+                # [QUERY]:  prefix to a specific track.
                 if pending_user_query and content:
                     rows.append({
                         "user_id": str(user_id) if user_id is not None else None,
@@ -134,7 +177,17 @@ def _iter_conversation_turns(sessions) -> list[dict[str, Any]]:
                     })
                 if pending_user_query:
                     chat_history.append({"role": "user", "content": pending_user_query})
-                chat_history.append({"role": "assistant", "content": content})
+                # Train/inference parity: expand the music-turn track_id into
+                # the same id_to_metadata format that production's
+                # chat_history_parser feeds the encoder. Falls back to raw
+                # track_id when metadata is unavailable (legacy callers).
+                if expand_history:
+                    music_text = _format_history_music_turn(
+                        content, metadata_dict, corpus_types,
+                    )
+                else:
+                    music_text = content
+                chat_history.append({"role": "assistant", "content": music_text})
                 pending_user_query = None
     return rows
 
@@ -175,28 +228,33 @@ def main():
                              "deployment YAML or the fine-tune is optimized for a "
                              "distribution the runtime never sees. Default "
                              "bge_m3_structured = matches config 180.")
+    parser.add_argument("--history-corpus-types", type=str,
+                        default="track_name,artist_name,album_name",
+                        help="Comma-separated catalog fields used to expand "
+                             "[HISTORY]: music-turn IDs into id_to_metadata "
+                             "format at MINING time. Default matches production "
+                             "config 021 (corpus_types: [track_name, artist_name, "
+                             "album_name]). Closes the train/eval feature-parity "
+                             "gap in the [HISTORY] block.")
     args = parser.parse_args()
 
     # Lazy imports — FlagEmbedding has a heavy CUDA-touching init; keeps unit tests fast.
     from datasets import load_dataset
 
-    # 1. Load train conversations and assemble per-music-turn tuples.
-    print(
-        f"[hn-miner] loading conversations from {args.train_conv_hf} (train split)...",
-        file=sys.stderr,
-    )
-    conv_ds = load_dataset(args.train_conv_hf, split="train")
-    train_rows = _iter_conversation_turns(conv_ds)
-    if args.max_rows > 0:
-        train_rows = train_rows[: args.max_rows]
-    print(f"[hn-miner] {len(train_rows)} raw conversation→track pairs", file=sys.stderr)
-
-    # 2. Load track metadata + build text map
+    # 1. Load track metadata FIRST (we need metadata_dict for history
+    #    expansion in step 2). Also build the format_track_text text map
+    #    used as pos/neg payloads.
+    print(f"[hn-miner] loading track metadata from {args.track_meta_hf}", file=sys.stderr)
     track_meta = load_dataset(args.track_meta_hf, split="all_tracks")
+    metadata_dict: dict = {}
     track_ids: list[str] = []
     track_texts: list[str] = []
+    history_corpus_types = [
+        ct.strip() for ct in args.history_corpus_types.split(",") if ct.strip()
+    ]
     for trow in tqdm(track_meta, desc="format tracks"):
         tid = trow["track_id"]
+        metadata_dict[tid] = dict(trow)  # raw row preserved for id_to_metadata mirror
         text = format_track_text(
             track_name=trow.get("track_name", "unknown"),
             artist_name=trow.get("artist_name"),
@@ -207,6 +265,24 @@ def main():
         track_ids.append(tid)
         track_texts.append(text)
     track_text_map = dict(zip(track_ids, track_texts))
+
+    # 2. Load train conversations and assemble per-music-turn tuples.
+    #    metadata_dict + history_corpus_types are threaded in so music turns
+    #    in chat_history get expanded to id_to_metadata format (matches
+    #    Blind-A / devset inference exactly).
+    print(
+        f"[hn-miner] loading conversations from {args.train_conv_hf} (train split); "
+        f"history expansion via id_to_metadata format with corpus_types="
+        f"{history_corpus_types}",
+        file=sys.stderr,
+    )
+    conv_ds = load_dataset(args.train_conv_hf, split="train")
+    train_rows = _iter_conversation_turns(
+        conv_ds, metadata_dict=metadata_dict, corpus_types=history_corpus_types,
+    )
+    if args.max_rows > 0:
+        train_rows = train_rows[: args.max_rows]
+    print(f"[hn-miner] {len(train_rows)} raw conversation→track pairs", file=sys.stderr)
 
     # Validate catalog uniqueness ONCE up-front. `mine_negatives_for_query`
     # raises on duplicates per query; doing it here turns N silent skips into
