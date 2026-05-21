@@ -129,6 +129,89 @@ def test_build_triples_for_row_emits_session_id():
     assert triple["session_id"] == "session_42"
 
 
+def test_iter_conversation_turns_emits_user_id():
+    """Δ1: rows must carry user_id from session['user_id']. Required for
+    user-disjoint train/val split downstream (TripleJsonlDataset.split_key='user_id').
+    Without this propagation, all sessions of one user can leak across train/val."""
+    from scripts.build_bi_encoder_training_data import _iter_conversation_turns
+
+    sessions = [{
+        "session_id": "s_alpha",
+        "user_id": "user_42",
+        "user_profile": None,
+        "conversation_goal": None,
+        "conversations": [
+            {"role": "user", "content": "play rock"},
+            {"role": "music", "content": "track_A"},
+        ],
+    }]
+    rows = _iter_conversation_turns(sessions)
+    assert len(rows) == 1
+    assert "user_id" in rows[0], "rows must carry user_id"
+    assert rows[0]["user_id"] == "user_42"
+
+
+def test_build_triples_for_row_emits_user_id():
+    """Δ1: the JSONL triple carries user_id alongside session_id."""
+    from scripts.build_bi_encoder_training_data import build_triples_for_row
+    row = {
+        "session_id": "session_42",
+        "user_id": "user_99",
+        "chat_history": [{"role": "user", "content": "hi"}],
+        "current_user_query": "play rock",
+        "user_profile_raw": None,
+        "conversation_goal": None,
+        "track_id": "t_gold",
+    }
+    triple = build_triples_for_row(
+        row, "t_gold", ["n1"], {"t_gold": "G", "n1": "N"},
+    )
+    assert "user_id" in triple, "build_triples_for_row must emit user_id"
+    assert triple["user_id"] == "user_99"
+
+
+def test_build_triples_for_row_emits_neg_tids_in_order():
+    """Δ3 issue C (extension per RocketQAv2 / BGE-M3 §3.3): emit neg_tids
+    parallel to neg texts so the in-batch loss can mask the
+    cross-pos-into-neg-slot collision (this query's gold appearing as a
+    hard negative for another query in the batch)."""
+    from scripts.build_bi_encoder_training_data import build_triples_for_row
+    row = {
+        "session_id": "s1", "user_id": "u1",
+        "chat_history": [], "current_user_query": "q",
+        "user_profile_raw": None, "conversation_goal": None,
+        "track_id": "t_gold",
+    }
+    text_map = {"t_gold": "G", "t_n1": "N1", "t_n2": "N2", "t_n3": "N3"}
+    triple = build_triples_for_row(
+        row, "t_gold", ["t_n1", "t_n2", "t_n3"], text_map,
+    )
+    assert "neg_tids" in triple, "must emit neg_tids alongside neg texts"
+    # Order MUST match `neg` exactly so loss-time masking can map slot k → tid.
+    assert triple["neg_tids"] == ["t_n1", "t_n2", "t_n3"]
+    assert triple["neg"] == ["N1", "N2", "N3"]
+
+
+def test_build_triples_for_row_neg_tids_filter_matches_neg_filter():
+    """When a neg's tid is absent from track_text_map (catalog drift), it's
+    dropped from BOTH `neg` and `neg_tids` so their lengths stay equal."""
+    from scripts.build_bi_encoder_training_data import build_triples_for_row
+    row = {
+        "session_id": "s", "user_id": "u",
+        "chat_history": [], "current_user_query": "q",
+        "user_profile_raw": None, "conversation_goal": None,
+        "track_id": "t1",
+    }
+    # t_missing absent from map → must be dropped from BOTH lists.
+    text_map = {"t1": "G", "t_n1": "N1"}
+    triple = build_triples_for_row(
+        row, "t1", ["t_n1", "t_missing"], text_map,
+    )
+    assert len(triple["neg"]) == 1
+    assert len(triple["neg_tids"]) == 1
+    assert triple["neg_tids"][0] == "t_n1"
+
+
 def test_build_triples_for_row_query_is_non_trivial():
     """Regression: ensure the query field carries the user's actual content.
 

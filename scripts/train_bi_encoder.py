@@ -56,31 +56,42 @@ _BGE_M3_LORA_TARGETS = ["query", "key", "value", "dense"]
 class TripleJsonlDataset:
     """Loads JSONL triples produced by scripts/build_bi_encoder_training_data.py.
 
-    Each row: {"query": str, "pos": [str], "neg": [str, ...]}.
-    On __getitem__, returns {"query": str, "positive": str, "negatives": [str]*n_negatives}.
-    Short neg-lists are upsampled by repeated random sampling from the same row.
+    Schema per row (after Δ1):
+      {query, pos:[str], neg:[str,...], pos_tid, user_id, session_id}
+
+    On __getitem__, returns {query, positive, negatives, pos_tid, user_id,
+    session_id}. Negatives are sampled WITHOUT REPLACEMENT from the row's
+    mined neg list (per Δ3 issue E): rows whose `len(neg) < n_negatives`
+    are DROPPED at load time, not padded with repeated negs. This eliminates
+    the upsampling-with-replacement path that inflated negative gradients.
+
+    Train/val split (Δ2): keyed on `split_key` ∈ {"user_id","session_id","row"}.
+    Default "user_id" — every session of a given user lives in exactly one
+    partition (the user-stated contract). Missing values for the chosen key
+    raise loudly; no silent fallback (issue A).
     """
 
     def __init__(self, path: str, n_negatives: int = 15, seed: int = 42,
                  split: str = "all", val_fraction: float = 0.0,
-                 session_disjoint: bool = True):
+                 split_key: str = "user_id"):
         """Args:
-            split: 'all' (default; load every row), 'train' (first 1-val_fraction
-                fraction by shuffled order), or 'val' (last val_fraction).
-            val_fraction: only used when split in ('train','val'). Default 0.0
-                preserves back-compat for callers that want the whole file.
-            seed: governs both the shuffle ordering AND the per-row neg sampling.
-                A fixed seed makes the train/val split deterministic across
-                runs and machines.
-            session_disjoint: if True AND triples carry `session_id` (new builder
-                schema), split by SESSION rather than by row. Without this,
-                row-level shuffling places multiple rows from the same session
-                in both train and val (95%+ session-level leak observed in
-                Sub 1) — val metric becomes mostly memorization rather than
-                true generalization. Default True; only takes effect when
-                session_id field is present in triples.
+            path: JSONL produced by scripts/build_bi_encoder_training_data.py.
+            n_negatives: number of negatives returned per __getitem__ call.
+                Rows with fewer mined negatives than this are DROPPED (issue E).
+            seed: governs both the train/val key shuffle AND per-call neg sampling.
+            split: 'all' (default; load every row), 'train', or 'val'.
+            val_fraction: only used when split ∈ {'train','val'}. Default 0.0
+                preserves back-compat. The §6 hyperparameter table sets 0.10.
+            split_key: 'user_id' (default; users' sessions all in one
+                partition), 'session_id' (legacy), or 'row' (no group
+                semantics — explicit opt-in).
         """
         import json as _json
+        if split_key not in ("user_id", "session_id", "row"):
+            raise ValueError(
+                f"split_key must be one of 'user_id'|'session_id'|'row'; "
+                f"got {split_key!r}"
+            )
         all_rows = []
         with open(path) as f:
             for line in f:
@@ -88,93 +99,240 @@ class TripleJsonlDataset:
                 if not obj.get("pos") or not obj.get("neg"):
                     continue
                 all_rows.append(obj)
+
+        # Issue E (§6.5): drop rows with fewer mined negs than n_negatives.
+        # This eliminates the upsampling-with-replacement path that previously
+        # padded short rows by random.choice — which duplicated negs in the
+        # same row and inflated their gradient.
+        n_neg_req = int(n_negatives)
+        survivors = [r for r in all_rows if len(r["neg"]) >= n_neg_req]
+        n_dropped = len(all_rows) - len(survivors)
+        if n_dropped > 0:
+            pct = 100.0 * n_dropped / max(1, len(all_rows))
+            print(
+                f"[TripleJsonlDataset] DROPPED {n_dropped} rows "
+                f"({pct:.1f}%) with fewer than n_negatives={n_neg_req} "
+                f"mined negatives (issue E: no upsampling with replacement).",
+                file=sys.stderr,
+            )
+            if pct > 5.0:
+                print(
+                    f"[TripleJsonlDataset] WARNING: >5% of rows dropped. "
+                    f"Consider lowering --n-negatives to match the mining "
+                    f"distribution, or re-mine with larger --pool-size.",
+                    file=sys.stderr,
+                )
+        all_rows = survivors
+
         if split == "all":
-            # No val split → no need to shuffle, preserves on-disk order.
             self.rows = all_rows
         elif split in ("train", "val"):
-            # Detect whether session_id is present (new schema). If yes AND
-            # session_disjoint is True, do session-level split. Otherwise
-            # fall back to row-level shuffle (legacy behavior).
-            has_session = all_rows and "session_id" in all_rows[0] and all_rows[0]["session_id"]
-            if session_disjoint and has_session:
-                from collections import defaultdict
-                by_session = defaultdict(list)
-                for r in all_rows:
-                    by_session[str(r["session_id"])].append(r)
-                session_ids = sorted(by_session.keys())  # deterministic starting order
-                shuffle_rng = random.Random(seed)
-                shuffle_rng.shuffle(session_ids)
-                n_val_sessions = int(round(float(val_fraction) * len(session_ids)))
-                n_val_sessions = max(0, min(n_val_sessions, len(session_ids) - 1))
-                if split == "val":
-                    val_sids = session_ids[-n_val_sessions:] if n_val_sessions > 0 else []
-                    self.rows = [r for sid in val_sids for r in by_session[sid]]
-                else:  # train
-                    train_sids = session_ids[:-n_val_sessions] if n_val_sessions > 0 else session_ids
-                    self.rows = [r for sid in train_sids for r in by_session[sid]]
-            else:
-                # Legacy row-level shuffle. Warn if triples have session_id but
-                # caller explicitly disabled session_disjoint.
-                if has_session and not session_disjoint:
-                    print(f"[TripleJsonlDataset] WARNING: triples have session_id "
-                          f"but session_disjoint=False — val split will LEAK "
-                          f"session-level info into train.")
-                shuffle_rng = random.Random(seed)
-                shuffle_rng.shuffle(all_rows)
-                n_val = int(round(float(val_fraction) * len(all_rows)))
-                n_val = max(0, min(n_val, len(all_rows) - 1))
-                if split == "val":
-                    self.rows = all_rows[len(all_rows) - n_val:] if n_val > 0 else []
-                else:  # train
-                    self.rows = all_rows[: len(all_rows) - n_val]
+            self.rows = self._split_by_key(
+                all_rows, split=split, val_fraction=val_fraction,
+                seed=seed, split_key=split_key,
+            )
         else:
-            raise ValueError(f"unknown split: {split!r} (expected 'all'/'train'/'val')")
-        self.n_negatives = int(n_negatives)
+            raise ValueError(
+                f"unknown split: {split!r} (expected 'all'|'train'|'val')"
+            )
+        self.n_negatives = n_neg_req
+        self.split_key = split_key
         self.rng = random.Random(seed)
+
+    @staticmethod
+    def _split_by_key(all_rows, split, val_fraction, seed, split_key):
+        """Issue A fix: inspect EVERY row (not just all_rows[0]) for the
+        split key. Loud-fail when any row is missing it for the chosen
+        split_key — no silent fallback."""
+        from collections import defaultdict
+
+        if split_key == "row":
+            shuffle_rng = random.Random(seed)
+            shuffled = list(all_rows)
+            shuffle_rng.shuffle(shuffled)
+            n_val = int(round(float(val_fraction) * len(shuffled)))
+            n_val = max(0, min(n_val, len(shuffled) - 1))
+            if split == "val":
+                return shuffled[len(shuffled) - n_val:] if n_val > 0 else []
+            return shuffled[: len(shuffled) - n_val]
+
+        # split_key ∈ {"user_id", "session_id"} — check every row.
+        missing = [i for i, r in enumerate(all_rows) if not r.get(split_key)]
+        if missing:
+            raise ValueError(
+                f"split_key={split_key!r} requires every row to carry "
+                f"a non-empty {split_key} field. {len(missing)} rows are "
+                f"missing it (first indices: {missing[:5]}). Re-mine the "
+                f"triples with the latest builder, or pass split_key="
+                f"'session_id' (legacy) or 'row' (no grouping) explicitly."
+            )
+
+        by_key = defaultdict(list)
+        for r in all_rows:
+            by_key[str(r[split_key])].append(r)
+        keys = sorted(by_key.keys())  # deterministic starting order
+        shuffle_rng = random.Random(seed)
+        shuffle_rng.shuffle(keys)
+        n_val_keys = int(round(float(val_fraction) * len(keys)))
+        n_val_keys = max(0, min(n_val_keys, len(keys) - 1))
+        if split == "val":
+            chosen = keys[-n_val_keys:] if n_val_keys > 0 else []
+        else:  # train
+            chosen = keys[:-n_val_keys] if n_val_keys > 0 else keys
+        return [r for k in chosen for r in by_key[k]]
 
     def __len__(self) -> int:
         return len(self.rows)
 
     def __getitem__(self, idx: int) -> dict:
         row = self.rows[idx]
-        negs = list(row["neg"])
-        if len(negs) > self.n_negatives:
-            negs = self.rng.sample(negs, self.n_negatives)
-        elif len(negs) < self.n_negatives:
-            pad_pool = list(negs) if negs else [""]
-            while len(negs) < self.n_negatives:
-                negs.append(self.rng.choice(pad_pool))
+        neg_texts = list(row["neg"])
+        # neg_tids parallel to neg (issue C extension); empty list if legacy.
+        neg_tids = list(row.get("neg_tids") or [])
+        keep_tids = len(neg_tids) == len(neg_texts)
+        # Δ3 (§6.5): WITHOUT-REPLACEMENT sampling, K_data fixed by n_negatives.
+        # Rows with fewer negs than n_negatives were already dropped at __init__.
+        if len(neg_texts) > self.n_negatives:
+            picks = self.rng.sample(range(len(neg_texts)), self.n_negatives)
+            neg_texts = [neg_texts[i] for i in picks]
+            if keep_tids:
+                neg_tids = [neg_tids[i] for i in picks]
         out = {
             "query": row["query"],
             "positive": row["pos"][0],
-            "negatives": negs,
+            "negatives": neg_texts,
         }
-        # pos_tid is optional — older triple files won't have it. Without it,
-        # full-catalog val eval is silently disabled.
-        if "pos_tid" in row:
-            out["pos_tid"] = row["pos_tid"]
+        if keep_tids and neg_tids:
+            out["neg_tids"] = neg_tids
+        # Optional fields surfaced for in-batch mask (issue C) and sampler.
+        for opt_key in ("pos_tid", "user_id", "session_id"):
+            if opt_key in row:
+                out[opt_key] = row[opt_key]
         return out
 
     def pos_tids(self) -> list[str]:
         """All gold track_ids in row order. Returns [] if triples don't carry pos_tid."""
         return [r["pos_tid"] for r in self.rows if "pos_tid" in r]
 
+    def user_ids(self) -> list:
+        """All user_ids in row order; entries may be None for legacy triples."""
+        return [r.get("user_id") for r in self.rows]
+
     def queries(self) -> list[str]:
         """All query strings in row order. Used for full-catalog val eval."""
         return [r["query"] for r in self.rows]
 
 
-def _collate_batch(batch: list[dict], tokenizer, max_q_len: int, max_p_len: int):
+class UserDisjointBatchSampler:
+    """BatchSampler that yields lists of row indices forming batches whose
+    `user_id` values are pairwise distinct (Δ3 issue B fix).
+
+    Constructed from a parallel `row_user_ids` list (one entry per dataset
+    row, in dataset order) + `batch_size` + `seed`. Each iteration over the
+    sampler is one epoch:
+
+      - Every row index is yielded AT MOST ONCE (sampling without replacement).
+      - Each yielded batch contains batch_size distinct users.
+      - When the remaining pool cannot supply `batch_size` distinct users,
+        the residual rows form a final short batch and the epoch ends.
+      - Deterministic via (seed, epoch counter).
+
+    Used as `DataLoader(batch_sampler=...)` — replaces `shuffle=True`.
+    PyTorch-style: implements __iter__ and __len__.
+    """
+
+    def __init__(self, row_user_ids, batch_size: int, seed: int = 42):
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive; got {batch_size}")
+        self._user_ids = list(row_user_ids)
+        if not self._user_ids:
+            raise ValueError("row_user_ids is empty")
+        # Pre-bucket indices by user for fast distinct-user batching.
+        from collections import defaultdict
+        self._by_user = defaultdict(list)
+        for i, uid in enumerate(self._user_ids):
+            if uid is None:
+                raise ValueError(
+                    f"row {i} has user_id=None; UserDisjointBatchSampler "
+                    f"requires every row to carry a non-empty user_id"
+                )
+            self._by_user[uid].append(i)
+        self.batch_size = int(batch_size)
+        self.seed = int(seed)
+        self.epoch = 0
+        # Pre-compute the batch count for __len__: assemble one epoch once
+        # using a probe seed so it matches what __iter__ would emit.
+        self._cached_len = self._count_batches_for_seed(self.seed)
+
+    def _build_epoch(self, epoch_seed: int):
+        """Return the list-of-batches that __iter__ would emit for the
+        given seed. Pulled out so __len__ can match exactly.
+
+        Scheduling: heap-based greedy load-balancing — at each batch we
+        pop the `batch_size` users with the MOST remaining rows. This
+        maximizes batch fullness on imbalanced data (some users have
+        many rows, others few): all batches are full as long as ≥
+        batch_size distinct users still have unassigned rows; the tail
+        may have ragged batches once the active-user count drops below
+        batch_size.
+        """
+        import heapq
+
+        rng = random.Random(epoch_seed)
+        users = list(self._by_user.keys())
+        rng.shuffle(users)
+        queues = {u: list(self._by_user[u]) for u in users}
+        for u in users:
+            rng.shuffle(queues[u])
+        # Heap entries: (-remaining_count, tiebreak, user). Negative count
+        # gives a max-heap by remaining; tiebreak = stable per-user random
+        # value to break ties deterministically without bias toward
+        # insertion order.
+        tiebreaks = {u: rng.random() for u in users}
+        heap = [(-len(queues[u]), tiebreaks[u], u) for u in users if queues[u]]
+        heapq.heapify(heap)
+
+        batches: list[list[int]] = []
+        while heap:
+            picked: list[str] = []
+            while heap and len(picked) < self.batch_size:
+                _, _, u = heapq.heappop(heap)
+                picked.append(u)
+            batch = [queues[u].pop() for u in picked]
+            batches.append(batch)
+            for u in picked:
+                if queues[u]:
+                    heapq.heappush(heap, (-len(queues[u]), tiebreaks[u], u))
+        return batches
+
+    def _count_batches_for_seed(self, seed: int) -> int:
+        return len(self._build_epoch(seed))
+
+    def __iter__(self):
+        epoch_seed = self.seed + self.epoch
+        for batch in self._build_epoch(epoch_seed):
+            yield batch
+        self.epoch += 1
+
+    def __len__(self) -> int:
+        return self._cached_len
+
+
+def _collate_batch(batch: list[dict], q_tokenizer, d_tokenizer,
+                   max_q_len: int, max_p_len: int):
     """Tokenize a list of {query, positive, negatives} rows into tensors.
 
-    Queries truncate from the LEFT so the [QUERY]: block at the end is
-    preserved (it carries the current user turn — the most informative
-    signal). Long queries lose [USER]:/[GOAL]: tokens at the front instead.
-    Docs truncate from the right (default) since track text starts with
-    the most informative field (track_name | artist_name | ...).
-    """
-    import torch
+    Issue G fix (§6.5): takes TWO tokenizer instances — `q_tokenizer`
+    pre-configured with `truncation_side='left'` (preserves the [QUERY]:
+    block at the end, which carries the current user turn), and
+    `d_tokenizer` with `truncation_side='right'` (preserves track_name at
+    the start of the doc text). NO runtime mutation of truncation_side —
+    safe under any DataLoader worker config.
 
+    Returns (q_enc, d_enc, n_per) where n_per = 1 + len(negatives) and
+    `pos_tids` is also returned via the batch metadata for the in-batch
+    false-positive mask (§6.5 issue C).
+    """
     queries = [b["query"] for b in batch]
     # positives + negatives per row → (B * (1 + n_negs)) docs.
     docs: list[str] = []
@@ -183,15 +341,17 @@ def _collate_batch(batch: list[dict], tokenizer, max_q_len: int, max_p_len: int)
         docs.append(b["positive"])
         docs.extend(b["negatives"])
 
-    # Save and swap truncation_side per call. Tokenizers read the attribute
-    # at tokenize() time, so this is thread-safe within a single worker.
-    _original_side = tokenizer.truncation_side
-    tokenizer.truncation_side = "left"
-    q_enc = tokenizer(queries, max_length=max_q_len, padding=True, truncation=True, return_tensors="pt")
-    tokenizer.truncation_side = "right"
-    d_enc = tokenizer(docs, max_length=max_p_len, padding=True, truncation=True, return_tensors="pt")
-    tokenizer.truncation_side = _original_side
+    q_enc = q_tokenizer(queries, max_length=max_q_len, padding=True,
+                        truncation=True, return_tensors="pt")
+    d_enc = d_tokenizer(docs, max_length=max_p_len, padding=True,
+                        truncation=True, return_tensors="pt")
     return q_enc, d_enc, n_per
+
+
+def _extract_pos_tids(batch: list[dict]) -> list:
+    """Pull pos_tid off each row (or None if absent). Used by the masked
+    in-batch loss (§6.5 issue C)."""
+    return [b.get("pos_tid") for b in batch]
 
 
 def _cls_pool(last_hidden: "torch.Tensor") -> "torch.Tensor":
@@ -234,6 +394,8 @@ def _info_nce_loss_in_batch(q_emb: "torch.Tensor", d_emb: "torch.Tensor",
     as a negative for query B, the loss pushes X UP for A and DOWN for B
     simultaneously. In music CRS this happens for popular tracks. Literature
     accepts this — the signal boost (denominator size) dominates the noise.
+    See `_info_nce_loss_in_batch_masked` for the issue-C-aware variant that
+    masks duplicate `pos_tid` collisions.
     """
     import torch
     import torch.nn.functional as F
@@ -242,6 +404,71 @@ def _info_nce_loss_in_batch(q_emb: "torch.Tensor", d_emb: "torch.Tensor",
     # d_emb is already (B * n_per, D) from the collator — no reshape needed.
     scores = (q_emb @ d_emb.T) / temperature      # (B, B * n_per)
     labels = torch.arange(B, device=scores.device) * n_per  # each query's positive idx
+    return F.cross_entropy(scores, labels)
+
+
+def _info_nce_loss_in_batch_masked(q_emb: "torch.Tensor", d_emb: "torch.Tensor",
+                                   n_per: int, temperature: float,
+                                   pos_tids: list,
+                                   neg_tids_per_row=None) -> "torch.Tensor":
+    """In-batch InfoNCE with false-positive collision masking (§6.5 issue C).
+
+    Patches two label-noise modes (both well-known in dense-retrieval
+    literature; cf. RocketQAv2 [Ren et al. EMNLP 2021] and BGE-M3 §3.3):
+
+      (a) **Same-pos-tid collision**: queries i, j (i ≠ j) share the same
+          gold track. The unmasked loss treats query j's positive column
+          j·n_per as a NEGATIVE for query i — pure contradiction.
+      (b) **Cross-pos-into-neg collision**: query i's gold appears as one
+          of query j's mined hard negatives. That negative slot column
+          j·n_per + 1 + k holds query i's own gold embedding, with a high
+          score — inflating query i's denominator.
+
+    Mask: for every cell (i, c) where c is a doc slot belonging to row
+    j ≠ i AND that slot's track_id equals `pos_tids[i]`, set scores[i, c]
+    to `-inf`. Cells on the diagonal (row i's own slots — its positive at
+    i·n_per and its own mined negs at i·n_per+1..) are NEVER touched.
+
+    Falls back to standard in-batch InfoNCE when `pos_tids` is empty or
+    contains any None (legacy triple files without pos_tid). The
+    cross-pos-into-neg mask is additionally gated on `neg_tids_per_row`
+    being present.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    if not pos_tids or any(t is None for t in pos_tids):
+        return _info_nce_loss_in_batch(q_emb, d_emb, n_per, temperature)
+
+    B = q_emb.size(0)
+    K = n_per - 1  # negatives per row
+    scores = (q_emb @ d_emb.T) / temperature      # (B, B * n_per)
+    labels = torch.arange(B, device=scores.device) * n_per
+
+    full_mask = torch.zeros_like(scores, dtype=torch.bool)
+    has_neg_tids = (
+        neg_tids_per_row is not None
+        and len(neg_tids_per_row) == B
+    )
+    for i in range(B):
+        target = pos_tids[i]
+        for j in range(B):
+            if i == j:
+                continue  # never mask own-row slots
+            # (a) same-pos-tid collision → mask col j*n_per for row i.
+            if pos_tids[j] == target:
+                full_mask[i, j * n_per] = True
+            # (b) cross-pos-into-neg collision → mask negs of row j whose
+            #     tid equals target.
+            if has_neg_tids and neg_tids_per_row[j]:
+                ntids_j = neg_tids_per_row[j]
+                for k in range(min(K, len(ntids_j))):
+                    if ntids_j[k] == target:
+                        full_mask[i, j * n_per + 1 + k] = True
+
+    if full_mask.any():
+        scores = scores.masked_fill(full_mask, float("-inf"))
+
     return F.cross_entropy(scores, labels)
 
 
@@ -274,7 +501,16 @@ def _train(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[train-bi-encoder] device={device}", file=sys.stderr)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    # Issue G fix (§6.5): two pre-configured tokenizer instances so collate
+    # never mutates truncation_side at call time. Queries left-truncate
+    # (preserves [QUERY]: block at end); docs right-truncate (preserves
+    # track_name at start).
+    q_tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    q_tokenizer.truncation_side = "left"
+    d_tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    d_tokenizer.truncation_side = "right"
+    # Back-compat alias for any downstream code that still inspects `tokenizer`.
+    tokenizer = d_tokenizer
     base_model = AutoModel.from_pretrained(args.base_model, torch_dtype=torch.bfloat16)
     # Gradient checkpointing recomputes activations on backward → saves
     # memory but costs ~30% wallclock. Worth it at bs=2 on small GPUs;
@@ -313,33 +549,60 @@ def _train(args):
     model.to(device)
     model.print_trainable_parameters()
 
-    # ML-reviewer N1: hold out `val_fraction` of triples for periodic InfoNCE
-    # eval during training. Catches overfitting at epoch 2 without waiting for
-    # the dev-nDCG cell after 6-10 GPU-hr.
+    # ML-reviewer N1 + §6.5 Δ2: user-disjoint train/val split. Every session
+    # of a given user_id lives in exactly one partition.
     train_ds = TripleJsonlDataset(
         args.triples, n_negatives=args.n_negatives,
         split="train" if args.val_fraction > 0 else "all",
         val_fraction=args.val_fraction,
+        split_key=args.split_key,
     )
     val_ds = (TripleJsonlDataset(
         args.triples, n_negatives=args.n_negatives,
         split="val", val_fraction=args.val_fraction,
+        split_key=args.split_key,
     ) if args.val_fraction > 0 else None)
     n_val = len(val_ds) if val_ds is not None else 0
-    print(f"[train-bi-encoder] {len(train_ds)} train triples, {n_val} val triples",
-          file=sys.stderr)
+    print(f"[train-bi-encoder] {len(train_ds)} train triples, {n_val} val triples "
+          f"(split_key={args.split_key!r})", file=sys.stderr)
 
-    # ML-reviewer I-1: route to in-batch-negs InfoNCE (denominator = B * n_per,
-    # standard recipe) or fall back to per-row InfoNCE (denominator = n_per).
+    # Δ3 (§6.5): user-disjoint batch sampler. Each batch contains rows whose
+    # user_id values are pairwise distinct → no false-negative collisions
+    # from same-user batch rows.
+    use_user_sampler = (
+        args.split_key == "user_id"
+        and all(u is not None for u in train_ds.user_ids())
+    )
+    if use_user_sampler:
+        print(f"[train-bi-encoder] batch sampler: UserDisjointBatchSampler "
+              f"(distinct users per batch, without-replacement)", file=sys.stderr)
+    else:
+        print(f"[train-bi-encoder] batch sampler: DataLoader(shuffle=True) "
+              f"(no user grouping; split_key={args.split_key!r})", file=sys.stderr)
+
+    # Δ3 (§6.5) issue C: select the masked vs unmasked in-batch loss.
+    # We always use the masked variant when in_batch_negs is on — it falls
+    # back to unmasked behavior automatically when pos_tids are absent.
     if args.in_batch_negs:
-        _loss_fn = _info_nce_loss_in_batch
-        print(f"[train-bi-encoder] InfoNCE: IN-BATCH negatives "
-              f"(denominator = {args.per_device_batch_size * args.n_negatives} "
+        _loss_uses_mask = True
+        print(f"[train-bi-encoder] InfoNCE: IN-BATCH negatives WITH false-pos "
+              f"collision mask (denominator before mask = "
+              f"{args.per_device_batch_size * (1 + args.n_negatives)} "
               f"per query at bs={args.per_device_batch_size})", file=sys.stderr)
     else:
-        _loss_fn = _info_nce_loss
+        _loss_uses_mask = False
         print(f"[train-bi-encoder] InfoNCE: per-row only "
               f"(denominator = {1 + args.n_negatives} per query)", file=sys.stderr)
+
+    def _loss_fn(q_emb, d_emb, n_per, temperature, pos_tids=None,
+                 neg_tids_per_row=None):
+        if args.in_batch_negs:
+            return _info_nce_loss_in_batch_masked(
+                q_emb, d_emb, n_per, temperature,
+                pos_tids=pos_tids or [],
+                neg_tids_per_row=neg_tids_per_row,
+            )
+        return _info_nce_loss(q_emb, d_emb, n_per, temperature)
 
     # ML-reviewer I-3: full-catalog val nDCG@K. Requires val triples carrying
     # pos_tid (new builder schema). On every --val-full-catalog-every-n-steps
@@ -378,19 +641,47 @@ def _train(args):
               f"val queries, every {args.val_full_catalog_every_n_steps} opt-steps "
               f"(~{len(catalog_tids) / 64 * 0.05:.0f} sec/eval on Blackwell)",
               file=sys.stderr)
-    loader = DataLoader(
-        train_ds,
-        batch_size=args.per_device_batch_size,
-        shuffle=True,
-        num_workers=2,
-        collate_fn=lambda b: _collate_batch(b, tokenizer, args.query_max_len, args.passage_max_len),
-    )
+    # The collate returns (q_enc, d_enc, n_per). We also need pos_tids +
+    # neg_tids out of the raw batch for the masked loss; wrap collate to
+    # return both pieces.
+    def _collate_with_meta(b):
+        q_enc, d_enc, n_per = _collate_batch(
+            b, q_tokenizer, d_tokenizer,
+            args.query_max_len, args.passage_max_len,
+        )
+        meta = {
+            "pos_tids": [row.get("pos_tid") for row in b],
+            "neg_tids_per_row": [row.get("neg_tids") for row in b],
+        }
+        return q_enc, d_enc, n_per, meta
+
+    if use_user_sampler:
+        from torch.utils.data import BatchSampler  # noqa: F401  (type-check pin)
+        train_sampler = UserDisjointBatchSampler(
+            train_ds.user_ids(),
+            batch_size=args.per_device_batch_size,
+            seed=42,
+        )
+        loader = DataLoader(
+            train_ds,
+            batch_sampler=train_sampler,
+            num_workers=2,
+            collate_fn=_collate_with_meta,
+        )
+    else:
+        loader = DataLoader(
+            train_ds,
+            batch_size=args.per_device_batch_size,
+            shuffle=True,
+            num_workers=2,
+            collate_fn=_collate_with_meta,
+        )
     val_loader = (DataLoader(
         val_ds,
         batch_size=args.per_device_batch_size,
         shuffle=False,
         num_workers=0,  # avoid spawning workers we'll only use periodically
-        collate_fn=lambda b: _collate_batch(b, tokenizer, args.query_max_len, args.passage_max_len),
+        collate_fn=_collate_with_meta,
     ) if val_ds is not None and n_val > 0 else None)
 
     # Optimizer steps after grad-accum: total_micro_batches / accum_steps.
@@ -445,7 +736,7 @@ def _train(args):
         n_total = 0
         ndcg_sum = 0.0
         with torch.no_grad():
-            for vq, vd, vn in val_loader:
+            for vq, vd, vn, vmeta in val_loader:
                 vq = {k: v.to(device) for k, v in vq.items()}
                 vd = {k: v.to(device) for k, v in vd.items()}
                 with torch.autocast(device_type="cuda" if device == "cuda" else "cpu", dtype=torch.bfloat16):
@@ -453,7 +744,9 @@ def _train(args):
                     vd_out = model(**vd)
                     vq_emb = _cls_pool(vq_out.last_hidden_state)
                     vd_emb = _cls_pool(vd_out.last_hidden_state)
-                    vloss = _loss_fn(vq_emb, vd_emb, vn, args.temperature)
+                    vloss = _loss_fn(vq_emb, vd_emb, vn, args.temperature,
+                                     pos_tids=vmeta["pos_tids"],
+                                     neg_tids_per_row=vmeta["neg_tids_per_row"])
                 # Re-compute per-query top-1 + nDCG from the same embeddings.
                 B = vq_emb.size(0)
                 d_emb_grouped = vd_emb.view(B, vn, -1)
@@ -477,29 +770,25 @@ def _train(args):
         """Forward-only encode for full-catalog val. Pools at the CLS token
         + L2-normalizes, matching the training-time pooling contract.
 
-        `truncation_side`: 'left' for queries (preserves [QUERY]: block at end),
-        'right' for catalog tracks (preserves track_name at the start).
+        Issue G fix: picks the pre-configured tokenizer (q_tokenizer for
+        'left'-truncate queries, d_tokenizer for 'right'-truncate docs) —
+        no runtime mutation of `truncation_side`.
         """
-        import math as _math
         model.eval()
+        tok = q_tokenizer if truncation_side == "left" else d_tokenizer
         BATCH = max(1, args.val_encode_batch_size)
-        _original_side = tokenizer.truncation_side
-        tokenizer.truncation_side = truncation_side
         out_chunks: list[torch.Tensor] = []
-        try:
-            with torch.no_grad():
-                for i in range(0, len(texts), BATCH):
-                    chunk = texts[i:i + BATCH]
-                    enc = tokenizer(chunk, max_length=max_len, padding=True,
-                                    truncation=True, return_tensors="pt")
-                    enc = {k: v.to(device) for k, v in enc.items()}
-                    with torch.autocast(device_type="cuda" if device == "cuda" else "cpu",
-                                        dtype=torch.bfloat16):
-                        o = model(**enc)
-                    emb = _cls_pool(o.last_hidden_state).float().cpu()
-                    out_chunks.append(emb)
-        finally:
-            tokenizer.truncation_side = _original_side
+        with torch.no_grad():
+            for i in range(0, len(texts), BATCH):
+                chunk = texts[i:i + BATCH]
+                enc = tok(chunk, max_length=max_len, padding=True,
+                          truncation=True, return_tensors="pt")
+                enc = {k: v.to(device) for k, v in enc.items()}
+                with torch.autocast(device_type="cuda" if device == "cuda" else "cpu",
+                                    dtype=torch.bfloat16):
+                    o = model(**enc)
+                emb = _cls_pool(o.last_hidden_state).float().cpu()
+                out_chunks.append(emb)
         model.train()
         return torch.cat(out_chunks, dim=0)
 
@@ -548,7 +837,7 @@ def _train(args):
     best_val_loss = float("inf")
     optimizer.zero_grad()
     for epoch in range(args.epochs):
-        for q_enc, d_enc, n_per in loader:
+        for q_enc, d_enc, n_per, meta in loader:
             q_enc = {k: v.to(device) for k, v in q_enc.items()}
             d_enc = {k: v.to(device) for k, v in d_enc.items()}
             with torch.autocast(device_type="cuda" if device == "cuda" else "cpu", dtype=torch.bfloat16):
@@ -556,7 +845,23 @@ def _train(args):
                 d_out = model(**d_enc)
                 q_emb = _cls_pool(q_out.last_hidden_state)
                 d_emb = _cls_pool(d_out.last_hidden_state)
-                loss = _loss_fn(q_emb, d_emb, n_per, args.temperature) / accum
+                loss = _loss_fn(
+                    q_emb, d_emb, n_per, args.temperature,
+                    pos_tids=meta["pos_tids"],
+                    neg_tids_per_row=meta["neg_tids_per_row"],
+                ) / accum
+                # Free training-side diagnostic: per-row (B, n_per) score
+                # matrix on this micro-batch — the SAME shape that
+                # val/ndcg uses, so train/ndcg_inbatch and val/ndcg are
+                # directly comparable on the TB curve. Used to verify
+                # train/val alignment (no leak signature).
+                with torch.no_grad():
+                    _B_train = q_emb.size(0)
+                    _d_per_row = d_emb.view(_B_train, n_per, -1)
+                    _train_scores = torch.einsum("bd,bnd->bn",
+                                                 q_emb.float(),
+                                                 _d_per_row.float())
+                    _train_top1, _train_ndcg = _val_metrics_from_scores(_train_scores)
             loss.backward()
             micro_step += 1
             if micro_step % accum == 0:
@@ -574,8 +879,11 @@ def _train(args):
                     writer.add_scalar("train/loss", float(loss.item()) * accum, opt_step)
                     writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], opt_step)
                     writer.add_scalar("train/grad_norm", grad_norm, opt_step)
+                    writer.add_scalar("train/top1_inbatch", _train_top1, opt_step)
+                    writer.add_scalar("train/ndcg_inbatch", _train_ndcg, opt_step)
                     print(f"[train-bi-encoder] opt_step={opt_step}/{total_steps} "
                           f"loss={float(loss.item()) * accum:.4f} "
+                          f"train_ndcg={_train_ndcg:.4f} "
                           f"grad_norm={grad_norm:.3f}", file=sys.stderr)
                 # ML-reviewer N1: periodic val InfoNCE every --val-every-n-steps.
                 # Fires AFTER the optimizer step so the loss reflects the latest
@@ -797,11 +1105,20 @@ def main():
     p.add_argument("--val-encode-batch-size", type=int, default=64,
                    help="Batch size for val-time encoding (full catalog + val "
                         "queries). 64 is safe on Blackwell-95GB.")
+    # §6.5 Δ2: user-disjoint train/val split key. Every session of a given
+    # user lives in exactly one partition.
+    p.add_argument("--split-key", type=str, default="user_id",
+                   choices=["user_id", "session_id", "row"],
+                   help="Train/val split key. 'user_id' (default) = strongest "
+                        "leakage discipline; user's sessions all live in one "
+                        "partition. 'session_id' = legacy; 'row' = no group "
+                        "semantics (explicit opt-in for triples lacking ids).")
     # ML-reviewer N1: held-out val InfoNCE during training.
-    p.add_argument("--val-fraction", type=float, default=0.05,
+    # §6.5 issue D: default bumped 0.05 → 0.10 for stable metric.
+    p.add_argument("--val-fraction", type=float, default=0.10,
                    help="Fraction of triples held out from training for periodic "
-                        "val-InfoNCE eval. 0.0 disables val tracking. Default 0.05 "
-                        "(5%% of mined triples; tens to hundreds of rows).")
+                        "val-InfoNCE eval. 0.0 disables val tracking. Default 0.10 "
+                        "(0.05 was too noisy at typical mine sizes).")
     p.add_argument("--val-every-n-steps", type=int, default=100,
                    help="Run val pass every N optimizer steps. 0 disables. "
                         "Default 100 → roughly every ~10 minutes on Blackwell "

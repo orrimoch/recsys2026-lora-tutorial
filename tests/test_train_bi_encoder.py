@@ -23,19 +23,21 @@ def test_triple_jsonl_dataset_yields_query_pos_neg(tmp_path):
     assert len(row["negatives"]) == 15
 
 
-def test_triple_jsonl_dataset_pads_short_neg_list(tmp_path):
-    """When a row has fewer than `n_negatives` negs, it's repeated (don't drop the row)."""
+def test_rows_below_n_negatives_are_dropped(tmp_path):
+    """Issue E (no upsampling with replacement): rows whose mined neg-list is
+    shorter than `n_negatives` are DROPPED at load time, not padded with
+    repeated negs. Repeating negs duplicated their gradient signal."""
     from scripts.train_bi_encoder import TripleJsonlDataset
 
     path = tmp_path / "triples.jsonl"
     with open(path, "w") as f:
-        f.write(json.dumps({"query": "q", "pos": ["p"], "neg": ["n1", "n2"]}) + "\n")
+        f.write(json.dumps({"query": "q_short", "pos": ["p"], "neg": ["n1", "n2"]}) + "\n")
+        f.write(json.dumps({"query": "q_full", "pos": ["p"],
+                            "neg": [f"n{i}" for i in range(15)]}) + "\n")
     ds = TripleJsonlDataset(str(path), n_negatives=15)
-    row = ds[0]
-    assert len(row["negatives"]) == 15
-    # First two are the actual negs; rest are random samples from the same pool.
-    assert "n1" in row["negatives"]
-    assert "n2" in row["negatives"]
+    # Short row (2 negs < 15) must be dropped; only the full one remains.
+    assert len(ds) == 1, f"expected 1 row to survive, got {len(ds)}"
+    assert ds[0]["query"] == "q_full"
 
 
 def test_build_lora_targets_returns_attention_module_names():
@@ -82,18 +84,56 @@ def test_dataset_default_n_negatives_is_15():
     assert len(item["negatives"]) == 15
 
 
-def test_collate_batch_truncates_queries_from_left():
-    """Long queries truncate from the LEFT to preserve [QUERY]: at the end —
-    that block carries the current user turn (most informative). Right
-    truncation would silently cut [QUERY]: for ~10-20% of long queries."""
+def test_collate_uses_two_tokenizers_no_runtime_mutation():
+    """Issue G: _collate_batch must take TWO tokenizer instances (one
+    left-truncate for queries, one right-truncate for docs) and MUST NOT
+    mutate `truncation_side` at call time. Removes fragility under
+    `persistent_workers=True` and any future multi-thread DataLoader path."""
     import inspect
     from scripts import train_bi_encoder as mod
+    sig = inspect.signature(mod._collate_batch)
+    params = list(sig.parameters.keys())
+    # Expect signature like (batch, q_tokenizer, d_tokenizer, max_q_len, max_p_len)
+    assert "q_tokenizer" in params and "d_tokenizer" in params, \
+        f"_collate_batch must accept q_tokenizer + d_tokenizer; got {params}"
     src = inspect.getsource(mod._collate_batch)
-    assert 'truncation_side = "left"' in src or "truncation_side = 'left'" in src, \
-        "_collate_batch should set tokenizer.truncation_side = 'left' for queries"
-    # Doc tokenization should remain right-truncate (default)
-    assert 'truncation_side = "right"' in src or "truncation_side = 'right'" in src, \
-        "_collate_batch should restore truncation_side = 'right' for docs"
+    # No runtime mutation of truncation_side.
+    assert "tokenizer.truncation_side =" not in src, \
+        "_collate_batch must not mutate tokenizer.truncation_side at call time"
+    assert "_original_side" not in src, \
+        "_collate_batch should not need to snapshot/restore truncation_side"
+
+
+def test_collate_passes_left_and_right_tokenizers_through():
+    """Functional behavior: _collate_batch calls q_tokenizer for queries
+    (which is configured left-truncate) and d_tokenizer for docs
+    (right-truncate). We verify by stub tokenizers that record which tokenizer
+    received which texts."""
+    from scripts.train_bi_encoder import _collate_batch
+    import torch
+
+    class StubTok:
+        def __init__(self, side):
+            self.truncation_side = side
+            self.received = []
+        def __call__(self, texts, **kwargs):
+            self.received.append(list(texts))
+            n = len(texts)
+            return {"input_ids": torch.zeros(n, 4, dtype=torch.long),
+                    "attention_mask": torch.ones(n, 4, dtype=torch.long)}
+
+    q_tok = StubTok("left")
+    d_tok = StubTok("right")
+    batch = [{"query": "the question", "positive": "track_A",
+              "negatives": ["track_B", "track_C", "track_D"]}]
+    _collate_batch(batch, q_tok, d_tok, max_q_len=32, max_p_len=32)
+    # q_tokenizer should have been called with exactly the query.
+    assert q_tok.received == [["the question"]]
+    # d_tokenizer should have been called with positive + negatives in order.
+    assert d_tok.received == [["track_A", "track_B", "track_C", "track_D"]]
+    # Neither side mutated post-construction.
+    assert q_tok.truncation_side == "left"
+    assert d_tok.truncation_side == "right"
 
 
 def test_info_nce_loss_in_batch_uses_full_batch_denominator():
@@ -191,63 +231,169 @@ def test_cli_has_in_batch_negs_and_full_catalog_args():
     assert "--track-meta-hf" in src, "missing --track-meta-hf flag"
 
 
-def test_dataset_session_disjoint_split_no_session_overlap():
-    """CRITICAL: Sub 1 had 95% session-level leak in val split (row-shuffle
-    placed multiple turns from same session in both train and val). With
-    session_disjoint=True, NO session can appear in both train and val."""
+def test_user_disjoint_split_no_user_in_both_folds(tmp_path):
+    """Δ2 CRITICAL contract: every session of a given user_id lives in exactly
+    one partition (train OR val). No user_id may appear in both folds."""
     import json
-    import tempfile
     from scripts.train_bi_encoder import TripleJsonlDataset
 
-    # 5 sessions, ~5 rows each = 25 total. Row-shuffle would put rows from
-    # the SAME session in both train and val. Session-disjoint must not.
+    # 5 users × 3 sessions × 5 rows = 75 rows. With user-disjoint, no user
+    # can straddle the train/val boundary.
     rows = []
-    for sid in range(5):
-        for turn in range(5):
-            rows.append({
-                "query": f"session_{sid}_turn_{turn}_query",
-                "pos": [f"track_{sid}_{turn}"],
-                "neg": [f"n{i}" for i in range(15)],
-                "pos_tid": f"track_{sid}_{turn}",
-                "session_id": f"sess_{sid}",
-            })
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+    for u in range(5):
+        for s in range(3):
+            for t in range(5):
+                rows.append({
+                    "query": f"u{u}_s{s}_t{t}",
+                    "pos": [f"p"], "neg": [f"n{i}" for i in range(15)],
+                    "pos_tid": f"track_{u}_{s}_{t}",
+                    "user_id": f"user_{u}",
+                    "session_id": f"sess_{u}_{s}",
+                })
+    path = tmp_path / "triples.jsonl"
+    with open(path, "w") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
-        path = f.name
 
-    train = TripleJsonlDataset(path, split="train", val_fraction=0.4, seed=42,
-                                session_disjoint=True)
-    val = TripleJsonlDataset(path, split="val", val_fraction=0.4, seed=42,
-                              session_disjoint=True)
+    train = TripleJsonlDataset(str(path), split="train", val_fraction=0.4,
+                                seed=42, split_key="user_id")
+    val = TripleJsonlDataset(str(path), split="val", val_fraction=0.4,
+                              seed=42, split_key="user_id")
 
+    train_users = {r["user_id"] for r in train.rows}
+    val_users = {r["user_id"] for r in val.rows}
+    assert train_users.isdisjoint(val_users), \
+        f"user_id leak detected: {train_users & val_users}"
+    # All 75 rows accounted for; user's sessions all on one side.
+    assert len(train) + len(val) == 75
+
+
+def test_user_disjoint_split_also_implies_session_disjoint(tmp_path):
+    """Δ2: user-disjoint is strictly stronger than session-disjoint. If train
+    and val are user-disjoint, no session_id can appear in both either."""
+    import json
+    from scripts.train_bi_encoder import TripleJsonlDataset
+
+    rows = []
+    for u in range(4):
+        for s in range(3):
+            for t in range(4):
+                rows.append({
+                    "query": f"u{u}_s{s}_t{t}",
+                    "pos": ["p"], "neg": [f"n{i}" for i in range(15)],
+                    "user_id": f"user_{u}",
+                    "session_id": f"sess_{u}_{s}",
+                })
+    path = tmp_path / "triples.jsonl"
+    with open(path, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+    train = TripleJsonlDataset(str(path), split="train", val_fraction=0.25,
+                                seed=42, split_key="user_id")
+    val = TripleJsonlDataset(str(path), split="val", val_fraction=0.25,
+                              seed=42, split_key="user_id")
     train_sids = {r["session_id"] for r in train.rows}
     val_sids = {r["session_id"] for r in val.rows}
-    assert train_sids.isdisjoint(val_sids), \
-        f"session leak detected: {train_sids & val_sids} appears in both train and val"
-    # All rows from each session land entirely on one side.
-    assert len(train) + len(val) == 25, \
-        f"expected 25 total rows across splits, got {len(train) + len(val)}"
+    assert train_sids.isdisjoint(val_sids)
 
 
-def test_dataset_session_disjoint_falls_back_to_row_shuffle_without_session_id():
-    """Back-compat: older triples files (no session_id) silently fall back to
-    row-level shuffle so existing callers keep working."""
+def test_user_disjoint_split_fails_loud_when_user_id_missing(tmp_path):
+    """Δ2 issue A fix: when split_key='user_id' but any row is missing
+    user_id, FAIL LOUDLY. No silent fallback to row-shuffle or session_id —
+    that's how the original Sub-1 leak happened."""
     import json
-    import tempfile
+    import pytest
     from scripts.train_bi_encoder import TripleJsonlDataset
 
-    rows = [{"query": f"q{i}", "pos": [f"p{i}"], "neg": [f"n{j}" for j in range(15)]}
-            for i in range(20)]
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False) as f:
+    rows = [
+        {"query": "q1", "pos": ["p"], "neg": [f"n{i}" for i in range(15)],
+         "user_id": "u1", "session_id": "s1"},
+        # Row 2 is missing user_id — should trigger loud failure.
+        {"query": "q2", "pos": ["p"], "neg": [f"n{i}" for i in range(15)],
+         "session_id": "s2"},
+    ]
+    path = tmp_path / "triples.jsonl"
+    with open(path, "w") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
-        path = f.name
-    # session_disjoint=True but no session_id field → falls back to row shuffle.
-    train = TripleJsonlDataset(path, split="train", val_fraction=0.2, seed=42,
-                                session_disjoint=True)
-    val = TripleJsonlDataset(path, split="val", val_fraction=0.2, seed=42,
-                              session_disjoint=True)
+
+    with pytest.raises((ValueError, RuntimeError)) as excinfo:
+        TripleJsonlDataset(str(path), split="train", val_fraction=0.1,
+                           seed=42, split_key="user_id")
+    assert "user_id" in str(excinfo.value).lower()
+
+
+def test_split_key_inspects_all_rows_not_just_first(tmp_path):
+    """Issue A regression: previously `has_session` checked only all_rows[0].
+    A row-0 with empty session_id would silently demote to row-shuffle even
+    if every other row had session_id. Fix: ALL rows must carry the field."""
+    import json
+    import pytest
+    from scripts.train_bi_encoder import TripleJsonlDataset
+
+    # Row 0 has user_id="u1"; row 1 has user_id=None (the "first row OK,
+    # others broken" failure mode).
+    rows = [
+        {"query": "q1", "pos": ["p"], "neg": [f"n{i}" for i in range(15)],
+         "user_id": "u1", "session_id": "s1"},
+        {"query": "q2", "pos": ["p"], "neg": [f"n{i}" for i in range(15)],
+         "user_id": None, "session_id": "s2"},
+    ]
+    path = tmp_path / "triples.jsonl"
+    with open(path, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+    with pytest.raises((ValueError, RuntimeError)):
+        TripleJsonlDataset(str(path), split="train", val_fraction=0.1,
+                           seed=42, split_key="user_id")
+
+
+def test_split_key_session_id_legacy_path_still_works(tmp_path):
+    """Back-compat: callers can opt to split by session_id explicitly when
+    triples lack user_id (legacy mined files)."""
+    import json
+    from scripts.train_bi_encoder import TripleJsonlDataset
+
+    rows = []
+    for s in range(5):
+        for t in range(5):
+            rows.append({
+                "query": f"s{s}_t{t}", "pos": ["p"],
+                "neg": [f"n{i}" for i in range(15)],
+                "session_id": f"sess_{s}",
+            })
+    path = tmp_path / "triples.jsonl"
+    with open(path, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+    train = TripleJsonlDataset(str(path), split="train", val_fraction=0.4,
+                                seed=42, split_key="session_id")
+    val = TripleJsonlDataset(str(path), split="val", val_fraction=0.4,
+                              seed=42, split_key="session_id")
+    train_sids = {r["session_id"] for r in train.rows}
+    val_sids = {r["session_id"] for r in val.rows}
+    assert train_sids.isdisjoint(val_sids)
+
+
+def test_split_key_row_is_explicit_opt_in(tmp_path):
+    """Back-compat: callers with no session_id/user_id MUST explicitly pass
+    split_key='row' — no implicit fallback (per issue A)."""
+    import json
+    from scripts.train_bi_encoder import TripleJsonlDataset
+
+    rows = [{"query": f"q{i}", "pos": [f"p{i}"],
+             "neg": [f"n{j}" for j in range(15)]} for i in range(20)]
+    path = tmp_path / "triples.jsonl"
+    with open(path, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    train = TripleJsonlDataset(str(path), split="train", val_fraction=0.2,
+                                seed=42, split_key="row")
+    val = TripleJsonlDataset(str(path), split="val", val_fraction=0.2,
+                              seed=42, split_key="row")
     assert len(train) + len(val) == 20
 
 
@@ -371,7 +517,8 @@ def test_train_loop_uses_resume_from_when_set():
 
 def test_dataset_train_val_split_sizes_match_fraction():
     """ML-reviewer N1: split='train'/'val' partitions rows by fraction.
-    Train + val sizes should equal total; val ~= round(N * val_fraction)."""
+    Train + val sizes should equal total; val ~= round(N * val_fraction).
+    Uses split_key='row' explicitly because these rows lack user_id."""
     import json
     import tempfile
     from scripts.train_bi_encoder import TripleJsonlDataset
@@ -382,14 +529,15 @@ def test_dataset_train_val_split_sizes_match_fraction():
         for r in rows:
             f.write(json.dumps(r) + "\n")
         path = f.name
-    train = TripleJsonlDataset(path, split="train", val_fraction=0.1)
-    val = TripleJsonlDataset(path, split="val", val_fraction=0.1)
+    train = TripleJsonlDataset(path, split="train", val_fraction=0.1, split_key="row")
+    val = TripleJsonlDataset(path, split="val", val_fraction=0.1, split_key="row")
     assert len(train) + len(val) == 100
     assert len(val) == 10  # round(100 * 0.1)
 
 
 def test_dataset_train_val_split_is_disjoint():
-    """No query should appear in both train and val with the same seed."""
+    """No query should appear in both train and val with the same seed.
+    Uses split_key='row' explicitly because these rows lack user_id."""
     import json
     import tempfile
     from scripts.train_bi_encoder import TripleJsonlDataset
@@ -400,8 +548,8 @@ def test_dataset_train_val_split_is_disjoint():
         for r in rows:
             f.write(json.dumps(r) + "\n")
         path = f.name
-    train = TripleJsonlDataset(path, split="train", val_fraction=0.2, seed=42)
-    val = TripleJsonlDataset(path, split="val", val_fraction=0.2, seed=42)
+    train = TripleJsonlDataset(path, split="train", val_fraction=0.2, seed=42, split_key="row")
+    val = TripleJsonlDataset(path, split="val", val_fraction=0.2, seed=42, split_key="row")
     train_qs = {train[i]["query"] for i in range(len(train))}
     val_qs = {val[i]["query"] for i in range(len(val))}
     assert train_qs.isdisjoint(val_qs)
@@ -443,3 +591,302 @@ def test_dataset_samples_negs_randomly_not_first_n():
     n2 = set(ds2[0]["negatives"])
     # Random samples of 7 from 15 with different seeds should differ.
     assert n1 != n2, "Different seeds should produce different neg samples"
+
+
+# ---------------------------------------------------------------------------
+# §6.5 amendment: UserDisjointBatchSampler + in-batch false-positive mask +
+# CLI plumbing + default-fraction bump (issue D).
+# ---------------------------------------------------------------------------
+
+
+def test_user_disjoint_batch_sampler_unique_users_per_batch():
+    """Δ3 issue B fix: every batch the sampler emits contains rows whose
+    user_ids are pairwise distinct. Same-user collisions cause false negatives
+    in in-batch InfoNCE."""
+    from scripts.train_bi_encoder import UserDisjointBatchSampler
+
+    # 10 users × 3 rows = 30 rows. batch_size=5 → trivially achievable.
+    row_user_ids = [f"u{i // 3}" for i in range(30)]
+    sampler = UserDisjointBatchSampler(row_user_ids, batch_size=5, seed=42)
+    seen_any_batch = False
+    for batch in sampler:
+        seen_any_batch = True
+        users = [row_user_ids[i] for i in batch]
+        assert len(set(users)) == len(users), \
+            f"duplicate users in batch: {users}"
+    assert seen_any_batch, "sampler emitted no batches"
+
+
+def test_user_disjoint_batch_sampler_each_index_at_most_once_per_epoch():
+    """Δ3 without-replacement guarantee: across one full iteration of the
+    sampler (= one epoch), every row index is yielded AT MOST ONCE."""
+    from scripts.train_bi_encoder import UserDisjointBatchSampler
+
+    row_user_ids = [f"u{i // 3}" for i in range(30)]
+    sampler = UserDisjointBatchSampler(row_user_ids, batch_size=5, seed=42)
+    all_indices = []
+    for batch in sampler:
+        all_indices.extend(batch)
+    assert len(all_indices) == len(set(all_indices)), \
+        f"index emitted twice in same epoch: " \
+        f"{[i for i in all_indices if all_indices.count(i) > 1][:5]}"
+    # And every emitted index is in valid range.
+    assert all(0 <= i < 30 for i in all_indices)
+
+
+def test_user_disjoint_batch_sampler_yields_full_batches_when_possible():
+    """Δ3: the sampler should produce batches of `batch_size` whenever the
+    remaining row pool supports it. The final batch may be ragged but no
+    interior batch should be short."""
+    from scripts.train_bi_encoder import UserDisjointBatchSampler
+
+    # 10 users × 4 rows = 40 rows. batch_size=8 → 5 batches of 8 fit perfectly.
+    row_user_ids = [f"u{i // 4}" for i in range(40)]
+    sampler = UserDisjointBatchSampler(row_user_ids, batch_size=8, seed=42)
+    batches = list(sampler)
+    # All batches except possibly the last must have batch_size rows.
+    for batch in batches[:-1]:
+        assert len(batch) == 8, f"interior batch is short: {len(batch)}"
+
+
+def test_user_disjoint_batch_sampler_deterministic_by_seed():
+    """Δ3: same seed + same row_user_ids → same emission order."""
+    from scripts.train_bi_encoder import UserDisjointBatchSampler
+
+    row_user_ids = [f"u{i // 3}" for i in range(30)]
+    s1 = UserDisjointBatchSampler(row_user_ids, batch_size=5, seed=7)
+    s2 = UserDisjointBatchSampler(row_user_ids, batch_size=5, seed=7)
+    assert list(s1) == list(s2)
+    s3 = UserDisjointBatchSampler(row_user_ids, batch_size=5, seed=99)
+    assert list(s1) != list(s3)
+
+
+def test_user_disjoint_batch_sampler_len_matches_emitted():
+    """Δ3: `len(sampler)` is required by PyTorch DataLoader for progress
+    reporting. It must equal the number of batches actually yielded."""
+    from scripts.train_bi_encoder import UserDisjointBatchSampler
+
+    row_user_ids = [f"u{i // 3}" for i in range(30)]
+    sampler = UserDisjointBatchSampler(row_user_ids, batch_size=5, seed=42)
+    emitted = list(sampler)
+    assert len(sampler) == len(emitted)
+
+
+def test_in_batch_loss_masks_duplicate_pos_tid_collisions():
+    """Issue C: when two queries in the batch share the same pos_tid (popular
+    track), the OTHER query's positive column must be masked off this query's
+    denominator. Otherwise the loss says 'push apart' on a track this query
+    actually likes — pure label noise."""
+    import torch
+    from scripts.train_bi_encoder import _info_nce_loss_in_batch_masked
+
+    # B=2, n_per=2. Both queries' positives are the SAME track.
+    q_emb = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+    # docs: [q0_pos, q0_neg, q1_pos, q1_neg]. q0_pos and q1_pos are identical.
+    d_emb = torch.tensor([[1.0, 0.0],   # q0_pos
+                          [0.0, 0.5],   # q0_neg
+                          [1.0, 0.0],   # q1_pos — same track as q0_pos!
+                          [0.0, 0.5]])  # q1_neg
+    pos_tids = ["track_X", "track_X"]   # collision
+
+    # Unmasked baseline: q1_pos at col 2 has identical score as q0_pos at col 0,
+    # which inflates q0's denominator → loss far from zero.
+    from scripts.train_bi_encoder import _info_nce_loss_in_batch
+    loss_unmasked = _info_nce_loss_in_batch(q_emb, d_emb, n_per=2, temperature=1.0)
+    loss_masked = _info_nce_loss_in_batch_masked(
+        q_emb, d_emb, n_per=2, temperature=1.0, pos_tids=pos_tids,
+    )
+    # Masking the collision column should strictly reduce the loss.
+    assert float(loss_masked.item()) < float(loss_unmasked.item()), \
+        f"mask had no effect: masked={loss_masked.item():.4f} vs " \
+        f"unmasked={loss_unmasked.item():.4f}"
+
+
+def test_in_batch_loss_mask_is_noop_when_all_pos_tids_distinct():
+    """Issue C: when no two queries share a pos_tid AND no cross-pos-into-neg
+    collisions, the masked loss is numerically equal to the unmasked in-batch
+    loss."""
+    import torch
+    from scripts.train_bi_encoder import (
+        _info_nce_loss_in_batch, _info_nce_loss_in_batch_masked,
+    )
+    torch.manual_seed(0)
+    q_emb = torch.randn(3, 8)
+    q_emb = q_emb / q_emb.norm(dim=-1, keepdim=True)
+    d_emb = torch.randn(3 * 4, 8)
+    d_emb = d_emb / d_emb.norm(dim=-1, keepdim=True)
+    pos_tids = ["A", "B", "C"]
+    neg_tids_per_row = [["nA1", "nA2", "nA3"],
+                       ["nB1", "nB2", "nB3"],
+                       ["nC1", "nC2", "nC3"]]
+    unmasked = float(_info_nce_loss_in_batch(q_emb, d_emb, n_per=4, temperature=0.1).item())
+    masked = float(_info_nce_loss_in_batch_masked(
+        q_emb, d_emb, n_per=4, temperature=0.1, pos_tids=pos_tids,
+        neg_tids_per_row=neg_tids_per_row,
+    ).item())
+    assert abs(masked - unmasked) < 1e-5, \
+        f"mask perturbed loss when no collisions exist: {masked} vs {unmasked}"
+
+
+def test_in_batch_loss_masks_cross_positive_in_negative_slots():
+    """Issue C (RocketQAv2 / BGE-M3 §3.3 extension): when query i's gold
+    appears in query j's mined neg list (j ≠ i), that negative *slot* in
+    the score matrix must be masked off query i's denominator. Otherwise
+    we're penalizing query i for retrieving its own gold from the wrong
+    row's slot."""
+    import torch
+    from scripts.train_bi_encoder import (
+        _info_nce_loss_in_batch, _info_nce_loss_in_batch_masked,
+    )
+
+    # B=2, n_per=3 (1 pos + 2 negs each).
+    # Doc layout: [q0_pos, q0_neg_0, q0_neg_1, q1_pos, q1_neg_0, q1_neg_1]
+    # Set up so q0's gold = "T0" appears as q1's neg_0 (slot col 4).
+    q_emb = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    d_emb = torch.tensor([[1.0, 0.0],   # q0_pos (= T0)
+                          [0.0, 0.5],   # q0_neg_0 = some-other
+                          [0.0, 0.3],   # q0_neg_1 = some-other
+                          [0.0, 1.0],   # q1_pos (= T1)
+                          [1.0, 0.0],   # q1_neg_0 — SAME embedding as q0_pos!
+                          [0.0, 0.3]])  # q1_neg_1
+    pos_tids = ["T0", "T1"]
+    neg_tids = [["other1", "other2"], ["T0", "other3"]]  # q1's neg_0 = T0
+
+    unmasked = _info_nce_loss_in_batch(q_emb, d_emb, n_per=3, temperature=1.0)
+    masked = _info_nce_loss_in_batch_masked(
+        q_emb, d_emb, n_per=3, temperature=1.0,
+        pos_tids=pos_tids, neg_tids_per_row=neg_tids,
+    )
+    # Without the cross-pos-into-neg mask, query 0 sees col 4 with high score
+    # (it's q0's own gold!) in the denominator, hurting q0's loss.
+    # With the mask, col 4 → -inf for row 0, denominator shrinks, loss drops.
+    assert float(masked.item()) < float(unmasked.item()), \
+        f"cross-pos-into-neg mask had no effect: " \
+        f"masked={masked.item():.4f} vs unmasked={unmasked.item():.4f}"
+
+
+def test_in_batch_loss_mask_never_touches_own_positive_or_own_negs():
+    """Mask invariant: cells (i, c) where c is one of row i's OWN slots
+    (positive at i*n_per OR negatives at i*n_per+1..i*n_per+K) must NEVER
+    be masked, even if a tid collision exists."""
+    import torch
+    from scripts.train_bi_encoder import _info_nce_loss_in_batch_masked
+
+    # Worst case: q0 lists its own gold as a neg of itself (shouldn't happen
+    # in practice, but the mask must not touch own-row slots regardless).
+    q_emb = torch.tensor([[1.0, 0.0]])
+    d_emb = torch.tensor([[1.0, 0.0],   # q0_pos = T0
+                          [0.0, 1.0],   # q0_neg_0
+                          [0.5, 0.5]])  # q0_neg_1
+    pos_tids = ["T0"]
+    neg_tids = [["T0", "other"]]  # row 0's own neg_0 == own gold (pathological)
+    # Loss should be finite (no -inf in the label column or in the row's own negs).
+    loss = _info_nce_loss_in_batch_masked(
+        q_emb, d_emb, n_per=3, temperature=1.0,
+        pos_tids=pos_tids, neg_tids_per_row=neg_tids,
+    )
+    assert torch.isfinite(loss).item(), f"loss is not finite: {loss.item()}"
+
+
+def test_cli_has_split_key_arg():
+    """Δ2: CLI exposes --split-key {user_id,session_id,row}. Default user_id."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+    src = inspect.getsource(mod.main)
+    assert "--split-key" in src, "missing --split-key CLI arg"
+
+
+def test_cli_default_val_fraction_is_one_tenth():
+    """Issue D: the default --val-fraction should be 0.10 (was 0.05 — too few
+    val users at typical mine size to give a stable metric)."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+    src = inspect.getsource(mod.main)
+    # Look for the val-fraction argparse default. Pattern: default=0.10 / 0.1
+    assert "--val-fraction" in src, "missing --val-fraction"
+    # We look for either "0.1" or "0.10" in the same surrounding 200-char window
+    # as the --val-fraction flag.
+    idx = src.find("--val-fraction")
+    window = src[idx:idx + 400]
+    assert "default=0.1" in window, \
+        f"--val-fraction default should be 0.1, not 0.05; saw: {window[:200]!r}"
+
+
+def test_dataset_carries_neg_tids_when_present(tmp_path):
+    """Issue C extension: when triples carry per-neg track_ids, the dataset
+    surfaces `neg_tids` on the row, kept index-aligned with `negatives`
+    after subsampling."""
+    import json
+    from scripts.train_bi_encoder import TripleJsonlDataset
+
+    rows = [{
+        "query": "q", "pos": ["p"],
+        "neg": [f"text_{i}" for i in range(15)],
+        "neg_tids": [f"tid_{i}" for i in range(15)],
+        "pos_tid": "gold", "user_id": "u", "session_id": "s",
+    }]
+    path = tmp_path / "t.jsonl"
+    with open(path, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    ds = TripleJsonlDataset(str(path), n_negatives=15, split_key="row")
+    item = ds[0]
+    assert "neg_tids" in item
+    assert len(item["neg_tids"]) == 15
+    # Order matches negatives.
+    for k, neg_text in enumerate(item["negatives"]):
+        # Find the original index that emitted this text.
+        original_idx = int(neg_text.split("_")[1])
+        assert item["neg_tids"][k] == f"tid_{original_idx}"
+
+
+def test_dataset_neg_tids_stay_aligned_under_subsampling(tmp_path):
+    """When n_negatives < len(row.neg), the dataset subsamples WITHOUT
+    replacement — neg_tids must be subsampled with the SAME indices so they
+    remain aligned with the kept neg texts."""
+    import json
+    from scripts.train_bi_encoder import TripleJsonlDataset
+
+    rows = [{
+        "query": "q", "pos": ["p"],
+        "neg": [f"text_{i}" for i in range(20)],
+        "neg_tids": [f"tid_{i}" for i in range(20)],
+        "pos_tid": "gold", "user_id": "u", "session_id": "s",
+    }]
+    path = tmp_path / "t.jsonl"
+    with open(path, "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+    ds = TripleJsonlDataset(str(path), n_negatives=10, split_key="row", seed=1)
+    item = ds[0]
+    assert len(item["negatives"]) == 10
+    assert len(item["neg_tids"]) == 10
+    for k in range(10):
+        original_idx = int(item["negatives"][k].split("_")[1])
+        assert item["neg_tids"][k] == f"tid_{original_idx}", \
+            f"slot {k}: text {item['negatives'][k]} but tid {item['neg_tids'][k]}"
+
+
+def test_train_loop_emits_train_inbatch_ndcg_metric():
+    """Quick-iter diagnostic (user request): train loop logs `train/ndcg_inbatch`
+    every --logging-steps using the SAME (B, n_per) per-row score matrix that
+    val/ndcg uses. Directly comparable curves on TB; gap = leak signature."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+    src = inspect.getsource(mod._train)
+    assert "train/ndcg_inbatch" in src, \
+        "_train must log train/ndcg_inbatch for train-vs-val alignment check"
+    assert "train/top1_inbatch" in src, \
+        "_train must log train/top1_inbatch alongside ndcg"
+    assert "_val_metrics_from_scores" in src, \
+        "_train must reuse _val_metrics_from_scores for an apples-to-apples curve"
+
+
+def test_dataset_default_split_key_is_user_id():
+    """Δ2: when caller passes split='train' without specifying split_key,
+    the default is 'user_id' (NOT session_id or row)."""
+    import inspect
+    from scripts.train_bi_encoder import TripleJsonlDataset
+    sig = inspect.signature(TripleJsonlDataset.__init__)
+    default = sig.parameters["split_key"].default
+    assert default == "user_id", f"expected split_key default 'user_id', got {default!r}"

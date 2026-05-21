@@ -64,19 +64,23 @@ def build_triples_for_row(
         conversation_goal=row.get("conversation_goal"),
         mode=query_mode,
     )
+    # Filter neg track_ids once so `neg` and `neg_tids` stay index-aligned.
+    kept_neg_tids = [tid for tid in neg_track_ids if tid in track_text_map]
     return {
         "query": query,
         "pos": [track_text_map[gold_track_id]],
-        "neg": [track_text_map[tid] for tid in neg_track_ids if tid in track_text_map],
-        # ML-reviewer I-3: carry the gold track_id so training-time full-catalog
-        # nDCG eval (in train_bi_encoder.py) can score against the actual ~50k
-        # catalog instead of just the 16 mined candidates.
+        "neg": [track_text_map[tid] for tid in kept_neg_tids],
+        # ML-reviewer I-3: gold track_id for full-catalog val nDCG.
         "pos_tid": gold_track_id,
-        # Session-level data leak fix: emit session_id so TripleJsonlDataset can
-        # split val SESSION-disjoint from train. Without this, row-shuffle val
-        # splits create 95%+ session overlap with train -> model memorizes
-        # session-level patterns -> in-training val metric is inflated relative
-        # to true dev generalization (observed: val=0.24 but dev=0.11).
+        # Δ3 issue C extension (RocketQAv2 / BGE-M3 §3.3): per-neg track_ids
+        # parallel to `neg`. Used by `_info_nce_loss_in_batch_masked` to mask
+        # the cross-pos-into-neg-slot collision (this query's gold appearing
+        # as a hard negative for another query in the batch).
+        "neg_tids": kept_neg_tids,
+        # Δ2 (§6.5): user_id is the train/val split key — every session of a
+        # given user lives in exactly one partition. session_id is retained
+        # as the legacy split key and for batch-sampling diagnostics.
+        "user_id": row.get("user_id"),
         "session_id": row.get("session_id"),
     }
 
@@ -97,6 +101,9 @@ def _iter_conversation_turns(sessions) -> list[dict[str, Any]]:
         convs = session.get("conversations", [])
         user_profile = session.get("user_profile")
         conversation_goal = session.get("conversation_goal")
+        # Δ1 (§6.5): user_id propagation. user_id is the user-disjoint split
+        # key downstream; carry it on every row.
+        user_id = session.get("user_id")
         session_id = (
             session.get("session_id")
             or session.get("id")
@@ -117,6 +124,7 @@ def _iter_conversation_turns(sessions) -> list[dict[str, Any]]:
                 # silently injecting noise rows.
                 if pending_user_query and content:
                     rows.append({
+                        "user_id": str(user_id) if user_id is not None else None,
                         "session_id": str(session_id),
                         "chat_history": list(chat_history),
                         "current_user_query": pending_user_query,

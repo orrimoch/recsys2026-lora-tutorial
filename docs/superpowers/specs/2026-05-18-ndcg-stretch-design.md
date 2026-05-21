@@ -197,6 +197,203 @@ pre-computed 1024-dim embedding from 3 fields).
 
 ---
 
+## 6.5. Split + batch composition discipline (amendment 2026-05-21)
+
+This subsection patches gaps surfaced by the Sub-1 leak incident (commit
+`ed18ee2`: in-training val nDCG 0.2425 vs HF dev nDCG 0.1120 — a 0.13 gap
+driven by 95% session overlap between train and val under row-level shuffle).
+The reactive fix added session-disjoint splitting in `TripleJsonlDataset`.
+This amendment formalizes the discipline:
+
+**Split contract (user-stated):** train / val / test partitions are
+**user-disjoint**. Every session belonging to a given `user_id` lives in
+exactly one partition. The HF dataset's `train`/`test` splits are assumed
+user-disjoint (asserted defensively in nb 70 cell 7); the internal
+train→train/val split inside mined triples is enforced by
+`TripleJsonlDataset` keyed on `user_id`.
+
+This amendment addresses three weaknesses the reactive session-disjoint fix
+did not cover (problems table below) AND patches the ML-hygiene issues A–H
+surfaced by end-to-end review (see §6.5.10).
+
+### 6.5.1 Problems being closed
+
+| Problem | Today | Risk |
+|---|---|---|
+| **Val split key is per-session, not per-user.** A single user has ~5 sessions on average; sessions from the same user share that user's taste vocabulary. Session-disjoint val still leaks user-level memorization signal into the val metric. | `TripleJsonlDataset.session_disjoint=True` (post-`ed18ee2`) | Val nDCG remains an over-estimate of generalization. Sub 2 results are read off a still-inflated number. |
+| **Batches are composed by `DataLoader(shuffle=True)`** with no grouping discipline. In-batch InfoNCE treats every other row's positive as a negative; if two batch rows are from the same user, their "false negatives" are real taste collisions — pushing apart tracks that should be near. | `loader = DataLoader(train_ds, shuffle=True, ...)` (`scripts/train_bi_encoder.py:381-387`) | Quietly weakens contrastive signal proportional to (probability two batch rows share a user). At bs=32 and average ~5 rows/user, that probability is non-trivial. |
+| **Effective batch is bound by per-device VRAM.** Recent commit log: `bs=2/accum=16` → `bs=16/accum=2` → `bs=32/accum=1` (OOM at 93/95 GB) → reverted to `bs=16/accum=2`. Effective batch = 32; in-batch denominator ≈ 256 candidates/query. Modern dense-retriever recipes (BGE-M3 paper, GTE, E5) use effective bs ≥ 256 → denom ≥ 4096. | Native PyTorch in-batch InfoNCE in `_info_nce_loss_in_batch` | Contrastive signal is weaker than what published BGE-M3 fine-tunes train against. |
+
+### 6.5.2 Δ1 — Propagate `user_id` through the data pipeline
+
+The HF conversation dataset row carries `user_id` at the session level
+(verified: row keys are `['session_id', 'user_id', 'session_date',
+'user_profile', 'conversation_goal', 'conversations',
+'goal_progress_assessments']`). Today `_iter_conversation_turns` reads
+`session_id` and `user_profile` but drops `user_id`.
+
+**Builder change** (`scripts/build_bi_encoder_training_data.py`):
+- `_iter_conversation_turns` reads `session.get("user_id")` and emits it on
+  each row alongside `session_id`.
+- `build_triples_for_row` emits `user_id` in the JSONL triple, next to
+  `session_id`.
+- JSONL schema gains one field: `user_id`. Back-compat: absent field is
+  treated as `None`.
+
+### 6.5.3 Δ2 — User-disjoint train/val split
+
+**`TripleJsonlDataset` change** (`scripts/train_bi_encoder.py:56`):
+- Replace boolean `session_disjoint` with an explicit `split_key` arg
+  taking values `"user_id"` | `"session_id"` | `"row"`. Default
+  `"user_id"`.
+- Resolution at load time:
+  - If `split_key="user_id"` AND every row carries a non-empty `user_id`
+    → split by user_id.
+  - If `split_key="user_id"` AND any row is missing user_id → **fail
+    loudly** with a message telling the caller to either re-mine triples
+    with the new builder or pass `--split-key session_id` explicitly.
+    No silent fallback (per `feedback_no_data_leakage.md`).
+  - `split_key="session_id"` / `"row"` paths preserve current behavior for
+    legacy triples.
+- Split mechanics are otherwise unchanged: deterministic shuffle on
+  `seed`, val_fraction of the keys go to val, all rows under those keys
+  go to val, remaining rows go to train.
+
+**CLI**: add `--split-key {user_id,session_id,row}` to
+`scripts/train_bi_encoder.py`. Default `user_id`.
+
+### 6.5.4 Δ3 — User-disjoint batch sampler with data-driven without-replacement neg sampling
+
+**Pos/neg ratio K_data** — data-distribution-driven, fixed-for-the-run:
+- At dataset construction, compute the empirical distribution of
+  `len(row["neg"])` across all loaded triples.
+- `K_data = min(args.n_negatives, floor(P05(neg_count)))` where `P05` is
+  the 5th percentile of neg-counts. This is the largest ratio that ≥95% of
+  rows can support without replacement.
+- Rows with `len(row["neg"]) < K_data` are **DROPPED** (logged count).
+  This eliminates the current `random.choice` upsampling-with-replacement
+  path (issue E) which duplicated negs and inflated their gradient.
+- Within each row, `__getitem__` picks the K_data negs via
+  `random.sample(row["neg"], K_data)` — sampling **without replacement**
+  inside the row.
+
+Why "fixed by data distribution": every row contributes exactly 1 pos +
+K_data distinct negs to the in-batch denominator. The denominator size is
+predictable, the contrastive signal is uniform across rows, and no negative
+is reused inside a row.
+
+**New class** `UserDisjointBatchSampler(torch.utils.data.Sampler)`:
+- Constructed from `row_user_ids: list[str]` + `batch_size: int` + `seed: int`.
+- Yields **batches of indices** (it is a `BatchSampler`, not a `Sampler`):
+  each yielded batch is a list of `batch_size` row indices whose
+  `user_id` values are pairwise distinct.
+- Within an epoch, every row index is yielded **at most once** (sampling
+  without replacement). When the remaining row pool can no longer
+  assemble a full batch of distinct users, the residual rows are emitted
+  as a final short batch and the epoch ends.
+- Deterministic via `seed` + epoch counter.
+- Pattern mirrors sentence-transformers' `NoDuplicatesBatchSampler`
+  but keyed on `user_id` instead of row-text identity.
+
+Why distinct-user batches are the right common method: in-batch InfoNCE
+assumes every other row's positive in the batch is a valid negative for
+this row's query. That assumption breaks for two rows from the same user
+(their gold tracks are both "what this user likes" → pushing them apart is
+wrong, and shows up as label noise in the contrastive signal). Ensuring
+pairwise-distinct users per batch is the cheapest standard remedy.
+
+**False-positive mask (issue C)**: even with distinct users per batch, two
+queries can share the same gold `track_id` (e.g., a popular track). The
+in-batch loss treats that as positive for one query and negative for the
+other simultaneously → contradiction. Fix: mask `scores[i, j]` to `-inf`
+where `j` is the positive-column of another query whose `pos_tid` equals
+this query's `pos_tid`. Cheap; requires `pos_tid` available on the batch
+(already on the row via builder's `pos_tid` field).
+
+**Loss / effective batch**: KEEP current `_info_nce_loss_in_batch` at the
+existing effective batch (bs=16, accum=2 → effective 32). CachedMNRL /
+GradCache for effective bs=256 is **out of scope for this amendment**;
+defer to a follow-up. The signal lift from this amendment is hygiene
+(user-disjoint split + within-batch user discipline + no false negatives
++ no upsampling), not denominator size.
+
+### 6.5.5 Hyperparameter table delta
+
+Only rows that change relative to §6 "Hyperparameters". All other rows
+stay as specified.
+
+| Param | §6 value | §6.5 new value | Rationale |
+|---|---|---|---|
+| split_key | implicit `session_id` (post-`ed18ee2`) | **explicit `user_id`** | User's all sessions live in one partition. |
+| neg-per-row ratio K | `--n-negatives 15` with upsampling-with-replacement fallback | **K_data = floor(P05 of neg_count)**, rows below dropped | Fixed by data distribution; without replacement. |
+| batch sampler | `DataLoader(shuffle=True)` | `UserDisjointBatchSampler(batch_size, user_ids, seed)` | Removes same-user false-negative collisions per batch. |
+| in-batch false-positive mask | none | mask same-`pos_tid` positions to `-inf` | Removes popular-track collision contradiction. |
+| `--val-fraction` default | 0.05 | **0.10** | 5% gives ~30 val users at typical mine size — too noisy (issue D). |
+| effective batch size | 32 (bs=16 × accum=2) | unchanged at 32 | CachedMNRL deferred. |
+
+### 6.5.6 Failure modes added to §10 Risk table
+
+| Symptom | Likely cause | Mitigation |
+|---|---|---|
+| Val nDCG still > 0.05 above dev nDCG after fix | User-level memorization remains (e.g., per-user popular tracks dominate); or `user_id` is too coarse and many "users" are actually role-personae shared across data | Inspect per-user row-count distribution; drop top-1% over-represented users |
+| `UserDisjointBatchSampler` exhausts distinct users mid-epoch (epoch shrinks) | Long-tail user count < batch_size | Allow a final ragged batch; if shrink > 5% of epoch, reduce `batch_size` until distinct-user supply is sufficient |
+| K_data drops > 5% of rows | Miner produced highly variable neg counts per row | Re-mine with `pool_size` larger; or lower `--n-negatives` to match the data |
+| Missing `user_id` in some triples after re-mining | Older session row in HF dataset lacks the field | Builder writes `user_id=None`; loader fails loud at `--split-key user_id` (see §6.5.3) |
+| HF train/test split shares user_ids | HF curators didn't enforce user-disjointness across splits | nb 70 cell 7 asserts disjointness and refuses to score if violated — escalate to organizers |
+
+### 6.5.7 Testing additions to §11
+
+| Layer | What | File |
+|---|---|---|
+| Unit | `test_user_id_propagated_into_triples` (builder emits the field) | `tests/test_build_bi_encoder_training_data.py` |
+| Unit | `test_user_disjoint_split_no_user_in_both_folds` | `tests/test_train_bi_encoder.py` |
+| Unit | `test_user_disjoint_split_fails_loud_when_user_id_missing` | `tests/test_train_bi_encoder.py` |
+| Unit | `test_user_disjoint_batch_sampler_unique_users_per_batch` | `tests/test_train_bi_encoder.py` |
+| Unit | `test_user_disjoint_batch_sampler_indices_used_at_most_once` (without-replacement guarantee) | `tests/test_train_bi_encoder.py` |
+| Unit | `test_k_data_computed_from_neg_count_distribution_p05` | `tests/test_train_bi_encoder.py` |
+| Unit | `test_rows_below_k_data_dropped_with_log` | `tests/test_train_bi_encoder.py` |
+| Unit | `test_in_batch_loss_masks_duplicate_pos_tid` (issue C) | `tests/test_train_bi_encoder.py` |
+| Unit | `test_collate_uses_two_tokenizers_no_mutation` (issue G) | `tests/test_train_bi_encoder.py` |
+| Smoke | 100-step training run with new sampler → assert val loss strictly decreases over first 100 opt-steps | nb 70 smoke cell |
+
+### 6.5.8 Files affected
+
+| File | Change scope |
+|---|---|
+| `scripts/build_bi_encoder_training_data.py` | +2 lines (read `user_id` in `_iter_conversation_turns`; emit in `build_triples_for_row`) |
+| `scripts/train_bi_encoder.py` | ~120 lines: `TripleJsonlDataset` split_key generalization + K_data drop (~30), `UserDisjointBatchSampler` class (~40), in-batch false-positive mask (~15), two-tokenizer collate (~15), CLI plumbing (~10), default flag bumps (~5), issue-A loud-fail detection. |
+| `tests/test_build_bi_encoder_training_data.py` | +1 test |
+| `tests/test_train_bi_encoder.py` | +7 tests |
+| `colab/70_train_bi_encoder.ipynb` | Cell 5: fix stale denom comment (issue H), pass `--split-key user_id`, pass `--val-fraction 0.10`. Cell 7: assert HF train↔test session+user disjointness. |
+
+### 6.5.9 Out of scope (this amendment)
+
+- CachedMNRL / GradCache for effective bs ≥ 256 — deferred to a separate
+  amendment once the hygiene fixes here are validated by a clean val/dev gap.
+- Cross-encoder (Stage B) and LightGBM (Stage C) batch composition — they
+  use different loss surfaces; revisit if Stage A diff lifts val/dev gap
+  but Stage B regresses.
+- Curriculum HN mining (RocketQA / ANCE style iterative re-mining).
+  Static mining stays per §6.
+- Replacing the bi-encoder base model. BGE-M3 stays.
+
+### 6.5.10 Concrete ML-hygiene issues being patched (A–H)
+
+End-to-end review surfaced eight issues; this amendment patches all of them.
+
+| # | Severity | Issue | Fix in this amendment |
+|---|---|---|---|
+| A | HIGH | `has_session` check at `train_bi_encoder.py:98` inspects only `all_rows[0]` — empty session_id on row 0 silently falls back to row-shuffle. | Replace with `all(r.get("user_id") for r in all_rows)`; raise loudly if mixed (no silent fallback). |
+| B | HIGH | `DataLoader(shuffle=True)` allows same-user rows in one batch → false negatives in in-batch InfoNCE. | `UserDisjointBatchSampler` (Δ3). |
+| C | MED | Same-track collision: two queries sharing a gold `track_id` → contradictory gradient. | Mask `scores[i, j] = -inf` where `pos_tid[i] == pos_tid[j]` and `j` is another query's positive column. |
+| D | MED | `--val-fraction 0.05` → ~30 val users → noisy metric. | Default bumped to **0.10**. |
+| E | LOW | Short neg-lists upsampled with `random.choice` → duplicate negs in same row, inflated gradient. | K_data fixed by P05 of neg distribution; rows below K_data are **dropped**, not upsampled. |
+| F | LOW | Resume-from intentionally resets optimizer+scheduler. | Acceptable as-is; not changed. |
+| G | LOW | `_collate_batch` mutates `tokenizer.truncation_side` per call. Fragile under `persistent_workers=True`. | Two separate tokenizer instances at training start (one left-truncate for queries, one right-truncate for docs); no mutation. |
+| H | INFO | nb 70 cell 5 comment says "bs=8" but code uses bs=16; denom math stale. | Updated comment. |
+
+---
+
 ## 7. Stage B — BGE-reranker-base cross-encoder fine-tune
 
 ### Model + recipe
