@@ -241,7 +241,16 @@ class UserDisjointBatchSampler:
     PyTorch-style: implements __iter__ and __len__.
     """
 
-    def __init__(self, row_user_ids, batch_size: int, seed: int = 42):
+    def __init__(self, row_user_ids, batch_size: int, seed: int = 42,
+                 fixed_seed: bool = False):
+        """Args:
+            fixed_seed: if True, the sampler does NOT advance its epoch
+                counter on iteration → every `list(sampler)` call yields
+                IDENTICAL batches. Used by val_loader so val_loss is
+                directly comparable across opt-steps (same composition,
+                model is the only variable). Train_loader leaves this
+                False so train batches change across epochs (standard SGD).
+        """
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive; got {batch_size}")
         self._user_ids = list(row_user_ids)
@@ -259,6 +268,7 @@ class UserDisjointBatchSampler:
             self._by_user[uid].append(i)
         self.batch_size = int(batch_size)
         self.seed = int(seed)
+        self.fixed_seed = bool(fixed_seed)
         self.epoch = 0
         # Pre-compute the batch count for __len__: assemble one epoch once
         # using a probe seed so it matches what __iter__ would emit.
@@ -309,10 +319,17 @@ class UserDisjointBatchSampler:
         return len(self._build_epoch(seed))
 
     def __iter__(self):
-        epoch_seed = self.seed + self.epoch
-        for batch in self._build_epoch(epoch_seed):
-            yield batch
-        self.epoch += 1
+        if self.fixed_seed:
+            # Val mode: same composition every iteration.
+            epoch_seed = self.seed
+            for batch in self._build_epoch(epoch_seed):
+                yield batch
+        else:
+            # Train mode: advance epoch so batches differ across epochs.
+            epoch_seed = self.seed + self.epoch
+            for batch in self._build_epoch(epoch_seed):
+                yield batch
+            self.epoch += 1
 
     def __len__(self) -> int:
         return self._cached_len
@@ -676,13 +693,48 @@ def _train(args):
             num_workers=2,
             collate_fn=_collate_with_meta,
         )
-    val_loader = (DataLoader(
-        val_ds,
-        batch_size=args.per_device_batch_size,
-        shuffle=False,
-        num_workers=0,  # avoid spawning workers we'll only use periodically
-        collate_fn=_collate_with_meta,
-    ) if val_ds is not None and n_val > 0 else None)
+    # Val_loader: use the SAME UserDisjointBatchSampler as train, with
+    # fixed_seed=True so every val pass sees the same batch composition.
+    # That makes val_loss directly comparable to train_loss on the TB curve
+    # (both denominators are clean of same-user false negatives). Without
+    # this, val_loader fell back to `shuffle=False` over user-grouped rows,
+    # producing batches saturated with same-user collisions → val_loss
+    # inflated even when generalization was fine.
+    val_user_sampler_ok = (
+        val_ds is not None
+        and n_val > 0
+        and use_user_sampler
+        and all(u is not None for u in val_ds.user_ids())
+    )
+    if val_user_sampler_ok:
+        val_sampler = UserDisjointBatchSampler(
+            val_ds.user_ids(),
+            batch_size=args.per_device_batch_size,
+            seed=43,           # different seed than train (42) for independence
+            fixed_seed=True,   # same composition every val pass → reproducible
+        )
+        val_loader = DataLoader(
+            val_ds,
+            batch_sampler=val_sampler,
+            num_workers=0,
+            collate_fn=_collate_with_meta,
+        )
+        print(f"[train-bi-encoder] val_loader: UserDisjointBatchSampler "
+              f"(fixed_seed=True; val_loss is now apples-to-apples with train_loss)",
+              file=sys.stderr)
+    elif val_ds is not None and n_val > 0:
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=args.per_device_batch_size,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=_collate_with_meta,
+        )
+        print(f"[train-bi-encoder] val_loader: DataLoader(shuffle=False) "
+              f"(legacy; val_loss may show same-user false-neg pollution)",
+              file=sys.stderr)
+    else:
+        val_loader = None
 
     # Optimizer steps after grad-accum: total_micro_batches / accum_steps.
     accum = max(1, int(args.gradient_accumulation_steps))

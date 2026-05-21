@@ -661,6 +661,51 @@ def test_user_disjoint_batch_sampler_deterministic_by_seed():
     assert list(s1) != list(s3)
 
 
+def test_user_disjoint_batch_sampler_fixed_seed_yields_same_batches_across_iters():
+    """When `fixed_seed=True`, the sampler does NOT advance its epoch counter
+    on iteration, so two consecutive `list(sampler)` calls produce identical
+    batches. This is the contract the val_loader relies on so val_loss is
+    apples-to-apples across opt-steps."""
+    from scripts.train_bi_encoder import UserDisjointBatchSampler
+
+    row_user_ids = [f"u{i // 3}" for i in range(30)]
+    sampler = UserDisjointBatchSampler(row_user_ids, batch_size=5, seed=42,
+                                        fixed_seed=True)
+    first = list(sampler)
+    second = list(sampler)
+    assert first == second, \
+        "fixed_seed=True must produce identical batches across iterations"
+
+
+def test_user_disjoint_batch_sampler_advances_when_not_fixed():
+    """Default behavior (fixed_seed=False): epoch counter advances on each
+    iteration so train batches change across epochs."""
+    from scripts.train_bi_encoder import UserDisjointBatchSampler
+
+    row_user_ids = [f"u{i // 3}" for i in range(30)]
+    sampler = UserDisjointBatchSampler(row_user_ids, batch_size=5, seed=42)
+    first = list(sampler)
+    second = list(sampler)
+    assert first != second, \
+        "default sampler must advance epoch on each iteration"
+
+
+def test_train_loop_constructs_user_disjoint_val_sampler():
+    """When split_key='user_id' AND val has user_ids, the val_loader must use
+    UserDisjointBatchSampler with fixed_seed=True so val_loss is comparable
+    to train_loss on the TB curve."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+    src = inspect.getsource(mod._train)
+    # Must construct a val_sampler from val_ds.user_ids().
+    assert "val_sampler" in src, \
+        "_train must construct a val_sampler"
+    assert "UserDisjointBatchSampler" in src, \
+        "_train must reference UserDisjointBatchSampler"
+    assert "fixed_seed=True" in src, \
+        "val_sampler must be constructed with fixed_seed=True for reproducibility"
+
+
 def test_user_disjoint_batch_sampler_len_matches_emitted():
     """Δ3: `len(sampler)` is required by PyTorch DataLoader for progress
     reporting. It must equal the number of batches actually yielded."""
