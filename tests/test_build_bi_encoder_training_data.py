@@ -129,6 +129,58 @@ def test_build_triples_for_row_emits_session_id():
     assert triple["session_id"] == "session_42"
 
 
+def test_pos_neg_format_matches_history_music_turn_format():
+    """Patch 4 (2026-05-22): pos/neg track text MUST use the same
+    id_to_metadata-aligned format as [HISTORY] music-turn references and
+    as the catalog vectors at inference. Previously pos/neg used
+    format_track_text (5 fields, pipe-separated) while [HISTORY] used
+    id_to_metadata (4 fields, comma-separated, lowercased) — forcing the
+    encoder to learn two representations of every track. Aligning them
+    closes the BlindA nDCG regression gap.
+
+    The contract: when track_text_map is built via _format_history_music_turn,
+    build_triples_for_row's pos/neg fields contain id_to_metadata-format text.
+    """
+    from scripts.build_bi_encoder_training_data import (
+        build_triples_for_row, _format_history_music_turn,
+    )
+
+    metadata_dict = {
+        "tk_gold": {"track_id": "tk_gold",
+                    "track_name": ["Hotel California"],
+                    "artist_name": ["Eagles"],
+                    "album_name": ["Hotel California"]},
+        "tk_n1":   {"track_id": "tk_n1",
+                    "track_name": ["Stairway To Heaven"],
+                    "artist_name": ["Led Zeppelin"],
+                    "album_name": ["Led Zeppelin IV"]},
+    }
+    corpus_types = ["track_name", "artist_name", "album_name"]
+    # Build track_text_map exactly the way main() now does.
+    track_text_map = {
+        tid: _format_history_music_turn(tid, metadata_dict, corpus_types)
+        for tid in metadata_dict
+    }
+    row = {
+        "session_id": "s1", "user_id": "u1",
+        "chat_history": [], "current_user_query": "play rock",
+        "user_profile_raw": None, "conversation_goal": None,
+        "track_id": "tk_gold",
+    }
+    triple = build_triples_for_row(row, "tk_gold", ["tk_n1"], track_text_map)
+    # pos field MUST be id_to_metadata format (track_id + 3 fields, comma, lowercased).
+    assert triple["pos"][0].startswith("track_id: tk_gold,"), \
+        f"pos not in id_to_metadata format: {triple['pos'][0]!r}"
+    assert "track_name: hotel california" in triple["pos"][0]
+    assert "artist_name: eagles" in triple["pos"][0]
+    # neg field same format.
+    assert triple["neg"][0].startswith("track_id: tk_n1,")
+    assert "track_name: stairway to heaven" in triple["neg"][0]
+    # Crucial: no pipe separators (would indicate the OLD format_track_text path).
+    assert " | " not in triple["pos"][0]
+    assert " | " not in triple["neg"][0]
+
+
 def test_iter_conversation_turns_emits_user_id():
     """Δ1: rows must carry user_id from session['user_id']. Required for
     user-disjoint train/val split downstream (TripleJsonlDataset.split_key='user_id').

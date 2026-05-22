@@ -241,30 +241,40 @@ def main():
     # Lazy imports — FlagEmbedding has a heavy CUDA-touching init; keeps unit tests fast.
     from datasets import load_dataset
 
-    # 1. Load track metadata FIRST (we need metadata_dict for history
-    #    expansion in step 2). Also build the format_track_text text map
-    #    used as pos/neg payloads.
+    # 1. Load track metadata FIRST. Build the id_to_metadata-aligned text map
+    #    used for BOTH (a) pos/neg payloads in training triples AND (b)
+    #    [HISTORY] music-turn expansion via _format_history_music_turn AND
+    #    (c) the catalog re-embed in nb 70 cell 6.
+    #
+    # PATCH 4 (2026-05-22, train/inference format alignment): pos/neg now use
+    # the SAME `id_to_metadata` format that production's chat_history_parser
+    # produces at inference time. Previously pos/neg used format_track_text
+    # (5 fields, pipe-separated, original case) while [HISTORY] mentions of
+    # the same tracks used id_to_metadata (4 fields, comma, lowercased) —
+    # forcing the encoder to learn TWO representations of every track.
+    # Aligning both sides removes that asymmetry; the catalog re-embed in
+    # nb 70 cell 6 must also use this format to stay consistent.
     print(f"[hn-miner] loading track metadata from {args.track_meta_hf}", file=sys.stderr)
     track_meta = load_dataset(args.track_meta_hf, split="all_tracks")
     metadata_dict: dict = {}
     track_ids: list[str] = []
-    track_texts: list[str] = []
     history_corpus_types = [
         ct.strip() for ct in args.history_corpus_types.split(",") if ct.strip()
     ]
-    for trow in tqdm(track_meta, desc="format tracks"):
+    for trow in tqdm(track_meta, desc="index tracks"):
         tid = trow["track_id"]
-        metadata_dict[tid] = dict(trow)  # raw row preserved for id_to_metadata mirror
-        text = format_track_text(
-            track_name=trow.get("track_name", "unknown"),
-            artist_name=trow.get("artist_name"),
-            album_name=trow.get("album_name"),
-            release_date=trow.get("release_date"),
-            tag_list=trow.get("tag_list"),
-        )
+        metadata_dict[tid] = dict(trow)
         track_ids.append(tid)
-        track_texts.append(text)
-    track_text_map = dict(zip(track_ids, track_texts))
+    # Build pos/neg text via the SAME formatter as [HISTORY] music turns +
+    # catalog vectors (id_to_metadata mirror). Closes the train/inference
+    # format gap surfaced by the BlindA nDCG regression diagnosis.
+    track_text_map = {
+        tid: _format_history_music_turn(tid, metadata_dict, history_corpus_types)
+        for tid in track_ids
+    }
+    if track_ids:
+        sample_text = track_text_map[track_ids[0]]
+        print(f"[hn-miner] track_text_map format (sample): {sample_text[:200]}", file=sys.stderr)
 
     # 2. Load train conversations and assemble per-music-turn tuples.
     #    metadata_dict + history_corpus_types are threaded in so music turns
