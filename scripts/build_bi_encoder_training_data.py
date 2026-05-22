@@ -16,6 +16,13 @@ iteration shape so the (history, query, profile, goal, gold_tid) tuples we
 build for bi-encoder fine-tuning are structurally identical to the ones
 SID training already uses.
 
+The `--bge-m3-model` CLI flag is misleadingly named (historical); it accepts any
+sentence-transformers-compatible model. Tested with:
+  - BAAI/bge-m3 (default; 567M params, 1024-dim, multilingual)
+  - BAAI/bge-base-en-v1.5 (110M params, 768-dim, English-only; 5× smaller — allows
+    larger batch sizes during training/mining)
+  - BAAI/bge-large-en-v1.5 (335M params, 1024-dim, English-only)
+
 Usage:
   python scripts/build_bi_encoder_training_data.py \
     --train-conv-hf talkpl-ai/TalkPlayData-Challenge-Dataset \
@@ -304,22 +311,36 @@ def main():
             "mine_negatives_for_query requires unique IDs."
         )
 
-    # 3. Encode all tracks with zero-shot BGE-M3.
+    # 3. Encode all tracks with the zero-shot encoder for HN mining.
     # Materialize track_texts from track_text_map in track_ids order so the
-    # encoder output rows align with track_ids[i]. (Patch 4 refactor removed
-    # the parallel track_texts list; we re-derive it here.)
+    # encoder output rows align with track_ids[i].
     track_texts = [track_text_map[tid] for tid in track_ids]
-    # Lazy imports — FlagEmbedding has a heavy CUDA-touching init; keeps unit tests fast.
+    # Lazy imports — heavy CUDA init; keeps unit tests fast.
     import torch
-    from FlagEmbedding import BGEM3FlagModel
+    from sentence_transformers import SentenceTransformer
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = BGEM3FlagModel(args.bge_m3_model, use_fp16=True, device=device)
+    # Encoder loaded via sentence-transformers (works for BGE-M3, bge-base-en-v1.5,
+    # bge-large-en-v1.5, etc.). Production's DENSE_LOCAL also uses ST, so the
+    # mining-time encoding contract matches the inference-time contract exactly.
+    # FP16 on GPU for speed (matches the old BGEM3FlagModel use_fp16=True behavior).
+    print(f"[hn-miner] loading zero-shot encoder: {args.bge_m3_model}", file=sys.stderr)
+    model = SentenceTransformer(args.bge_m3_model, device=device)
+    # max_seq_length used for BOTH catalog tracks and queries (sentence-transformers
+    # doesn't take per-call max_length). 512 covers our query format (~300 tokens) +
+    # leaves headroom for tracks (~50-80 tokens); also matches bge-base-en-v1.5's
+    # native 512 cap.
+    model.max_seq_length = 512
+    if device == "cuda":
+        model = model.half()  # FP16 inference; ~2× faster forward, ~50% less VRAM
     print("[hn-miner] encoding catalog tracks...", file=sys.stderr)
     track_embs = model.encode(
-        track_texts, batch_size=args.batch_size, max_length=256,
-    )["dense_vecs"]
+        track_texts, batch_size=args.batch_size,
+        normalize_embeddings=True, convert_to_numpy=True,
+        show_progress_bar=False,
+    )
     track_embs = np.asarray(track_embs, dtype=np.float32)
-    # Ensure unit-norm (BGE-M3 should return L2-normalized; guard against version differences)
+    # Defensive re-normalize (ST normalize_embeddings=True already does this;
+    # the redundant pass is cheap and guards against version differences).
     norms = np.linalg.norm(track_embs, axis=1, keepdims=True)
     track_embs = track_embs / np.clip(norms, 1e-9, None)
 
@@ -359,8 +380,10 @@ def main():
                 for r in batch_rows
             ]
             batch_embs = model.encode(
-                batch_queries, batch_size=args.batch_size, max_length=512,
-            )["dense_vecs"]
+                batch_queries, batch_size=args.batch_size,
+                normalize_embeddings=True, convert_to_numpy=True,
+                show_progress_bar=False,
+            )
             batch_embs = np.asarray(batch_embs, dtype=np.float32)
             qnorms = np.linalg.norm(batch_embs, axis=1, keepdims=True)
             batch_embs = batch_embs / np.clip(qnorms, 1e-9, None)

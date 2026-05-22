@@ -129,6 +129,43 @@ def test_build_triples_for_row_emits_session_id():
     assert triple["session_id"] == "session_42"
 
 
+def test_builder_uses_sentence_transformers_not_bgem3_specific():
+    """The build script must use SentenceTransformer (not BGEM3FlagModel) so it
+    works for any retriever backbone (BGE-M3, bge-base-en-v1.5, bge-large-en-v1.5).
+    BGEM3FlagModel is M3-specific and would crash on bge-base."""
+    import inspect
+    from scripts import build_bi_encoder_training_data as mod
+    main_src = inspect.getsource(mod.main)
+    # Must NOT instantiate BGEM3FlagModel (that's the M3-specific path).
+    assert "BGEM3FlagModel(" not in main_src, \
+        "main() still instantiates BGEM3FlagModel — won't work for non-M3 backbones"
+    # Must use SentenceTransformer instead.
+    assert "SentenceTransformer(" in main_src, \
+        "main() must use SentenceTransformer for encoder loading (generic across backbones)"
+
+
+def test_builder_calls_encoder_with_normalize_embeddings_true():
+    """The new encoding path uses normalize_embeddings=True (matches production's
+    DENSE_LOCAL._encode_queries contract). Without this, embedding norms diverge
+    from production and similarity scores are off."""
+    import inspect
+    from scripts import build_bi_encoder_training_data as mod
+    main_src = inspect.getsource(mod.main)
+    assert "normalize_embeddings=True" in main_src, \
+        "encoder calls must pass normalize_embeddings=True"
+
+
+def test_builder_uses_fp16_on_gpu():
+    """FP16 inference on GPU for ~2× speed on Blackwell — matches old
+    BGEM3FlagModel(use_fp16=True). Catalog encoding of 47K tracks is otherwise slow."""
+    import inspect
+    from scripts import build_bi_encoder_training_data as mod
+    main_src = inspect.getsource(mod.main)
+    # `.half()` is the sentence-transformers idiom for FP16 weights.
+    assert "model.half()" in main_src or "model = model.half()" in main_src, \
+        "missing FP16 conversion on GPU (model.half())"
+
+
 def test_builder_imports_batch_mine_negatives():
     """After the vectorization patch, main() must use batch_mine_negatives
     (one GPU matmul per batch) instead of the per-query mine_negatives_for_query.
