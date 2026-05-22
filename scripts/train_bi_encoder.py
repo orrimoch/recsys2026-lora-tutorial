@@ -762,14 +762,36 @@ def _train(args):
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr)
     # I2: warmup_ratio 0.1 → 10% linear warmup, then linear decay.
     # N5: end_factor=0.1 (not 0.0) so the final ~10% of steps still updates.
-    from torch.optim.lr_scheduler import LinearLR, SequentialLR
+    # LR schedule: 10% warmup → main schedule. Both schedules end at 10% of
+    # max LR (end_factor=0.1 / eta_min=0.1×LR) so the final ~10% of steps
+    # still produces meaningful updates.
+    from torch.optim.lr_scheduler import (
+        LinearLR, SequentialLR, CosineAnnealingLR,
+    )
     warmup_steps = max(1, int(0.1 * total_steps))
+    main_steps = max(1, total_steps - warmup_steps)
+    if args.lr_schedule == "cosine":
+        # Cosine decay from full LR → 10% LR over main_steps. Standard for
+        # contrastive fine-tunes (BGE-M3, GTE, E5 papers use this).
+        main_scheduler = CosineAnnealingLR(
+            optimizer, T_max=main_steps, eta_min=args.lr * 0.1,
+        )
+        print(f"[train-bi-encoder] LR schedule: cosine (warmup={warmup_steps} → "
+              f"cosine decay over {main_steps} steps to eta_min={args.lr * 0.1:.2e})",
+              file=sys.stderr)
+    else:
+        # Linear schedule (legacy default; pre-cosine recipe).
+        main_scheduler = LinearLR(
+            optimizer, start_factor=1.0, end_factor=0.1, total_iters=main_steps,
+        )
+        print(f"[train-bi-encoder] LR schedule: linear (warmup={warmup_steps} → "
+              f"linear decay over {main_steps} steps to end_factor=0.1)",
+              file=sys.stderr)
     scheduler = SequentialLR(
         optimizer,
         schedulers=[
             LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps),
-            LinearLR(optimizer, start_factor=1.0, end_factor=0.1,
-                     total_iters=max(1, total_steps - warmup_steps)),
+            main_scheduler,
         ],
         milestones=[warmup_steps],
     )
@@ -1180,6 +1202,13 @@ def main():
     p.add_argument("--seed", type=int, default=42,
                    help="Master seed for reproducibility (defaults to 42; "
                         "data split, samplers, LoRA init all keyed on this).")
+    # LR schedule choice — cosine is the modern contrastive-learning default
+    # (BGE-M3, GTE, E5). Linear is the legacy recipe (pre-2024).
+    p.add_argument("--lr-schedule", type=str, default="linear",
+                   choices=["linear", "cosine"],
+                   help="LR decay schedule after warmup: 'linear' (legacy "
+                        "default; end_factor=0.1) or 'cosine' (BGE-M3-paper "
+                        "recipe; cosine decay to eta_min=0.1×lr).")
     # §6.5 Δ2: user-disjoint train/val split key. Every session of a given
     # user lives in exactly one partition.
     p.add_argument("--split-key", type=str, default="user_id",

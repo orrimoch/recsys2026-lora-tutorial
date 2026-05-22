@@ -912,6 +912,29 @@ def test_dataset_neg_tids_stay_aligned_under_subsampling(tmp_path):
             f"slot {k}: text {item['negatives'][k]} but tid {item['neg_tids'][k]}"
 
 
+def test_cli_has_lr_schedule_flag():
+    """LR schedule choice — cosine for modern contrastive recipes, linear for legacy."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+    src = inspect.getsource(mod.main)
+    assert "--lr-schedule" in src, "missing --lr-schedule CLI flag"
+    assert "linear" in src and "cosine" in src, \
+        "expected both 'linear' and 'cosine' as valid choices"
+
+
+def test_train_loop_uses_cosine_schedule_when_configured():
+    """When --lr-schedule cosine, _train uses CosineAnnealingLR (not LinearLR
+    for the main phase). Source-level pin to prevent regression."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+    src = inspect.getsource(mod._train)
+    assert "CosineAnnealingLR" in src, \
+        "_train must import + use CosineAnnealingLR for cosine schedule"
+    # Conditional on lr_schedule arg.
+    assert "lr_schedule" in src and "cosine" in src, \
+        "_train must branch on args.lr_schedule == 'cosine'"
+
+
 def test_cli_has_seed_flag():
     """Reproducibility: --seed CLI arg with default 42 (matches the
     previously-hardcoded values for back-compat)."""
