@@ -304,7 +304,11 @@ def main():
             "mine_negatives_for_query requires unique IDs."
         )
 
-    # 3. Encode all tracks with zero-shot BGE-M3
+    # 3. Encode all tracks with zero-shot BGE-M3.
+    # Materialize track_texts from track_text_map in track_ids order so the
+    # encoder output rows align with track_ids[i]. (Patch 4 refactor removed
+    # the parallel track_texts list; we re-derive it here.)
+    track_texts = [track_text_map[tid] for tid in track_ids]
     # Lazy imports — FlagEmbedding has a heavy CUDA-touching init; keeps unit tests fast.
     import torch
     from FlagEmbedding import BGEM3FlagModel
