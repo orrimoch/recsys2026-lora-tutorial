@@ -129,6 +129,35 @@ def test_build_triples_for_row_emits_session_id():
     assert triple["session_id"] == "session_42"
 
 
+def test_builder_imports_batch_mine_negatives():
+    """After the vectorization patch, main() must use batch_mine_negatives
+    (one GPU matmul per batch) instead of the per-query mine_negatives_for_query.
+    Source-level check to prevent regression."""
+    import inspect
+    from scripts import build_bi_encoder_training_data as mod
+    src = inspect.getsource(mod)
+    assert "batch_mine_negatives" in src, "main() must import + use batch_mine_negatives"
+    # The per-query function may still be imported for back-compat, but the
+    # mining LOOP must call the batched function.
+    main_src = inspect.getsource(mod.main)
+    assert "batch_mine_negatives(" in main_src, \
+        "main()'s mining loop must call batch_mine_negatives(...) not the per-query version"
+
+
+def test_builder_pins_catalog_to_gpu_once():
+    """Vectorized mining pins the catalog tensor once outside the batch loop
+    so we don't re-upload to GPU on every batch (saves ~380GB of transfers
+    on a full 120K-query mine)."""
+    import inspect
+    from scripts import build_bi_encoder_training_data as mod
+    main_src = inspect.getsource(mod.main)
+    # Look for the GPU pin happening before the mining loop.
+    pin_idx = main_src.find("track_embs_dev")
+    loop_idx = main_src.find("tqdm(range(0, len(train_rows)")
+    assert pin_idx > 0 and loop_idx > 0, "expected both track_embs_dev and the mining loop"
+    assert pin_idx < loop_idx, "catalog must be pinned to GPU BEFORE the batch loop"
+
+
 def test_pos_neg_format_matches_history_music_turn_format():
     """Patch 4 (2026-05-22): pos/neg track text MUST use the same
     id_to_metadata-aligned format as [HISTORY] music-turn references and

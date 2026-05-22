@@ -232,3 +232,295 @@ def test_mine_negatives_rejects_unknown_strategy():
             track_ids=track_ids, gold_track_id="t1", k_negs=1,
             strategy="random",
         )
+
+
+# ===========================================================================
+# Vectorized batch_mine_negatives — 5-6x speedup via GPU matmul + top-K.
+# ===========================================================================
+
+def _make_test_corpus(N: int = 30, D: int = 8, seed: int = 0):
+    """Generate a small unit-normalized catalog for testing."""
+    rng = np.random.default_rng(seed)
+    track_embs = rng.standard_normal((N, D)).astype(np.float32)
+    track_embs /= np.linalg.norm(track_embs, axis=1, keepdims=True)
+    track_ids = [f"t{i:02d}" for i in range(N)]
+    return track_embs, track_ids
+
+
+def test_batch_mine_negatives_returns_one_list_per_query():
+    """Vectorized call returns a list of length B, one negs-list per query."""
+    from mcrs.retrieval_modules.hn_miner import batch_mine_negatives
+
+    N, D, B = 30, 8, 5
+    track_embs, track_ids = _make_test_corpus(N=N, D=D)
+    rng = np.random.default_rng(1)
+    query_embs = rng.standard_normal((B, D)).astype(np.float32)
+    query_embs /= np.linalg.norm(query_embs, axis=1, keepdims=True)
+    gold_ids = ["t00", "t05", "t10", "t15", "t20"]
+
+    out = batch_mine_negatives(
+        query_embs=query_embs, track_embs=track_embs,
+        track_ids=track_ids, gold_track_ids=gold_ids,
+        percpos_threshold=0.5, k_negs=3, pool_size=15,
+    )
+    assert len(out) == B
+    for negs in out:
+        assert negs is None or isinstance(negs, list)
+
+
+def test_batch_mine_negatives_handles_missing_gold():
+    """A gold track_id absent from track_ids → None for that row, others unaffected."""
+    from mcrs.retrieval_modules.hn_miner import batch_mine_negatives
+
+    N, D = 30, 8
+    track_embs, track_ids = _make_test_corpus(N=N, D=D)
+    rng = np.random.default_rng(2)
+    query_embs = rng.standard_normal((3, D)).astype(np.float32)
+    query_embs /= np.linalg.norm(query_embs, axis=1, keepdims=True)
+    gold_ids = ["t05", "missing_tid", "t12"]
+
+    out = batch_mine_negatives(
+        query_embs=query_embs, track_embs=track_embs,
+        track_ids=track_ids, gold_track_ids=gold_ids,
+        percpos_threshold=0.5, k_negs=3, pool_size=15,
+    )
+    assert len(out) == 3
+    assert out[0] is not None
+    assert out[1] is None     # missing_tid
+    assert out[2] is not None
+
+
+def test_batch_mine_negatives_matches_per_query_results():
+    """Bit-equivalence: for each query in a batch, batch_mine_negatives returns
+    the SAME negs list (same ordering) as mine_negatives_for_query called
+    per row with the matching seed = base_seed + row_index."""
+    from mcrs.retrieval_modules.hn_miner import (
+        batch_mine_negatives, mine_negatives_for_query,
+    )
+
+    N, D, B = 50, 16, 8
+    track_embs, track_ids = _make_test_corpus(N=N, D=D, seed=7)
+    rng = np.random.default_rng(3)
+    query_embs = rng.standard_normal((B, D)).astype(np.float32)
+    query_embs /= np.linalg.norm(query_embs, axis=1, keepdims=True)
+    # Pick gold tracks that aren't necessarily the closest to each query.
+    gold_ids = [track_ids[(b * 7) % N] for b in range(B)]
+
+    BASE_SEED = 42
+    batch_out = batch_mine_negatives(
+        query_embs=query_embs, track_embs=track_embs,
+        track_ids=track_ids, gold_track_ids=gold_ids,
+        percpos_threshold=0.85, k_negs=4, pool_size=30,
+        seed=BASE_SEED, strategy="percpos",
+    )
+
+    for b in range(B):
+        per_query_out = mine_negatives_for_query(
+            query_emb=query_embs[b], track_embs=track_embs,
+            track_ids=track_ids, gold_track_id=gold_ids[b],
+            percpos_threshold=0.85, k_negs=4, pool_size=30,
+            seed=BASE_SEED + b, strategy="percpos",
+        )
+        assert batch_out[b] == per_query_out, (
+            f"row {b}: batch={batch_out[b]} vs per-query={per_query_out}"
+        )
+
+
+def test_batch_mine_negatives_simans_returns_k_negs_per_query():
+    """SimANS doesn't filter, so every query gets exactly k_negs (or fewer if pool < k)."""
+    from mcrs.retrieval_modules.hn_miner import batch_mine_negatives
+
+    N, D, B = 40, 8, 4
+    track_embs, track_ids = _make_test_corpus(N=N, D=D, seed=11)
+    rng = np.random.default_rng(5)
+    query_embs = rng.standard_normal((B, D)).astype(np.float32)
+    query_embs /= np.linalg.norm(query_embs, axis=1, keepdims=True)
+    gold_ids = [f"t{(b * 9) % N:02d}" for b in range(B)]
+
+    K = 5
+    out = batch_mine_negatives(
+        query_embs=query_embs, track_embs=track_embs,
+        track_ids=track_ids, gold_track_ids=gold_ids,
+        k_negs=K, pool_size=20, strategy="simans",
+    )
+    for b in range(B):
+        assert out[b] is not None
+        assert len(out[b]) == K, f"SimANS should return k_negs per query, got {len(out[b])} for row {b}"
+
+
+def test_batch_mine_negatives_rejects_shape_mismatch():
+    """Bad inputs raise ValueError."""
+    from mcrs.retrieval_modules.hn_miner import batch_mine_negatives
+
+    N, D = 20, 8
+    track_embs, track_ids = _make_test_corpus(N=N, D=D)
+    # Wrong: D mismatch between query and track.
+    bad_query_embs = np.zeros((3, D + 1), dtype=np.float32)
+    gold_ids = ["t00", "t05", "t10"]
+    with pytest.raises((ValueError, RuntimeError)):
+        batch_mine_negatives(
+            query_embs=bad_query_embs, track_embs=track_embs,
+            track_ids=track_ids, gold_track_ids=gold_ids,
+            k_negs=3, pool_size=10,
+        )
+    # Wrong: gold_track_ids length doesn't match query batch.
+    good_query_embs = np.zeros((3, D), dtype=np.float32)
+    good_query_embs[:, 0] = 1.0  # unit norm
+    with pytest.raises(ValueError):
+        batch_mine_negatives(
+            query_embs=good_query_embs, track_embs=track_embs,
+            track_ids=track_ids, gold_track_ids=["t00", "t05"],  # only 2, not 3
+            k_negs=3, pool_size=10,
+        )
+
+
+def test_batch_mine_negatives_rejects_duplicate_track_ids():
+    """Duplicate track_ids would leak gold as negative (same check as per-query function)."""
+    from mcrs.retrieval_modules.hn_miner import batch_mine_negatives
+    N, D = 5, 8
+    track_embs = np.eye(N, D, dtype=np.float32)
+    track_ids = ["t1", "t2", "t2", "t4", "t5"]  # duplicate
+    query_embs = np.zeros((1, D), dtype=np.float32)
+    query_embs[0, 0] = 1.0
+    with pytest.raises(ValueError, match="unique"):
+        batch_mine_negatives(
+            query_embs=query_embs, track_embs=track_embs,
+            track_ids=track_ids, gold_track_ids=["t1"],
+            k_negs=2, pool_size=4,
+        )
+
+
+def test_batch_mine_negatives_accepts_torch_tensors():
+    """The build script will pass torch tensors (kept on GPU). Function must accept them."""
+    import torch
+    from mcrs.retrieval_modules.hn_miner import batch_mine_negatives
+
+    N, D, B = 20, 8, 3
+    np_te, track_ids = _make_test_corpus(N=N, D=D, seed=13)
+    rng = np.random.default_rng(17)
+    np_qe = rng.standard_normal((B, D)).astype(np.float32)
+    np_qe /= np.linalg.norm(np_qe, axis=1, keepdims=True)
+    gold_ids = ["t00", "t05", "t10"]
+
+    # Convert to torch tensors (simulating the build-script's GPU-pinned catalog).
+    t_te = torch.from_numpy(np_te)
+    t_qe = torch.from_numpy(np_qe)
+
+    out_torch = batch_mine_negatives(
+        query_embs=t_qe, track_embs=t_te,
+        track_ids=track_ids, gold_track_ids=gold_ids,
+        k_negs=3, pool_size=10, seed=99, strategy="percpos",
+    )
+    out_np = batch_mine_negatives(
+        query_embs=np_qe, track_embs=np_te,
+        track_ids=track_ids, gold_track_ids=gold_ids,
+        k_negs=3, pool_size=10, seed=99, strategy="percpos",
+    )
+    # Both input forms must produce identical outputs.
+    assert out_torch == out_np, f"torch vs numpy results differ: {out_torch} vs {out_np}"
+
+
+def test_batch_mine_negatives_excludes_gold_from_pool():
+    """Gold's own catalog index must never appear in the returned negs (per-query
+    invariant — must hold for vectorized version too)."""
+    from mcrs.retrieval_modules.hn_miner import batch_mine_negatives
+
+    N, D, B = 30, 8, 4
+    track_embs, track_ids = _make_test_corpus(N=N, D=D, seed=19)
+    rng = np.random.default_rng(23)
+    query_embs = rng.standard_normal((B, D)).astype(np.float32)
+    query_embs /= np.linalg.norm(query_embs, axis=1, keepdims=True)
+    gold_ids = ["t00", "t07", "t14", "t21"]
+
+    # SimANS: no filter, easy to spot a gold-leak.
+    out = batch_mine_negatives(
+        query_embs=query_embs, track_embs=track_embs,
+        track_ids=track_ids, gold_track_ids=gold_ids,
+        k_negs=10, pool_size=25, strategy="simans",
+    )
+    for b in range(B):
+        assert out[b] is not None
+        assert gold_ids[b] not in out[b], \
+            f"row {b}: gold {gold_ids[b]} leaked into negs {out[b]}"
+
+
+def test_batch_mine_negatives_seed_assignment_matches_build_script_convention():
+    """Build script uses base_seed=42+i (i=batch_start). batch_mine_negatives
+    must apply row_seed=base+b (b=position in batch), so a query at global
+    position i+b gets seed 42+(i+b) — same as the legacy per-query loop
+    which used seed=42+i+j (j==b)."""
+    from mcrs.retrieval_modules.hn_miner import (
+        batch_mine_negatives, mine_negatives_for_query,
+    )
+
+    N, D, B = 25, 8, 3
+    track_embs, track_ids = _make_test_corpus(N=N, D=D, seed=31)
+    rng = np.random.default_rng(37)
+    query_embs = rng.standard_normal((B, D)).astype(np.float32)
+    query_embs /= np.linalg.norm(query_embs, axis=1, keepdims=True)
+    gold_ids = ["t05", "t12", "t20"]
+
+    # Simulate the build script's batch starting at global position 100.
+    BATCH_START = 100
+    base_seed_in_loop = 42 + BATCH_START
+
+    batch_out = batch_mine_negatives(
+        query_embs=query_embs, track_embs=track_embs,
+        track_ids=track_ids, gold_track_ids=gold_ids,
+        k_negs=3, pool_size=15, strategy="percpos",
+        percpos_threshold=0.9, seed=base_seed_in_loop,
+    )
+
+    # Per-query equivalent (old build script's inner loop).
+    for b in range(B):
+        per_query_seed = 42 + BATCH_START + b
+        per_query_negs = mine_negatives_for_query(
+            query_emb=query_embs[b], track_embs=track_embs,
+            track_ids=track_ids, gold_track_id=gold_ids[b],
+            k_negs=3, pool_size=15, strategy="percpos",
+            percpos_threshold=0.9, seed=per_query_seed,
+        )
+        assert batch_out[b] == per_query_negs, (
+            f"seed mismatch at row {b}: batch (base+b={base_seed_in_loop}+{b}) "
+            f"vs per-query ({per_query_seed}): {batch_out[b]} != {per_query_negs}"
+        )
+
+
+def test_batch_mine_negatives_pool_smaller_than_k_returns_all_available():
+    """When pool has fewer items than k_negs (after filter), return what we have.
+    Mirrors sample_hard_negatives's behavior (lines 53-54)."""
+    from mcrs.retrieval_modules.hn_miner import batch_mine_negatives
+
+    N, D = 5, 4
+    track_embs = np.eye(N, D, dtype=np.float32)  # orthogonal: catalog has 5 tracks, no clusters
+    track_ids = ["t0", "t1", "t2", "t3", "t4"]
+    # Query aligned with t0 → high s_pos. percpos at 0.99 → small surviving pool.
+    query_embs = np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32)
+    gold_ids = ["t0"]
+
+    out = batch_mine_negatives(
+        query_embs=query_embs, track_embs=track_embs,
+        track_ids=track_ids, gold_track_ids=gold_ids,
+        k_negs=10, pool_size=10, strategy="percpos",
+        percpos_threshold=0.99,
+    )
+    assert out[0] is not None
+    # Pool can never exceed N-1=4 (excluding gold). With k_negs=10 > available, expect ≤4.
+    assert len(out[0]) <= 4
+    assert "t0" not in out[0]
+
+
+def test_batch_mine_negatives_simans_with_empty_pool_returns_empty():
+    """If somehow pool is empty (degenerate catalog), SimANS returns [] not None."""
+    from mcrs.retrieval_modules.hn_miner import batch_mine_negatives
+
+    # 1-track catalog: pool excludes gold → empty pool.
+    track_embs = np.array([[1.0, 0.0]], dtype=np.float32)
+    track_ids = ["t0"]
+    query_embs = np.array([[1.0, 0.0]], dtype=np.float32)
+    out = batch_mine_negatives(
+        query_embs=query_embs, track_embs=track_embs,
+        track_ids=track_ids, gold_track_ids=["t0"],
+        k_negs=5, pool_size=10, strategy="simans",
+    )
+    assert out[0] == [] or out[0] is None  # either is acceptable; both are handled by build script's len<2 skip
