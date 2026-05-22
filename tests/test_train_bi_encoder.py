@@ -912,6 +912,124 @@ def test_dataset_neg_tids_stay_aligned_under_subsampling(tmp_path):
             f"slot {k}: text {item['negatives'][k]} but tid {item['neg_tids'][k]}"
 
 
+def _make_tiny_optimizer(lr):
+    """Single-param AdamW for scheduler tests — no model needed."""
+    import torch
+    p = torch.nn.Parameter(torch.zeros(2))
+    return torch.optim.AdamW([p], lr=lr)
+
+
+def test_lr_scheduler_warmup_ramps_from_1pct_to_full_lr():
+    """The first 10% of total_steps is a linear warmup from 0.01*lr → full lr.
+    At step 0 (before any .step()), LR is at start_factor=0.01.
+    After exactly warmup_steps optimizer/scheduler advances, LR equals full lr."""
+    from scripts.train_bi_encoder import _build_lr_scheduler
+
+    lr = 1e-4
+    total_steps = 100  # → warmup_steps = 10
+    opt = _make_tiny_optimizer(lr)
+    sched = _build_lr_scheduler(opt, lr=lr, total_steps=total_steps, schedule='linear')
+
+    # At init, LR should be ~0.01 * lr = 1e-6 (start_factor of warmup LinearLR).
+    initial_lr = opt.param_groups[0]['lr']
+    assert abs(initial_lr - lr * 0.01) < 1e-9, \
+        f'initial LR not at start_factor=0.01: got {initial_lr}'
+
+    # After exactly warmup_steps=10 advances, LR should hit full lr.
+    for _ in range(10):
+        opt.step()
+        sched.step()
+    warmup_end_lr = opt.param_groups[0]['lr']
+    assert abs(warmup_end_lr - lr) < 1e-7, \
+        f'LR after warmup not at full lr: got {warmup_end_lr}, expected {lr}'
+
+
+def test_lr_scheduler_cosine_decays_to_eta_min():
+    """Cosine schedule: after total_steps, LR equals eta_min = 0.1 * lr."""
+    from scripts.train_bi_encoder import _build_lr_scheduler
+
+    lr = 1e-4
+    total_steps = 100
+    opt = _make_tiny_optimizer(lr)
+    sched = _build_lr_scheduler(opt, lr=lr, total_steps=total_steps, schedule='cosine')
+
+    for _ in range(total_steps):
+        opt.step()
+        sched.step()
+
+    final_lr = opt.param_groups[0]['lr']
+    expected_eta_min = lr * 0.1
+    assert abs(final_lr - expected_eta_min) < 1e-8, \
+        f'cosine schedule did not reach eta_min: got {final_lr}, expected {expected_eta_min}'
+
+
+def test_lr_scheduler_linear_decays_to_end_factor():
+    """Linear schedule: after total_steps, LR equals end_factor * lr = 0.1 * lr."""
+    from scripts.train_bi_encoder import _build_lr_scheduler
+
+    lr = 1e-4
+    total_steps = 100
+    opt = _make_tiny_optimizer(lr)
+    sched = _build_lr_scheduler(opt, lr=lr, total_steps=total_steps, schedule='linear')
+
+    for _ in range(total_steps):
+        opt.step()
+        sched.step()
+
+    final_lr = opt.param_groups[0]['lr']
+    expected_end = lr * 0.1
+    assert abs(final_lr - expected_end) < 1e-8, \
+        f'linear schedule did not reach end_factor: got {final_lr}, expected {expected_end}'
+
+
+def test_lr_scheduler_cosine_midpoint_is_between_peak_and_min():
+    """At the midpoint of cosine decay, LR should be near (peak + min) / 2.
+    Specifically: cos(pi/2) = 0; cosine annealing midpoint LR ≈ (peak+min)/2."""
+    import math
+    from scripts.train_bi_encoder import _build_lr_scheduler
+
+    lr = 1e-4
+    total_steps = 100  # warmup=10, then 90 cosine steps
+    opt = _make_tiny_optimizer(lr)
+    sched = _build_lr_scheduler(opt, lr=lr, total_steps=total_steps, schedule='cosine')
+
+    # Advance through warmup (10) + half the cosine phase (45) = 55 total.
+    for _ in range(55):
+        opt.step()
+        sched.step()
+
+    midpoint_lr = opt.param_groups[0]['lr']
+    expected_mid = (lr + lr * 0.1) / 2.0  # ~5.5e-5
+    # Allow loose tolerance — cosine midpoint depends on exact step count alignment.
+    assert abs(midpoint_lr - expected_mid) / expected_mid < 0.10, \
+        f'cosine midpoint LR off by >10%: got {midpoint_lr}, expected ~{expected_mid}'
+
+
+def test_lr_scheduler_rejects_unknown_schedule():
+    """Bad schedule name fails loud (not silently fall through to a default)."""
+    import pytest
+    from scripts.train_bi_encoder import _build_lr_scheduler
+
+    opt = _make_tiny_optimizer(1e-4)
+    with pytest.raises(ValueError, match='unknown schedule'):
+        _build_lr_scheduler(opt, lr=1e-4, total_steps=100, schedule='exponential')
+
+
+def test_cli_default_lr_schedule_is_linear():
+    """Back-compat: --lr-schedule defaults to 'linear' (the legacy behavior).
+    Existing CLI invocations that don't pass --lr-schedule must get the same
+    schedule as before this feature was added."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+    src = inspect.getsource(mod.main)
+    idx = src.find('--lr-schedule')
+    assert idx > 0, 'missing --lr-schedule arg'
+    window = src[idx:idx + 400]
+    assert 'default="linear"' in window or "default='linear'" in window, \
+        f'--lr-schedule default should be "linear" (back-compat); '\
+        f'argparse block: {window[:200]!r}'
+
+
 def test_cli_has_lr_schedule_flag():
     """LR schedule choice — cosine for modern contrastive recipes, linear for legacy."""
     import inspect
@@ -922,17 +1040,23 @@ def test_cli_has_lr_schedule_flag():
         "expected both 'linear' and 'cosine' as valid choices"
 
 
-def test_train_loop_uses_cosine_schedule_when_configured():
-    """When --lr-schedule cosine, _train uses CosineAnnealingLR (not LinearLR
-    for the main phase). Source-level pin to prevent regression."""
+def test_train_loop_delegates_to_build_lr_scheduler():
+    """_train must use the testable _build_lr_scheduler helper and pass
+    args.lr_schedule to it. The cosine vs linear logic lives in the helper
+    (separately unit-tested) so _train just needs to wire the CLI flag through."""
     import inspect
     from scripts import train_bi_encoder as mod
-    src = inspect.getsource(mod._train)
-    assert "CosineAnnealingLR" in src, \
-        "_train must import + use CosineAnnealingLR for cosine schedule"
-    # Conditional on lr_schedule arg.
-    assert "lr_schedule" in src and "cosine" in src, \
-        "_train must branch on args.lr_schedule == 'cosine'"
+    train_src = inspect.getsource(mod._train)
+    assert "_build_lr_scheduler" in train_src, \
+        "_train must call _build_lr_scheduler (the unit-tested helper)"
+    assert "args.lr_schedule" in train_src, \
+        "_train must thread args.lr_schedule into _build_lr_scheduler"
+    # And the helper itself must support both branches.
+    helper_src = inspect.getsource(mod._build_lr_scheduler)
+    assert "CosineAnnealingLR" in helper_src, \
+        "_build_lr_scheduler must use CosineAnnealingLR for cosine path"
+    assert "LinearLR" in helper_src, \
+        "_build_lr_scheduler must use LinearLR for the linear path + warmup"
 
 
 def test_cli_has_seed_flag():

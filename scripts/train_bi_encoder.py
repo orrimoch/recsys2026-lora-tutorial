@@ -508,6 +508,54 @@ def _val_metrics_from_scores(scores: "torch.Tensor") -> tuple[float, float]:
     return top1, float(ndcg.mean().item())
 
 
+def _build_lr_scheduler(optimizer, lr: float, total_steps: int, schedule: str):
+    """Construct the 2-phase LR scheduler: 10% linear warmup → main schedule.
+
+    Both schedules end at 10% of `lr` (linear: end_factor=0.1; cosine:
+    eta_min=0.1*lr) so the final ~10% of steps still produces meaningful
+    updates.
+
+    Args:
+        optimizer: torch optimizer (params already attached). The scheduler
+            modifies its `param_groups[*]['lr']` field.
+        lr: peak LR. Used as the cosine eta_min reference (eta_min = lr * 0.1).
+        total_steps: total opt-steps in the training run. 10% used for warmup.
+        schedule: 'linear' (legacy default) or 'cosine' (modern contrastive
+            recipe; BGE-M3, GTE, E5).
+
+    Returns:
+        A SequentialLR composing the warmup LinearLR with the main scheduler.
+
+    Raises:
+        ValueError: if `schedule` isn't 'linear' or 'cosine'.
+    """
+    from torch.optim.lr_scheduler import (
+        CosineAnnealingLR, LinearLR, SequentialLR,
+    )
+    warmup_steps = max(1, int(0.1 * total_steps))
+    main_steps = max(1, total_steps - warmup_steps)
+    if schedule == "cosine":
+        main_scheduler = CosineAnnealingLR(
+            optimizer, T_max=main_steps, eta_min=lr * 0.1,
+        )
+    elif schedule == "linear":
+        main_scheduler = LinearLR(
+            optimizer, start_factor=1.0, end_factor=0.1, total_iters=main_steps,
+        )
+    else:
+        raise ValueError(
+            f"unknown schedule: {schedule!r}; expected 'linear' or 'cosine'"
+        )
+    return SequentialLR(
+        optimizer,
+        schedulers=[
+            LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps),
+            main_scheduler,
+        ],
+        milestones=[warmup_steps],
+    )
+
+
 def _train(args):
     import numpy as np
     import torch
@@ -762,39 +810,16 @@ def _train(args):
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr)
     # I2: warmup_ratio 0.1 → 10% linear warmup, then linear decay.
     # N5: end_factor=0.1 (not 0.0) so the final ~10% of steps still updates.
-    # LR schedule: 10% warmup → main schedule. Both schedules end at 10% of
-    # max LR (end_factor=0.1 / eta_min=0.1×LR) so the final ~10% of steps
-    # still produces meaningful updates.
-    from torch.optim.lr_scheduler import (
-        LinearLR, SequentialLR, CosineAnnealingLR,
+    # LR schedule: extracted into _build_lr_scheduler so the cosine vs linear
+    # behavior is unit-testable independent of model load / dataset.
+    scheduler = _build_lr_scheduler(
+        optimizer, lr=args.lr, total_steps=total_steps, schedule=args.lr_schedule,
     )
-    warmup_steps = max(1, int(0.1 * total_steps))
-    main_steps = max(1, total_steps - warmup_steps)
-    if args.lr_schedule == "cosine":
-        # Cosine decay from full LR → 10% LR over main_steps. Standard for
-        # contrastive fine-tunes (BGE-M3, GTE, E5 papers use this).
-        main_scheduler = CosineAnnealingLR(
-            optimizer, T_max=main_steps, eta_min=args.lr * 0.1,
-        )
-        print(f"[train-bi-encoder] LR schedule: cosine (warmup={warmup_steps} → "
-              f"cosine decay over {main_steps} steps to eta_min={args.lr * 0.1:.2e})",
-              file=sys.stderr)
-    else:
-        # Linear schedule (legacy default; pre-cosine recipe).
-        main_scheduler = LinearLR(
-            optimizer, start_factor=1.0, end_factor=0.1, total_iters=main_steps,
-        )
-        print(f"[train-bi-encoder] LR schedule: linear (warmup={warmup_steps} → "
-              f"linear decay over {main_steps} steps to end_factor=0.1)",
-              file=sys.stderr)
-    scheduler = SequentialLR(
-        optimizer,
-        schedulers=[
-            LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps),
-            main_scheduler,
-        ],
-        milestones=[warmup_steps],
-    )
+    _warmup_n = max(1, int(0.1 * total_steps))
+    print(f"[train-bi-encoder] LR schedule: {args.lr_schedule} "
+          f"(warmup={_warmup_n} steps → main decay over {total_steps - _warmup_n} steps; "
+          f"peak lr={args.lr:.2e}, min lr={args.lr * 0.1:.2e})",
+          file=sys.stderr)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
