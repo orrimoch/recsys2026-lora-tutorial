@@ -50,6 +50,19 @@ from pathlib import Path
 from typing import Optional
 
 
+# Module-level sys.path hoist: the multi-modal path imports
+# `from mcrs.training.multimodal_bi_encoder import ...` during _train(),
+# which fails when this script is invoked as a subprocess (e.g., from
+# nb 70 cell 4) because the subprocess's PYTHONPATH doesn't include
+# music-crs-baselines/. The existing `sys.path.insert` inside the
+# full-catalog val branch (line ~1311) runs too late. Hoist here so
+# any `from mcrs.*` works from any code path.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_MCRS_PATH = str(_REPO_ROOT / "music-crs-baselines")
+if _MCRS_PATH not in sys.path:
+    sys.path.insert(0, _MCRS_PATH)
+
+
 # LoRA target modules for BGE-M3 (XLM-RoBERTa under the hood).
 _BGE_M3_LORA_TARGETS = ["query", "key", "value", "dense"]
 
