@@ -383,7 +383,30 @@ class MultiModalBiEncoder(nn.Module):
                 queries, but wrong for ``--resume-from`` because the LoRA
                 params would be silently frozen and only modality heads
                 would receive gradient updates. C1 fix.
+
+        Accepts EITHER a local filesystem path OR a HuggingFace Hub repo
+        id. Hub repos are auto-downloaded via ``huggingface_hub.snapshot_
+        download`` on first load (subsequent loads hit the local HF cache).
         """
+        # Hub-aware: if `in_dir` isn't a local directory, treat it as a
+        # Hub repo id and snapshot_download it first. Matches the
+        # AutoModel.from_pretrained / SentenceTransformer behavior so
+        # nb 70 cell 6's Hub-fallback path (TRAIN_OUTPUT_DIR/merged
+        # cleared by --cleanup-after-push) works.
+        if not os.path.isdir(in_dir):
+            try:
+                from huggingface_hub import snapshot_download
+                print(f"[MultiModalBiEncoder.from_pretrained] {in_dir!r} is not a "
+                      f"local dir; downloading from HF Hub...")
+                in_dir = snapshot_download(repo_id=in_dir)
+                print(f"[MultiModalBiEncoder.from_pretrained] downloaded to {in_dir}")
+            except Exception as e:
+                raise FileNotFoundError(
+                    f"MultiModalBiEncoder.from_pretrained: {in_dir!r} is "
+                    f"neither a local directory nor a downloadable HF Hub "
+                    f"repo ({type(e).__name__}: {e})."
+                ) from e
+
         with open(os.path.join(in_dir, "multimodal_config.json"), "r") as f:
             cfg_dict = json.load(f)
         cfg_dict["lora_targets"] = tuple(cfg_dict.get("lora_targets") or DEFAULT_LORA_TARGETS)
