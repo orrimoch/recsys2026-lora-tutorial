@@ -4,6 +4,7 @@ from .bm25 import BM25_MODEL
 from .bert import BERT_MODEL
 from .dense_precomputed import DENSE_PRECOMPUTED
 from .dense_local import DENSE_LOCAL
+from .dense_multimodal_local import DENSE_MULTIMODAL_LOCAL
 from .rrf import RRF_MODEL
 from .sequential_rerank import SEQUENTIAL_RERANK
 
@@ -378,6 +379,96 @@ def load_retrieval_module(
                     "extra_config": {
                         "sid_hub_repo": extra_config.get("sid_hub_repo")
                     } if extra_config.get("sid_hub_repo") else {},
+                },
+            ],
+            k=60,
+        )
+    # ------------------------------------------------------------------
+    # Multi-modal Stage A (fresh-model branch). Plugs the trained
+    # MultiModalBiEncoder into production via DENSE_MULTIMODAL_LOCAL.
+    # `extra_config` keys:
+    #   - model_dir            : filesystem path OR Hub repo of the saved
+    #                            MultiModalBiEncoder (required).
+    #   - embed_label          : subdir name under {cache_dir}/dense_local/
+    #                            <safe>/ where the catalog pickle lives.
+    #                            Default 'mm-v1'.
+    #   - backbone_override    : optional override for the base model passed
+    #                            to MultiModalBiEncoder.from_pretrained.
+    #   - multimodal_artifacts : path to the precompute cache (tag_vocab,
+    #                            user_cf*, etc.) — REQUIRED at inference time
+    #                            for user_cf lookup + cold-user fallback.
+    #   - query_max_len        : tokenizer max_length for query side
+    #                            (default 384, matches training PASSAGE config).
+    # All keys live at the YAML TOP LEVEL when the outer config invokes
+    # this factory directly; the wrrf_bm25_multimodal_v1 composite below
+    # forwards them via sub_spec extra_config.
+    # ------------------------------------------------------------------
+    elif retrieval_type == "dense_multimodal_local":
+        model_dir = extra_config.get("model_dir") or extra_config.get("hub_repo")
+        if not model_dir:
+            raise ValueError(
+                "dense_multimodal_local requires extra_config['model_dir'] "
+                "(filesystem path OR Hub repo of the saved MultiModalBiEncoder)."
+            )
+        mm_artifacts = extra_config.get("multimodal_artifacts")
+        if not mm_artifacts:
+            raise ValueError(
+                "dense_multimodal_local requires extra_config['multimodal_artifacts'] "
+                "(path to scripts/precompute_multimodal_artifacts.py output)."
+            )
+        return DENSE_MULTIMODAL_LOCAL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            model_dir=model_dir,
+            embed_label=extra_config.get("embed_label", "mm-v1"),
+            backbone_override=extra_config.get("backbone_override"),
+            multimodal_artifacts=mm_artifacts,
+            query_max_len=int(extra_config.get("query_max_len", 384)),
+        )
+    # nDCG-stretch Stage A multi-modal composite. BM25 (proven lexical
+    # complement) + DENSE_MULTIMODAL_LOCAL. The multi-modal tower
+    # SUBSUMES dense_metadata + dense_lyrics + cf_bpr — those streams
+    # become redundant because text, lyrics, CF, audio, and tag/year are
+    # all fused inside the encoder.
+    #
+    # topk_internal bumped to 100 (vs the 60 used by legacy wRRFs) so the
+    # candidate pool is rich enough to feed Stage B (multi-modal cross-
+    # encoder reranker) when that lands in Phase 6+.
+    elif retrieval_type == "wrrf_bm25_multimodal_v1":
+        mm_model_dir = extra_config.get("mm_model_dir") or extra_config.get("hub_repo")
+        if not mm_model_dir:
+            raise ValueError(
+                "wrrf_bm25_multimodal_v1 requires extra_config['mm_model_dir'] "
+                "(or legacy alias 'hub_repo') — the multi-modal model path."
+            )
+        mm_artifacts = extra_config.get("multimodal_artifacts")
+        if not mm_artifacts:
+            raise ValueError(
+                "wrrf_bm25_multimodal_v1 requires extra_config['multimodal_artifacts']."
+            )
+        return RRF_MODEL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            sub_specs=[
+                {
+                    "type": "bm25",
+                    "corpus_types": [
+                        "track_name", "artist_name", "album_name",
+                        "release_date", "tag_list",
+                    ],
+                    "topk_internal": 100,
+                    "weight": 1.0,
+                },
+                {
+                    "type": "dense_multimodal_local",
+                    "corpus_types": corpus_types,
+                    "topk_internal": 100,
+                    "weight": 0.7,
+                    "extra_config": {
+                        "model_dir": mm_model_dir,
+                        "embed_label": extra_config.get("embed_label", "mm-v1"),
+                        "backbone_override": extra_config.get("backbone_override"),
+                        "multimodal_artifacts": mm_artifacts,
+                        "query_max_len": int(extra_config.get("query_max_len", 384)),
+                    },
                 },
             ],
             k=60,
