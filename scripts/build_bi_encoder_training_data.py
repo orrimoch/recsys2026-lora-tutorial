@@ -56,6 +56,10 @@ def build_triples_for_row(
     neg_track_ids: list[str],
     track_text_map: dict[str, str],
     query_mode: str = "bge_m3_structured",
+    metadata_dict: Optional[dict] = None,
+    tag_vocab: Optional[dict[str, int]] = None,
+    release_year_lookup: Optional[dict[str, int]] = None,
+    max_tags: int = 20,
 ) -> dict:
     """Build one JSONL triple for a (query, gold, negs) tuple.
 
@@ -63,6 +67,23 @@ def build_triples_for_row(
     the fine-tune is optimized for a distribution the runtime never sees.
 
     Negatives not present in track_text_map are silently dropped (catalog drift guard).
+
+    Multi-modal fields (Phase 1, fresh-model branch):
+      When ``tag_vocab`` and/or ``release_year_lookup`` are provided, the
+      output triple additionally carries:
+        - ``tag_ids_pos`` / ``tag_ids_neg``: list[list[int]] of tag-vocab IDs
+          (truncated to ``max_tags``; pad-id 0 reserved).
+        - ``release_year_pos`` / ``release_year_neg``: list[int] (-1 = unknown).
+      These extra fields drive the multi-modal model's tag-embedding +
+      release-year tokens (see ``MultiModalBiEncoder`` in
+      ``mcrs/training/multimodal_bi_encoder.py``).
+
+    DESIGN NOTE: teacher-score-driven multi-positive promotion is NOT done
+    here. The triples file stays single-positive (canonical) and the
+    training dataloader joins ``teacher_scores.parquet`` at __getitem__
+    time to promote alternates dynamically. This keeps the builder a
+    single, fast pass (no reranker dependency) AND lets multi-positive
+    threshold be tuned without rebuilding triples.
     """
     query = format_query_text(
         chat_history=row.get("chat_history") or [],
@@ -73,7 +94,7 @@ def build_triples_for_row(
     )
     # Filter neg track_ids once so `neg` and `neg_tids` stay index-aligned.
     kept_neg_tids = [tid for tid in neg_track_ids if tid in track_text_map]
-    return {
+    out = {
         "query": query,
         "pos": [track_text_map[gold_track_id]],
         "neg": [track_text_map[tid] for tid in kept_neg_tids],
@@ -90,6 +111,73 @@ def build_triples_for_row(
         "user_id": row.get("user_id"),
         "session_id": row.get("session_id"),
     }
+    if tag_vocab is not None and metadata_dict is not None:
+        out["tag_ids_pos"] = [_track_to_tag_ids(gold_track_id, metadata_dict, tag_vocab, max_tags)]
+        out["tag_ids_neg"] = [
+            _track_to_tag_ids(tid, metadata_dict, tag_vocab, max_tags) for tid in kept_neg_tids
+        ]
+    if release_year_lookup is not None:
+        out["release_year_pos"] = [int(release_year_lookup.get(gold_track_id, -1))]
+        out["release_year_neg"] = [int(release_year_lookup.get(tid, -1)) for tid in kept_neg_tids]
+    return out
+
+
+def _track_to_tag_ids(
+    track_id: str,
+    metadata_dict: dict,
+    tag_vocab: dict[str, int],
+    max_tags: int = 20,
+) -> list[int]:
+    """Map a track's ``tag_list`` (lowercased, stripped) to tag-vocab IDs.
+
+    Matches ``scripts/precompute_multimodal_artifacts.py:_build_metadata_artifacts``
+    normalization (lowercase + strip) so the same tag string always maps to
+    the same vocab id at train and inference time. Unknown tags are skipped.
+    """
+    md = metadata_dict.get(track_id) if metadata_dict else None
+    if not md:
+        return []
+    tags = md.get("tag_list") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    ids: list[int] = []
+    for t in tags[:max_tags]:
+        norm = str(t).strip().lower()
+        tid = tag_vocab.get(norm)
+        if tid is not None:
+            ids.append(tid)
+    return ids
+
+
+def _load_multimodal_artifacts(cache_dir: str) -> tuple[Optional[dict], Optional[dict]]:
+    """Load tag_vocab.json + release_year_lookup.json from a multi-modal
+    artifact cache dir (built by ``scripts/precompute_multimodal_artifacts.py``).
+
+    Returns ``(tag_vocab, release_year_lookup)``. Either can be None if its
+    artifact file is missing — caller decides how strict to be.
+    """
+    import os as _os
+    tag_path = _os.path.join(cache_dir, "tag_vocab.json")
+    year_path = _os.path.join(cache_dir, "release_year_lookup.json")
+    tag_vocab = None
+    year_lookup = None
+    if _os.path.isfile(tag_path):
+        with open(tag_path, "r") as f:
+            tag_vocab = json.load(f)
+        print(f"[mm-artifacts] loaded tag_vocab: {len(tag_vocab)} entries from {tag_path}",
+              file=sys.stderr)
+    else:
+        print(f"[mm-artifacts] WARN: {tag_path} missing — tag_ids_* will not be emitted",
+              file=sys.stderr)
+    if _os.path.isfile(year_path):
+        with open(year_path, "r") as f:
+            year_lookup = json.load(f)
+        print(f"[mm-artifacts] loaded release_year_lookup: {len(year_lookup)} tracks from {year_path}",
+              file=sys.stderr)
+    else:
+        print(f"[mm-artifacts] WARN: {year_path} missing — release_year_* will not be emitted",
+              file=sys.stderr)
+    return tag_vocab, year_lookup
 
 
 def _format_history_music_turn(
@@ -243,7 +331,33 @@ def main():
                              "config 021 (corpus_types: [track_name, artist_name, "
                              "album_name]). Closes the train/eval feature-parity "
                              "gap in the [HISTORY] block.")
+    # Phase 1 (fresh-model branch): multi-modal training-data fields.
+    # When ``--multimodal-artifacts`` is set, the builder loads
+    # ``tag_vocab.json`` + ``release_year_lookup.json`` from that dir and
+    # emits ``tag_ids_pos`` / ``tag_ids_neg`` / ``release_year_pos`` /
+    # ``release_year_neg`` in every triple. Backwards-compatible:
+    # without the flag the JSONL stays in the original schema.
+    parser.add_argument(
+        "--multimodal-artifacts", type=str, default="",
+        help="Optional path to the cache dir built by "
+             "scripts/precompute_multimodal_artifacts.py. When set, the "
+             "builder loads tag_vocab.json + release_year_lookup.json from "
+             "this dir and adds tag_ids_{pos,neg} + release_year_{pos,neg} "
+             "fields to every triple. Leave empty to keep the legacy text-only "
+             "schema (current default).",
+    )
+    parser.add_argument(
+        "--max-tags", type=int, default=20,
+        help="Truncate per-track tag_ids to this length (matches the model's "
+             "tag-token capacity). Only used when --multimodal-artifacts is set.",
+    )
     args = parser.parse_args()
+
+    # Phase 1: optionally load multi-modal artifacts (tag_vocab + release_year_lookup).
+    tag_vocab: Optional[dict] = None
+    release_year_lookup: Optional[dict] = None
+    if args.multimodal_artifacts:
+        tag_vocab, release_year_lookup = _load_multimodal_artifacts(args.multimodal_artifacts)
 
     # Lazy imports — FlagEmbedding has a heavy CUDA-touching init; keeps unit tests fast.
     from datasets import load_dataset
@@ -426,8 +540,14 @@ def main():
                 if len(negs) < 2:
                     n_skipped_too_few_negs += 1
                     continue
-                triple = build_triples_for_row(row, gold_tid, negs, track_text_map,
-                                                query_mode=args.query_mode)
+                triple = build_triples_for_row(
+                    row, gold_tid, negs, track_text_map,
+                    query_mode=args.query_mode,
+                    metadata_dict=metadata_dict,
+                    tag_vocab=tag_vocab,
+                    release_year_lookup=release_year_lookup,
+                    max_tags=args.max_tags,
+                )
                 f_out.write(json.dumps(triple) + "\n")
                 n_written += 1
 
