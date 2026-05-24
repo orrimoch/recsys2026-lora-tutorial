@@ -159,6 +159,33 @@ def test_compute_batch_loss_runs_and_backprops():
     assert any(grads)
 
 
+def test_stage_b_deferred_import_symbols_resolve():
+    """Regression guard (reviewer-caught Critical): the deferred imports in
+    train_cross_encoder.main() and MULTIMODAL_RERANKER.__init__ must resolve
+    from the SAME places Stage A defines them. MultiModalArtifacts lives in
+    train_bi_encoder (scripts/), NOT in mcrs.training.multimodal_bi_encoder.
+    Mirrors those import blocks so a wrong source is caught without a model load.
+    """
+    import pathlib
+    import sys
+    root = pathlib.Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root / "scripts"))
+    sys.path.insert(0, str(root / "music-crs-baselines"))
+
+    from mcrs.training.multimodal_bi_encoder import MultiModalConfig  # noqa: F401
+    from mcrs.training.multimodal_cross_encoder import MultiModalCrossEncoder  # noqa: F401
+    from train_bi_encoder import MultiModalArtifacts, TripleJsonlDataset  # noqa: F401
+    from build_bi_encoder_training_data import (  # noqa: F401
+        _format_history_music_turn, _load_multimodal_artifacts, _track_to_tag_ids,
+    )
+
+    import mcrs.training.multimodal_bi_encoder as _mm
+    assert not hasattr(_mm, "MultiModalArtifacts"), (
+        "MultiModalArtifacts must NOT be importable from "
+        "mcrs.training.multimodal_bi_encoder — it's defined in train_bi_encoder."
+    )
+
+
 def test_compute_batch_loss_lower_when_model_ranks_well():
     """Sanity: a batch is just one scalar; confirm the step returns a 0-dim
     tensor (not per-pair) so the optimizer sees a single objective."""

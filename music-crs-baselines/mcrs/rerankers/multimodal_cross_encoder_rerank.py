@@ -68,8 +68,10 @@ class MULTIMODAL_RERANKER:
             _load_multimodal_artifacts,
             _track_to_tag_ids,
         )
-        from mcrs.training.multimodal_bi_encoder import MultiModalArtifacts
         from mcrs.training.multimodal_cross_encoder import MultiModalCrossEncoder
+        # MultiModalArtifacts lives in train_bi_encoder (mirrors Stage A), NOT in
+        # the mcrs.training.multimodal_bi_encoder module.
+        from train_bi_encoder import MultiModalArtifacts
 
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -78,12 +80,19 @@ class MULTIMODAL_RERANKER:
         self.max_length = max_length
         self.max_tags = max_tags
 
-        # Trained Stage B model + tokenizer (tokenizer saved under backbone/).
-        self.model = MultiModalCrossEncoder.from_pretrained(model_dir, device=device).eval()
+        # Resolve a Hub repo id to a local snapshot ONCE, so both the model and
+        # the tokenizer (saved under backbone/) load from the same local dir.
+        # (from_pretrained is Hub-aware too, but we need the resolved path here
+        # to find the tokenizer subdir.)
+        local_dir = model_dir
+        if not os.path.isdir(model_dir):
+            from huggingface_hub import snapshot_download
+            local_dir = snapshot_download(repo_id=model_dir)
+        self.model = MultiModalCrossEncoder.from_pretrained(local_dir, device=device).eval()
         from transformers import AutoTokenizer
-        tok_dir = os.path.join(model_dir, "backbone")
+        tok_dir = os.path.join(local_dir, "backbone")
         self.tokenizer = AutoTokenizer.from_pretrained(
-            tok_dir if os.path.isdir(tok_dir) else model_dir
+            tok_dir if os.path.isdir(tok_dir) else local_dir
         )
 
         # Modality artifacts (CLAP/CF/user_cf) + tag vocab + release-year lookup.

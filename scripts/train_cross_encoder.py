@@ -47,6 +47,8 @@ def pairwise_bce_loss(pos_logits, neg_logits, neg_weights=None):
     pos_loss = F.binary_cross_entropy_with_logits(
         pos_logits, torch.ones_like(pos_logits)
     )
+    if neg_logits.numel() == 0:
+        return pos_loss  # no negatives in batch — positives-only term (avoid NaN)
     neg_targets = torch.zeros_like(neg_logits)
     if neg_weights is not None:
         neg_loss = F.binary_cross_entropy_with_logits(
@@ -120,6 +122,7 @@ def compute_batch_loss(model, tokenizer, rows, max_length: int = 512,
     term is unweighted. ``tokenizer`` / ``model`` are injected so the step is
     unit-testable with stubs (no 570M reranker download, no GPU).
     """
+    import numpy as np
     import torch
 
     flat = flatten_ce_pairs(rows)
@@ -128,14 +131,17 @@ def compute_batch_loss(model, tokenizer, rows, max_length: int = 512,
     d_enc = tokenizer(flat["doc_text"], padding=True, truncation=True,
                       max_length=max_length, return_tensors="pt")
 
+    def _f32(x):  # list-of-arrays -> contiguous (N, D) tensor (avoids slow torch.tensor path)
+        return torch.tensor(np.asarray(x, dtype=np.float32), device=device)
+
     logits = model(
         query_input_ids=q_enc["input_ids"].to(device),
         query_attention_mask=q_enc["attention_mask"].to(device),
-        query_user_cf=torch.tensor(flat["user_cf"], dtype=torch.float32, device=device),
+        query_user_cf=_f32(flat["user_cf"]),
         doc_input_ids=d_enc["input_ids"].to(device),
         doc_attention_mask=d_enc["attention_mask"].to(device),
-        doc_clap=torch.tensor(flat["doc_clap"], dtype=torch.float32, device=device),
-        doc_cf=torch.tensor(flat["doc_cf"], dtype=torch.float32, device=device),
+        doc_clap=_f32(flat["doc_clap"]),
+        doc_cf=_f32(flat["doc_cf"]),
         doc_tags=torch.tensor(_pad_tag_ids(flat["doc_tags"], max_tags),
                               dtype=torch.long, device=device),
         doc_year=torch.tensor(flat["doc_year"], dtype=torch.long, device=device),
@@ -175,9 +181,11 @@ def main():
     repo_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo_root / "music-crs-baselines"))
     sys.path.insert(0, str(repo_root / "scripts"))
-    from mcrs.training.multimodal_bi_encoder import MultiModalArtifacts, MultiModalConfig
+    from mcrs.training.multimodal_bi_encoder import MultiModalConfig
     from mcrs.training.multimodal_cross_encoder import MultiModalCrossEncoder
-    from train_bi_encoder import TripleJsonlDataset
+    # MultiModalArtifacts lives in train_bi_encoder (mirrors Stage A), NOT in the
+    # mcrs.training.multimodal_bi_encoder module.
+    from train_bi_encoder import MultiModalArtifacts, TripleJsonlDataset
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
