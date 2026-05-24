@@ -33,6 +33,34 @@ def _expand_triples_to_pairs(path: str) -> tuple[list, list]:
     return pos_pairs, neg_pairs
 
 
+def pairwise_bce_loss(pos_logits, neg_logits, neg_weights=None):
+    """Pairwise binary cross-entropy for the Stage B reranker.
+
+    ``loss = BCE(score(q, pos), 1) + BCE(score(q, neg), 0)`` — the relevance
+    objective from the plan (Phase 6 §6.5). ``pos_logits`` / ``neg_logits`` are
+    raw scoring-head outputs (B,) / (N,); targets are applied internally so the
+    caller never materializes 1/0 tensors.
+
+    ``neg_weights`` (optional, shape matching ``neg_logits``): per-negative
+    weights for the negative term — used for v2 rank-weighting of harder Stage A
+    negatives. v1 passes None (unweighted), since teacher scores are dormant.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    pos_loss = F.binary_cross_entropy_with_logits(
+        pos_logits, torch.ones_like(pos_logits)
+    )
+    neg_targets = torch.zeros_like(neg_logits)
+    if neg_weights is not None:
+        neg_loss = F.binary_cross_entropy_with_logits(
+            neg_logits, neg_targets, weight=neg_weights
+        )
+    else:
+        neg_loss = F.binary_cross_entropy_with_logits(neg_logits, neg_targets)
+    return pos_loss + neg_loss
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--triples", required=True)
