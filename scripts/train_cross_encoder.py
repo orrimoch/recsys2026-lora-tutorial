@@ -149,20 +149,69 @@ def score_ce_batch(model, tokenizer, rows, max_length: int = 512,
     return logits, is_pos
 
 
+def listwise_softmax_loss(logits, is_positive, temperature: float = 1.0):
+    """Listwise softmax cross-entropy (LCE) for the Stage B reranker.
+
+    For each per-query group ``[pos, neg_1, ..., neg_K]`` (every ``True`` in
+    ``is_positive`` starts a group, matching ``flatten_ce_pairs`` order), take a
+    softmax over the group's scores ``/temperature`` and apply cross-entropy
+    with the positive (local index 0) as the target:
+    ``-log( exp(s_pos/T) / sum_j exp(s_j/T) )``.
+
+    Optimizes RELATIVE ranking (positive ranked first) rather than absolute
+    calibration, so unlike ``pairwise_bce_loss`` it descends from
+    ``ln(group_size)`` toward 0 as the positive's margin grows instead of
+    flooring at ``2*ln2`` under noisy labels — and it directly targets the
+    nDCG/top1 the reranker is judged on. ``temperature`` (T) sharpens (<1) or
+    softens (>1) the distribution. Averaged over groups. Pure tensor op.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    pos_idx = torch.nonzero(is_positive, as_tuple=False).flatten().tolist()
+    if not pos_idx:
+        return logits.sum() * 0.0  # no positives -> 0 (keeps graph + device)
+    scaled = logits / temperature
+    bounds = pos_idx + [logits.shape[0]]
+    target = torch.zeros(1, dtype=torch.long, device=logits.device)
+    losses = []
+    for gi, start in enumerate(pos_idx):
+        group = scaled[start:bounds[gi + 1]]  # positive at local index 0
+        losses.append(F.cross_entropy(group.unsqueeze(0), target))
+    return torch.stack(losses).mean()
+
+
+def compute_ce_loss(logits, is_positive, loss_type: str = "bce",
+                    temperature: float = 1.0):
+    """Dispatch the Stage B loss by name.
+
+    ``bce``     -> ``pairwise_bce_loss`` (per-pair calibration; v1 default).
+    ``softmax`` -> ``listwise_softmax_loss`` (in-group ranking; LCE).
+    Shared by ``compute_batch_loss`` and the train/val loops so both honor the
+    ``--loss`` flag.
+    """
+    if loss_type == "bce":
+        return pairwise_bce_loss(logits[is_positive], logits[~is_positive])
+    if loss_type == "softmax":
+        return listwise_softmax_loss(logits, is_positive, temperature=temperature)
+    raise ValueError(f"unknown loss_type {loss_type!r} (expected 'bce'|'softmax')")
+
+
 def compute_batch_loss(model, tokenizer, rows, max_length: int = 512,
-                       max_tags: int = 20, device: str = "cpu"):
+                       max_tags: int = 20, device: str = "cpu",
+                       loss_type: str = "bce", temperature: float = 1.0):
     """One Stage B training step → a single differentiable loss scalar.
 
-    Scores the batch via ``score_ce_batch`` then splits the logits by the
-    positive/negative flag and applies ``pairwise_bce_loss``. Teacher-score
-    weights are absent in v1 (single-positive), so the negative term is
-    unweighted.
+    Scores the batch via ``score_ce_batch`` then applies the chosen loss
+    (``compute_ce_loss``). Teacher-score weights are absent in v1
+    (single-positive), so the BCE negative term is unweighted.
     """
     logits, is_pos = score_ce_batch(
         model, tokenizer, rows, max_length=max_length, max_tags=max_tags,
         device=device,
     )
-    return pairwise_bce_loss(logits[is_pos], logits[~is_pos])
+    return compute_ce_loss(logits, is_pos, loss_type=loss_type,
+                           temperature=temperature)
 
 
 def ce_group_metrics(logits, is_positive):
@@ -211,6 +260,14 @@ def main():
     parser.add_argument("--hub-repo", default="",
                         help="If set, push the saved model dir to this repo. Empty = skip.")
     parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--loss", default="bce", choices=["bce", "softmax"],
+                        help="Training loss. 'bce' = per-pair calibration (v1 default; "
+                             "floors at 2*ln2 under noisy labels). 'softmax' = in-group "
+                             "listwise cross-entropy (LCE) — optimizes ranking directly "
+                             "and descends from ln(1+n_negatives) toward 0.")
+    parser.add_argument("--loss-temperature", type=float, default=1.0,
+                        help="Softmax-loss temperature (only used when --loss softmax). "
+                             "<1 sharpens, >1 softens the in-group distribution.")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=8,
                         help="Rows per step; each row expands to 1 pos + n-negatives pairs.")
@@ -330,7 +387,10 @@ def main():
     print(f"[train-ce] {len(dataset)} train rows"
           + (f" / {len(val_dataset)} val rows (split_key={args.split_key})"
              if val_loader is not None else " (no val split)")
-          + f", bs={args.batch_size}, {args.n_negatives} negs/row, device={device}",
+          + f", bs={args.batch_size}, {args.n_negatives} negs/row, "
+          + f"loss={args.loss}"
+          + (f"(T={args.loss_temperature})" if args.loss == "softmax" else "")
+          + f", device={device}",
           file=sys.stderr)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -379,7 +439,8 @@ def main():
                         model, tokenizer, vrows, max_length=args.max_length,
                         max_tags=args.max_tags, device=device,
                     )
-                    vloss = pairwise_bce_loss(vlogits[vis_pos], vlogits[~vis_pos])
+                    vloss = compute_ce_loss(vlogits, vis_pos, loss_type=args.loss,
+                                            temperature=args.loss_temperature)
                 loss_sum += float(vloss.item())
                 n_batches += 1
                 ng = int(vis_pos.sum().item())  # one positive per row → groups in batch
@@ -428,7 +489,8 @@ def main():
                     model, tokenizer, rows, max_length=args.max_length,
                     max_tags=args.max_tags, device=device,
                 )
-                loss = pairwise_bce_loss(logits[is_pos], logits[~is_pos])
+                loss = compute_ce_loss(logits, is_pos, loss_type=args.loss,
+                                       temperature=args.loss_temperature)
             loss.backward()
             # Unclipped grad-norm (measure-only, max_norm=inf), logged BEFORE the
             # step — same diagnostic the bi-encoder surfaces.

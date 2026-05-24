@@ -10,7 +10,9 @@ from mcrs.training.multimodal_cross_encoder import MultiModalCrossEncoder
 from scripts.train_cross_encoder import (
     ce_group_metrics,
     compute_batch_loss,
+    compute_ce_loss,
     flatten_ce_pairs,
+    listwise_softmax_loss,
     pairwise_bce_loss,
 )
 
@@ -259,6 +261,116 @@ def test_ce_group_metrics_ties_favor_the_positive():
 
 
 # ---------------------------------------------------------------------------
+# Listwise softmax cross-entropy (LCE) loss + the bce/softmax dispatch. Unlike
+# pairwise BCE (absolute calibration, floors at 2*ln2 under noisy labels), the
+# softmax loss optimizes RELATIVE ranking within each per-query group and
+# descends from ln(group_size) toward 0 as the positive's margin grows.
+# Groups are segmented from the flat [pos, neg_1..neg_K] order via is_positive,
+# positive at local index 0. Pure tensor ops; no model needed.
+# ---------------------------------------------------------------------------
+
+
+def test_softmax_loss_lower_for_correct_ranking():
+    """Positive scored well above its negatives → near-zero loss; inverting the
+    scores (negatives on top) → large loss."""
+    logits = torch.tensor([10.0, 0.0, 0.0])  # one group, positive at index 0
+    is_pos = torch.tensor([True, False, False])
+
+    good = listwise_softmax_loss(logits, is_pos)
+    bad = listwise_softmax_loss(-logits, is_pos)
+
+    assert torch.isfinite(good)
+    assert good < 0.01
+    assert bad > good
+
+
+def test_softmax_loss_at_init_equals_log_group_size():
+    """All-equal scores (model at init) → uniform softmax → CE = ln(group_size).
+    This is the starting point the loss descends FROM (vs BCE's static 2*ln2)."""
+    logits = torch.zeros(4)              # single group of 4 equal scores
+    is_pos = torch.tensor([True, False, False, False])
+
+    loss = listwise_softmax_loss(logits, is_pos)
+
+    assert abs(float(loss) - math.log(4)) < 1e-5
+
+
+def test_softmax_loss_temperature_sharpens():
+    """With the positive already highest, a lower temperature (sharper) gives a
+    lower loss; a higher temperature (softer) gives a higher loss."""
+    logits = torch.tensor([2.0, 0.0, 0.0])
+    is_pos = torch.tensor([True, False, False])
+
+    sharp = listwise_softmax_loss(logits, is_pos, temperature=0.5)
+    base = listwise_softmax_loss(logits, is_pos, temperature=1.0)
+    soft = listwise_softmax_loss(logits, is_pos, temperature=2.0)
+
+    assert sharp < base < soft
+
+
+def test_softmax_loss_handles_ragged_groups():
+    """Groups of unequal length (a 3-candidate group then a 2-candidate group)
+    produce a single finite mean loss."""
+    logits = torch.tensor([1.0, 0.0, 0.0, 1.0, 0.0])
+    is_pos = torch.tensor([True, False, False, True, False])
+
+    loss = listwise_softmax_loss(logits, is_pos)
+
+    assert torch.isfinite(loss)
+    assert loss.dim() == 0
+
+
+def test_softmax_loss_is_differentiable():
+    """The loss backprops into the scores (it must be a usable training loss)."""
+    logits = torch.tensor([1.0, 0.5, -0.5, 2.0, 0.0, 1.0], requires_grad=True)
+    is_pos = torch.tensor([True, False, False, True, False, False])
+
+    listwise_softmax_loss(logits, is_pos).backward()
+
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
+
+
+def test_compute_ce_loss_dispatches_bce_and_softmax():
+    """compute_ce_loss routes to the right loss by name and matches calling the
+    underlying functions directly."""
+    logits = torch.tensor([3.0, 1.0, 0.0, 2.0, -1.0, 0.5])
+    is_pos = torch.tensor([True, False, False, True, False, False])
+
+    bce = compute_ce_loss(logits, is_pos, loss_type="bce")
+    softmax = compute_ce_loss(logits, is_pos, loss_type="softmax", temperature=0.7)
+
+    assert torch.allclose(bce, pairwise_bce_loss(logits[is_pos], logits[~is_pos]))
+    assert torch.allclose(
+        softmax, listwise_softmax_loss(logits, is_pos, temperature=0.7)
+    )
+
+
+def test_compute_ce_loss_rejects_unknown_loss():
+    import pytest
+    logits = torch.tensor([1.0, 0.0])
+    is_pos = torch.tensor([True, False])
+    with pytest.raises(ValueError):
+        compute_ce_loss(logits, is_pos, loss_type="hinge")
+
+
+def test_compute_batch_loss_softmax_runs_and_backprops():
+    """End-to-end step with the softmax loss: flatten → forward → group softmax
+    CE → finite, differentiable scalar that backprops into the model."""
+    model = _tiny_ce_model()
+    tok = _StubTokenizer()
+    rows = [_row("hello there", "gold track", ["bad one", "bad two"])]
+
+    loss = compute_batch_loss(model, tok, rows, max_tags=4, device="cpu",
+                              loss_type="softmax")
+
+    assert torch.isfinite(loss)
+    assert loss.requires_grad
+    loss.backward()
+    assert any(p.grad is not None for p in model.parameters() if p.requires_grad)
+
+
+# ---------------------------------------------------------------------------
 # Disconnect-safety contract (checkpointing + resume). The training loop is
 # GPU-bound, so these are source-level guards: a single epoch is ~15k steps
 # (hours on a small GPU), and the loop previously saved ONLY at the very end —
@@ -342,3 +454,14 @@ def test_train_ce_val_pass_uses_no_grad_and_restores_train_mode():
     main_src = inspect.getsource(mod.main)
     assert "model.eval()" in main_src and "torch.no_grad()" in main_src
     assert "model.train()" in main_src, "val pass must restore train mode"
+
+
+def test_train_ce_exposes_loss_choice_flags_and_routes_them():
+    """--loss {bce,softmax} + --loss-temperature are exposed and the train/val
+    paths go through compute_ce_loss (not a hardcoded pairwise_bce_loss)."""
+    import inspect
+    from scripts import train_cross_encoder as mod
+    main_src = inspect.getsource(mod.main)
+    assert "--loss" in main_src and "--loss-temperature" in main_src
+    assert "compute_ce_loss" in main_src, \
+        "train/val loss must route through compute_ce_loss for the bce/softmax switch"
