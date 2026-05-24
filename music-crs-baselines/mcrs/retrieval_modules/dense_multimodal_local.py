@@ -98,6 +98,7 @@ class DENSE_MULTIMODAL_LOCAL:
         backbone_override: Optional[str] = None,
         multimodal_artifacts: str = "",
         query_max_len: int = 384,
+        query_encode_batch_size: int = 64,
     ) -> None:
         if not model_dir:
             raise ValueError(
@@ -122,6 +123,11 @@ class DENSE_MULTIMODAL_LOCAL:
         self.backbone_override = backbone_override
         self.multimodal_artifacts = multimodal_artifacts
         self.query_max_len = int(query_max_len)
+        # Mini-batch size for query encoding. Encoding all queries in one
+        # forward allocates an FFN activation of n x query_max_len x
+        # intermediate_size floats (~35 GiB for 8000 queries at bge-base),
+        # which OOMs the GPU. Chunking keeps peak activation bounded.
+        self.query_encode_batch_size = int(query_encode_batch_size)
 
         # User CF lookup (shared across instances).
         self._user_cf = _load_user_cf_lookup(multimodal_artifacts)
@@ -222,26 +228,38 @@ class DENSE_MULTIMODAL_LOCAL:
         return np.asarray(self._user_cf["matrix"][idx], dtype=np.float32)
 
     def _encode_queries(self, queries: list, user_ids: list) -> np.ndarray:
-        """Encode a batch of (query, user_id) pairs into normalized embeddings."""
+        """Encode (query, user_id) pairs into normalized embeddings.
+
+        Encodes in mini-batches of ``query_encode_batch_size`` so the peak FFN
+        activation stays bounded (encoding all queries at once OOMs the GPU on
+        large eval/Blind sets — see the class docstring).
+        """
         import torch
         model, tokenizer = self._get_model_and_tokenizer()
         device = next(model.parameters()).device
 
-        enc = tokenizer(
-            queries, max_length=self.query_max_len, padding=True,
-            truncation=True, return_tensors="pt",
-        ).to(device)
-        user_cf_arr = np.stack(
-            [self._get_user_cf(uid) for uid in user_ids], axis=0,
-        ).astype(np.float32)
-        user_cf_t = torch.from_numpy(user_cf_arr).to(device)
-        with torch.no_grad():
-            embs = model.forward_query(
-                input_ids=enc["input_ids"],
-                attention_mask=enc["attention_mask"],
-                user_cf=user_cf_t,
-            )
-        return embs.float().cpu().numpy()
+        bs = self.query_encode_batch_size
+        chunks = []
+        for start in range(0, len(queries), bs):
+            q_chunk = queries[start:start + bs]
+            u_chunk = user_ids[start:start + bs]
+            enc = tokenizer(
+                q_chunk, max_length=self.query_max_len, padding=True,
+                truncation=True, return_tensors="pt",
+            ).to(device)
+            user_cf_arr = np.stack(
+                [self._get_user_cf(uid) for uid in u_chunk], axis=0,
+            ).astype(np.float32)
+            user_cf_t = torch.from_numpy(user_cf_arr).to(device)
+            with torch.no_grad():
+                embs = model.forward_query(
+                    input_ids=enc["input_ids"],
+                    attention_mask=enc["attention_mask"],
+                    user_cf=user_cf_t,
+                )
+            chunks.append(embs.float().cpu().numpy())
+            del enc, user_cf_t, embs
+        return np.concatenate(chunks, axis=0)
 
     # --------------------------------------------------------- query cache
 
