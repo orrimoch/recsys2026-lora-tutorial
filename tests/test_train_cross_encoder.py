@@ -14,6 +14,7 @@ from scripts.train_cross_encoder import (
     flatten_ce_pairs,
     listwise_softmax_loss,
     pairwise_bce_loss,
+    resolve_max_norm,
 )
 
 
@@ -454,6 +455,41 @@ def test_train_ce_val_pass_uses_no_grad_and_restores_train_mode():
     main_src = inspect.getsource(mod.main)
     assert "model.eval()" in main_src and "torch.no_grad()" in main_src
     assert "model.train()" in main_src, "val pass must restore train mode"
+
+
+def test_resolve_max_norm_off_returns_inf():
+    """--max-grad-norm 0 (or negative) -> inf = measure-only, no clipping
+    (back-compat with the original behavior)."""
+    assert resolve_max_norm(0) == float("inf")
+    assert resolve_max_norm(0.0) == float("inf")
+    assert resolve_max_norm(-1.0) == float("inf")
+
+
+def test_resolve_max_norm_positive_returns_value():
+    """A positive --max-grad-norm clips the global grad norm to that value."""
+    assert resolve_max_norm(25) == 25.0
+    assert resolve_max_norm(1.0) == 1.0
+
+
+def test_clip_grad_norm_returns_preclip_norm_and_clips():
+    """Contract we rely on: clip_grad_norm_ with a finite max_norm returns the
+    PRE-clip norm (so spikes stay visible in the log) AND scales the grads down
+    to that norm. Guards the assumption behind logging grad_norm under clipping."""
+    import torch
+    p = torch.nn.Parameter(torch.tensor([3.0, 4.0]))  # grad norm will be 5.0
+    p.grad = torch.tensor([3.0, 4.0])
+    reported = float(torch.nn.utils.clip_grad_norm_([p], max_norm=resolve_max_norm(1.0)))
+    assert abs(reported - 5.0) < 1e-5                       # pre-clip norm reported
+    assert abs(float(p.grad.norm()) - 1.0) < 1e-5           # grads actually clipped to 1.0
+
+
+def test_train_ce_exposes_max_grad_norm_flag_and_uses_resolver():
+    import inspect
+    from scripts import train_cross_encoder as mod
+    main_src = inspect.getsource(mod.main)
+    assert "--max-grad-norm" in main_src, "missing CLI flag: --max-grad-norm"
+    assert "resolve_max_norm(args.max_grad_norm)" in main_src, \
+        "train loop must derive the clip threshold via resolve_max_norm"
 
 
 def test_train_ce_exposes_loss_choice_flags_and_routes_them():

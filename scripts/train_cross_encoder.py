@@ -181,6 +181,18 @@ def listwise_softmax_loss(logits, is_positive, temperature: float = 1.0):
     return torch.stack(losses).mean()
 
 
+def resolve_max_norm(max_grad_norm: float) -> float:
+    """Map the ``--max-grad-norm`` flag to a ``clip_grad_norm_`` max_norm.
+
+    ``0`` (or negative) -> ``inf`` (measure the grad norm only, clip nothing —
+    the original behavior). ``>0`` -> that value, so the global grad norm is
+    clipped to it. Either way ``clip_grad_norm_`` returns the PRE-clip norm, so
+    the logged ``grad_norm`` still surfaces spikes even when clipping is on
+    (e.g. a 230 spike shows as 230 in the log but the applied step is capped).
+    """
+    return max_grad_norm if max_grad_norm and max_grad_norm > 0 else float("inf")
+
+
 def compute_ce_loss(logits, is_positive, loss_type: str = "bce",
                     temperature: float = 1.0):
     """Dispatch the Stage B loss by name.
@@ -268,6 +280,12 @@ def main():
     parser.add_argument("--loss-temperature", type=float, default=1.0,
                         help="Softmax-loss temperature (only used when --loss softmax). "
                              "<1 sharpens, >1 softens the in-group distribution.")
+    parser.add_argument("--max-grad-norm", type=float, default=0.0,
+                        help="Clip the global gradient norm to this value (0 = off, "
+                             "measure-only — the original behavior). Set ~25 to neutralize "
+                             "rare spikes (e.g. softmax-loss bursts to 200+) without "
+                             "throttling the productive ~20 gradients. Logged grad_norm "
+                             "stays the PRE-clip value so spikes remain visible.")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=8,
                         help="Rows per step; each row expands to 1 pos + n-negatives pairs.")
@@ -390,6 +408,8 @@ def main():
           + f", bs={args.batch_size}, {args.n_negatives} negs/row, "
           + f"loss={args.loss}"
           + (f"(T={args.loss_temperature})" if args.loss == "softmax" else "")
+          + (f", clip@{args.max_grad_norm}" if args.max_grad_norm and args.max_grad_norm > 0
+             else ", clip=off")
           + f", device={device}",
           file=sys.stderr)
 
@@ -492,10 +512,11 @@ def main():
                 loss = compute_ce_loss(logits, is_pos, loss_type=args.loss,
                                        temperature=args.loss_temperature)
             loss.backward()
-            # Unclipped grad-norm (measure-only, max_norm=inf), logged BEFORE the
-            # step — same diagnostic the bi-encoder surfaces.
+            # Grad-norm logged BEFORE the optimizer step. clip_grad_norm_ returns
+            # the PRE-clip norm (so spikes stay visible) and, when --max-grad-norm>0,
+            # also scales the grads down to that norm; 0 -> inf -> measure-only.
             grad_norm = float(torch.nn.utils.clip_grad_norm_(
-                model.parameters(), max_norm=float("inf")))
+                model.parameters(), max_norm=resolve_max_norm(args.max_grad_norm)))
             optimizer.step()
             optimizer.zero_grad()
             step += 1
