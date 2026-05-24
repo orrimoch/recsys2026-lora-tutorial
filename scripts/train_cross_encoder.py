@@ -171,6 +171,19 @@ def main():
     parser.add_argument("--max-tags", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-every", type=int, default=25)
+    parser.add_argument("--checkpoint-every-n-steps", type=int, default=0,
+                        help="Save a rolling checkpoint to {output_dir}/checkpoint_latest/ "
+                             "every N optimizer steps (0 = off). A single epoch here is "
+                             "~15k steps (hours), so step-level checkpoints are the real "
+                             "disconnect protection — set output_dir on Drive so they survive.")
+    parser.add_argument("--resume-from", default="",
+                        help="Path (or Hub repo) of a checkpoint to resume from. Loads the "
+                             "model via MultiModalCrossEncoder.from_pretrained; the optimizer "
+                             "restarts fresh (--epochs counts epochs to run from here).")
+    parser.add_argument("--gradient-checkpointing", action="store_true",
+                        help="Enable backbone gradient checkpointing: trades ~30%% per-step "
+                             "speed for much lower activation memory, so a larger --batch-size "
+                             "fits on a memory-constrained GPU (e.g. 16-24 GB).")
     args = parser.parse_args()
 
     import torch
@@ -194,19 +207,31 @@ def main():
     with open(os.path.join(args.multimodal_artifacts, "tag_vocab.json")) as f:
         tag_vocab_size = len(json.load(f))
 
-    # --- model: full FT (lora_rank=0). Load the backbone first so the config's
-    # hidden_dim matches the reranker's hidden size (1024 for bge-reranker-v2-m3).
-    backbone = AutoModel.from_pretrained(args.base_model)
-    cfg = MultiModalConfig(
-        backbone_name=args.base_model,
-        hidden_dim=backbone.config.hidden_size,
-        audio_dim=artifacts.clap_dim,
-        cf_dim=artifacts.cf_dim,
-        tag_vocab_size=tag_vocab_size,
-        max_tags=args.max_tags,
-        lora_rank=0,
-    )
-    model = MultiModalCrossEncoder(cfg, backbone=backbone).to(device)
+    # --- model: full FT (lora_rank=0). Resume from a checkpoint if given (loads
+    # backbone + modality/scoring heads + config), else build fresh. Loading the
+    # backbone first pins the config's hidden_dim to the reranker's hidden size
+    # (1024 for bge-reranker-v2-m3).
+    if args.resume_from:
+        print(f"[train-ce] RESUME from {args.resume_from} (optimizer restarts fresh)",
+              file=sys.stderr)
+        model = MultiModalCrossEncoder.from_pretrained(args.resume_from, device=device)
+    else:
+        backbone = AutoModel.from_pretrained(args.base_model)
+        cfg = MultiModalConfig(
+            backbone_name=args.base_model,
+            hidden_dim=backbone.config.hidden_size,
+            audio_dim=artifacts.clap_dim,
+            cf_dim=artifacts.cf_dim,
+            tag_vocab_size=tag_vocab_size,
+            max_tags=args.max_tags,
+            lora_rank=0,
+        )
+        model = MultiModalCrossEncoder(cfg, backbone=backbone).to(device)
+    if args.gradient_checkpointing and hasattr(model.backbone, "gradient_checkpointing_enable"):
+        model.backbone.gradient_checkpointing_enable()
+        if hasattr(model.backbone, "config"):
+            model.backbone.config.use_cache = False
+        print("[train-ce] gradient checkpointing ON", file=sys.stderr)
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
 
     # --- data: reuse Stage A dataset (single-positive v1: teacher_scores=None) ---
@@ -222,8 +247,31 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     use_amp = device == "cuda"
+    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    def _save_checkpoint(tag: str, epoch: int, step: int, loss_val: float) -> None:
+        """Save the full model to {output_dir}/{tag}/ + a training_state.json.
+        Written to a temp dir then swapped in, so a disconnect mid-save can't
+        corrupt an existing checkpoint. {tag}=checkpoint_latest is rolling
+        (overwritten) to bound Drive usage; checkpoint_epoch_N is per-epoch."""
+        import shutil
+        final_dir = os.path.join(args.output_dir, tag)
+        tmp_dir = os.path.join(args.output_dir, f".{tag}.tmp")
+        if os.path.isdir(tmp_dir):
+            shutil.rmtree(tmp_dir)
+        Path(tmp_dir).mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(tmp_dir)
+        with open(os.path.join(tmp_dir, "training_state.json"), "w") as f:
+            json.dump({"epoch": epoch, "global_step": step, "loss": loss_val}, f)
+        if os.path.isdir(final_dir):
+            shutil.rmtree(final_dir)
+        os.replace(tmp_dir, final_dir)
+        print(f"[train-ce] checkpoint -> {final_dir} (epoch={epoch} step={step})",
+              file=sys.stderr)
+
     model.train()
     step = 0
+    last_loss = float("nan")
     for epoch in range(args.epochs):
         for rows in loader:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
@@ -235,19 +283,28 @@ def main():
             optimizer.step()
             optimizer.zero_grad()
             step += 1
+            last_loss = float(loss.item())
             if step % args.log_every == 0:
-                print(f"[train-ce] epoch={epoch} step={step} loss={loss.item():.4f}",
+                print(f"[train-ce] epoch={epoch} step={step} loss={last_loss:.4f}",
                       file=sys.stderr)
+            if args.checkpoint_every_n_steps and step % args.checkpoint_every_n_steps == 0:
+                _save_checkpoint("checkpoint_latest", epoch, step, last_loss)
+        # Per-epoch checkpoint (resumable; survives disconnect when on Drive).
+        _save_checkpoint(f"checkpoint_epoch_{epoch + 1}", epoch, step, last_loss)
 
-    # --- save (backbone + modality/scoring heads + config) + optional Hub push ---
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    # --- final save (backbone + modality/scoring heads + config) + optional Hub push ---
     model.save_pretrained(args.output_dir)
     print(f"[train-ce] saved → {args.output_dir}", file=sys.stderr)
     if args.hub_repo:
         from huggingface_hub import HfApi
         api = HfApi()
         api.create_repo(args.hub_repo, repo_type="model", exist_ok=True, private=False)
-        api.upload_folder(folder_path=args.output_dir, repo_id=args.hub_repo, repo_type="model")
+        # Exclude the Drive-only checkpoint_* / temp dirs (~1.6 GB each) from the
+        # Hub push so the model repo holds only the final model.
+        api.upload_folder(
+            folder_path=args.output_dir, repo_id=args.hub_repo, repo_type="model",
+            ignore_patterns=["checkpoint_*", ".*"],
+        )
         print(f"[train-ce] pushed → {args.hub_repo}", file=sys.stderr)
 
 

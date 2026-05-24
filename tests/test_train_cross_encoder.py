@@ -196,3 +196,44 @@ def test_compute_batch_loss_lower_when_model_ranks_well():
     loss = compute_batch_loss(model, tok, rows, max_tags=4, device="cpu")
 
     assert loss.dim() == 0
+
+
+# ---------------------------------------------------------------------------
+# Disconnect-safety contract (checkpointing + resume). The training loop is
+# GPU-bound, so these are source-level guards: a single epoch is ~15k steps
+# (hours on a small GPU), and the loop previously saved ONLY at the very end —
+# a Colab disconnect lost everything. Lock in step-level + per-epoch
+# checkpointing, resume, and that checkpoint dirs aren't pushed to the Hub.
+# ---------------------------------------------------------------------------
+
+
+def test_train_ce_exposes_checkpoint_resume_and_gradckpt_flags():
+    import inspect
+    from scripts import train_cross_encoder as mod
+    main_src = inspect.getsource(mod.main)
+    for flag in ("--checkpoint-every-n-steps", "--resume-from", "--gradient-checkpointing"):
+        assert flag in main_src, f"missing CLI flag: {flag}"
+
+
+def test_train_ce_saves_step_and_epoch_checkpoints():
+    import inspect
+    from scripts import train_cross_encoder as mod
+    main_src = inspect.getsource(mod.main)
+    assert "checkpoint_latest" in main_src, "no rolling step-level checkpoint"
+    assert "checkpoint_epoch_" in main_src, "no per-epoch checkpoint"
+
+
+def test_train_ce_resume_loads_from_checkpoint():
+    import inspect
+    from scripts import train_cross_encoder as mod
+    main_src = inspect.getsource(mod.main)
+    assert "args.resume_from" in main_src, "resume flag must be wired into model load"
+    assert "MultiModalCrossEncoder.from_pretrained" in main_src, \
+        "resume must rebuild the cross-encoder via MultiModalCrossEncoder.from_pretrained"
+
+
+def test_train_ce_final_upload_excludes_checkpoint_dirs():
+    import inspect
+    from scripts import train_cross_encoder as mod
+    main_src = inspect.getsource(mod.main)
+    assert "ignore_patterns" in main_src, "final Hub upload must ignore checkpoint dirs"
