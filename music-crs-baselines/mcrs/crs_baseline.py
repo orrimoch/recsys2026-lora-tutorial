@@ -168,6 +168,7 @@ class CRS_BASELINE:
         response_prompt_name: str = "response_generation",
         reranker_type: Optional[str] = None,
         reranker_model_path: Optional[str] = None,
+        reranker_multimodal_artifacts: Optional[str] = None,
         retrieval_topk: int = 20,
         response_max_new_tokens: int = 64,
         top_n_for_prompt: int = 1,
@@ -249,6 +250,7 @@ class CRS_BASELINE:
         self.reranker = load_reranker_module(
             reranker_type, self.item_db_name, self.track_split_types, self.corpus_types, self.cache_dir,
             model_path=reranker_model_path,
+            multimodal_artifacts=reranker_multimodal_artifacts,
         )
         # When reranker is present, pull a larger candidate pool from retrieval
         # (retrieval_topk) and shrink to 20 via rerank. Otherwise retrieval

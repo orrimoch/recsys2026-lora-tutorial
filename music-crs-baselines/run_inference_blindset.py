@@ -73,6 +73,7 @@ def main(args):
     response_prompt_name = config.get("response_prompt_name", "response_generation")
     reranker_type = config.get("reranker_type", None)
     reranker_model_path = config.get("reranker_model_path", None)
+    reranker_multimodal_artifacts = config.get("reranker_multimodal_artifacts", None)
     reranker_chain_cfg = config.get("reranker_chain", None)
     retrieval_topk = int(config.get("retrieval_topk", 20))
     response_max_new_tokens = int(config.get("response_max_new_tokens", 64))
@@ -114,6 +115,7 @@ def main(args):
             track_split_types=list(config.track_split_types),
             corpus_types=list(config.corpus_types),
             cache_dir=config.cache_dir,
+            multimodal_artifacts=reranker_multimodal_artifacts,
         )
         reranker_type = None
         reranker_model_path = None
@@ -132,6 +134,7 @@ def main(args):
         response_prompt_name=response_prompt_name,
         reranker_type=reranker_type,
         reranker_model_path=reranker_model_path,
+        reranker_multimodal_artifacts=reranker_multimodal_artifacts,
         retrieval_topk=retrieval_topk,
         response_max_new_tokens=response_max_new_tokens,
         top_n_for_prompt=top_n_for_prompt,

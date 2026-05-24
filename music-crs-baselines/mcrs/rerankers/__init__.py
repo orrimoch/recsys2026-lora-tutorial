@@ -19,6 +19,7 @@ def load_reranker_module(
     corpus_types: list[str],
     cache_dir: str = "./cache",
     model_path: Optional[str] = None,
+    multimodal_artifacts: Optional[str] = None,
 ) -> Optional[Any]:
     """Return a reranker instance or None if reranker_type is falsy.
 
@@ -67,6 +68,33 @@ def load_reranker_module(
             cache_dir=cache_dir,
             model_path=model_path,
         )
+    if reranker_type == "multimodal_cross_encoder":
+        # Stage B: trained MultiModalCrossEncoder. Needs BOTH the model dir/Hub
+        # (reranker_model_path) AND the Phase 0 modality artifacts dir
+        # (reranker_multimodal_artifacts). user_ids flow in via rerank()'s
+        # side-channel kwargs — this is why the cross-encoder lives at the
+        # reranker layer (batch_chat forwards user_ids) and NOT as a
+        # retriever-level cascade.
+        if not model_path:
+            raise ValueError(
+                "reranker_type=multimodal_cross_encoder requires "
+                "reranker_model_path (trained MultiModalCrossEncoder dir or Hub repo)."
+            )
+        if not multimodal_artifacts:
+            raise ValueError(
+                "reranker_type=multimodal_cross_encoder requires "
+                "reranker_multimodal_artifacts (Phase 0 cache dir with "
+                "tag_vocab.json + track_clap/cf + user_cf)."
+            )
+        from .multimodal_cross_encoder_rerank import MULTIMODAL_RERANKER
+        return MULTIMODAL_RERANKER(
+            model_dir=model_path,
+            multimodal_artifacts=multimodal_artifacts,
+            item_db_name=item_db_name,
+            track_split_types=track_split_types,
+            corpus_types=corpus_types,
+            cache_dir=cache_dir,
+        )
     if reranker_type == "chain":
         # 'chain' configs require a list-of-dicts spec that load_reranker_module's
         # current signature doesn't carry. The clean path is to call
@@ -86,10 +114,13 @@ def load_chain_reranker(
     track_split_types: list[str],
     corpus_types: list[str],
     cache_dir: str = "./cache",
+    multimodal_artifacts: Optional[str] = None,
 ):
     """Build a CHAIN_RERANKER from a YAML list-of-dicts spec.
 
     Each spec dict: {"type": "<reranker_type>", "model_path": "<...>", "topk": <int>}.
+    A stage may carry its own "multimodal_artifacts"; otherwise the chain-level
+    default (arg) is used (lets a multimodal_cross_encoder stage live in a chain).
     """
     from .chain import CHAIN_RERANKER
 
@@ -105,6 +136,7 @@ def load_chain_reranker(
             corpus_types=corpus_types,
             cache_dir=cache_dir,
             model_path=stage_model_path,
+            multimodal_artifacts=stage_cfg.get("multimodal_artifacts", multimodal_artifacts),
         )
         stages.append((stage_type, stage_topk, sub))
     return CHAIN_RERANKER(stages=stages)
