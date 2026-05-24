@@ -242,7 +242,21 @@ def _load_teacher_scores(parquet_path: str) -> dict:
     key the parquet identically (no index drift across scripts).
 
     Value is ``{pos_score: float, neg_tid_to_score: dict[str, float]}``.
+
+    A missing or empty ``parquet_path`` returns ``{}`` (which maps to the
+    single-positive fallback downstream — every key lookup misses) with a
+    warning rather than raising. v1 is single-positive and the teacher parquet
+    is dormant/absent, so a missing file must not abort the ~121K-row Stage B
+    build (nb 71 cell 3) after the full conversation walk.
     """
+    import os
+
+    if not parquet_path or not os.path.exists(parquet_path):
+        print(f"[ce-build] teacher scores not found at {parquet_path!r}; "
+              f"building single-positive (gold + Stage A hard negatives).",
+              file=sys.stderr)
+        return {}
+
     import pandas as _pd
 
     df = _pd.read_parquet(parquet_path)

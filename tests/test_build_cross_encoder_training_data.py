@@ -287,3 +287,13 @@ def test_builder_exposes_stage_a_and_teacher_cli_flags():
         "--teacher-scores-path", "--multipositive-threshold", "--pool-size",
     ):
         assert flag in main_src, f"missing CLI flag: {flag}"
+
+
+def test_load_teacher_scores_missing_or_empty_path_returns_empty(tmp_path):
+    """A missing or empty teacher-scores path must skip gracefully (return {}),
+    NOT raise. v1 is single-positive and the parquet is dormant/absent; crashing
+    after the full ~121K-row walk (nb 71 cell 3) on a missing file is the bug we
+    are fixing. An empty {} maps to single-positive downstream (every key misses)."""
+    from scripts.build_cross_encoder_training_data import _load_teacher_scores
+    assert _load_teacher_scores("") == {}
+    assert _load_teacher_scores(str(tmp_path / "does_not_exist.parquet")) == {}
