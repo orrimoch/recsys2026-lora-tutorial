@@ -1,0 +1,71 @@
+# Submission 3: Stage A (multi-modal) + Stage B (multi-modal cross-encoder) + v5-kto.
+#
+# Swaps config 180's text-only BGE-M3 Stage A + ProRank for the Phase-A multi-modal
+# retriever (wRRF BM25 + multi-modal dense bi-encoder, nb 70) and the Phase-B
+# multi-modal cross-encoder reranker (nb 71).
+#
+# Top-level keys are forwarded as extra_config by run_inference_blindset.py
+# (it does OmegaConf.to_container(config, resolve=True)), so the retrieval factory
+# reads mm_model_dir / multimodal_artifacts / embed_label from here. Do NOT nest
+# under `extra_config:`. reranker_type / reranker_model_path /
+# reranker_multimodal_artifacts are read explicitly by the driver.
+
+lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
+lora_path: null
+lora_max_rank: 32
+
+# --- Stage A: multi-modal retriever — wRRF(BM25 + multi-modal dense bi-encoder) ---
+# mm_model_dir + embed_label MUST match what nb 70 pushed and embed_catalog_multimodal.py
+# labeled the catalog with; multimodal_artifacts is the Phase 0 precompute cache.
+retrieval_type: "wrrf_bm25_multimodal_v1"
+mm_model_dir: "OrRim123/recsys2026-bge-base-en-music-v1-mm-merged"
+embed_label: "bge-base-en-music-v1-mm-merged"
+multimodal_artifacts: "/content/drive/MyDrive/recsys2026_retrieval_v2_cache/multimodal"
+
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+retrieval_topk: 100
+
+# --- Stage B: multi-modal cross-encoder reranker (nb 71) ---
+# Reorders the top-100 pool to top-20. Needs the trained model + the SAME Phase 0
+# artifacts dir (CLAP/CF/tags/user_cf) the retriever uses.
+reranker_type: "multimodal_cross_encoder"
+reranker_model_path: "OrRim123/recsys2026-mm-reranker-v1"
+reranker_multimodal_artifacts: "/content/drive/MyDrive/recsys2026_retrieval_v2_cache/multimodal"
+
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 320
+top_n_for_prompt: 1
+# Stage A was fine-tuned on the structured 4-block query format (nb 70/71 use
+# mode='bge_m3_structured'); match it at inference so the encoder sees the same
+# distribution at deploy as during training.
+query_preprocessing_mode: "bge_m3_structured"
+
+use_vllm: false
+
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+# CMQR OFF: training queries are structured multi-turn blobs, so CMQR's short
+# paraphrases would break the train/inference distribution match (same reasoning
+# as config 180). Re-enable only after measuring the multi-modal stack in isolation.
+use_cmqr: false
+cmqr_prompt_name: "cmqr_rewrites"
+cmqr_n_rewrites: 4
+cmqr_topk_per_rewrite: 50
+cmqr_rrf_k: 60
+cmqr_max_new_tokens: 96
