@@ -61,6 +61,47 @@ def pairwise_bce_loss(pos_logits, neg_logits, neg_weights=None):
     return pos_loss + neg_loss
 
 
+def flatten_ce_pairs(rows: list) -> dict:
+    """Flatten ``TripleJsonlDataset`` rows into per-(query, doc) scoring pairs.
+
+    Each row carries 1 gold positive + K sampled negatives plus aligned
+    modality data (from ``train_bi_encoder.py``'s multi-modal ``__getitem__``).
+    The cross-encoder scores one (query, doc) pair at a time, so we expand every
+    row into K+1 pairs: the gold (``is_positive=True``) first, then each
+    negative (``is_positive=False``). ``query`` and ``user_cf`` are repeated
+    across a row's pairs so the scoring head sees the same user/query context
+    for each candidate. Returns a dict of parallel lists (length = total pairs);
+    the trainer splits logits by ``is_positive`` for ``pairwise_bce_loss``.
+    """
+    out: dict[str, list] = {
+        "query": [], "doc_text": [], "doc_clap": [], "doc_cf": [],
+        "doc_tags": [], "doc_year": [], "user_cf": [], "is_positive": [],
+    }
+    for row in rows:
+        query = row["query"]
+        user_cf = row["user_cf"]
+        # Gold positive pair first, then each negative — aligned modality lists.
+        pairs = [(
+            row["positive"], row["pos_clap"], row["pos_cf_track"],
+            row["pos_tag_ids"], row["pos_year"], True,
+        )]
+        for i, neg_text in enumerate(row.get("negatives", [])):
+            pairs.append((
+                neg_text, row["neg_clap"][i], row["neg_cf_track"][i],
+                row["neg_tag_ids"][i], row["neg_years"][i], False,
+            ))
+        for doc_text, clap, cf, tags, year, is_pos in pairs:
+            out["query"].append(query)
+            out["user_cf"].append(user_cf)
+            out["doc_text"].append(doc_text)
+            out["doc_clap"].append(clap)
+            out["doc_cf"].append(cf)
+            out["doc_tags"].append(tags)
+            out["doc_year"].append(year)
+            out["is_positive"].append(is_pos)
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--triples", required=True)
