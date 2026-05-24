@@ -109,17 +109,16 @@ def _pad_tag_ids(tag_id_lists: list, max_tags: int, pad: int = 0) -> list:
     return out
 
 
-def compute_batch_loss(model, tokenizer, rows, max_length: int = 512,
-                       max_tags: int = 20, device: str = "cpu"):
-    """One Stage B training step → a single differentiable loss scalar.
+def score_ce_batch(model, tokenizer, rows, max_length: int = 512,
+                   max_tags: int = 20, device: str = "cpu"):
+    """Forward one batch of triples → ``(logits, is_positive)``.
 
     Flattens the batch's ``TripleJsonlDataset`` rows into (query, doc) pairs,
-    tokenizes the query and doc sides, builds the modality tensors, scores every
-    pair with the ``MultiModalCrossEncoder``, then splits the logits by the
-    positive/negative flag and applies ``pairwise_bce_loss``.
-
-    Teacher-score weights are absent in v1 (single-positive), so the negative
-    term is unweighted. ``tokenizer`` / ``model`` are injected so the step is
+    tokenizes both sides, builds the modality tensors, and scores every pair
+    with the ``MultiModalCrossEncoder``. Returns the raw scoring-head ``logits``
+    (N,) and the aligned ``is_positive`` bool mask (N,). Shared by
+    ``compute_batch_loss`` and the train/val ranking metrics so a step needs
+    only ONE forward pass. ``tokenizer`` / ``model`` are injected so the step is
     unit-testable with stubs (no 570M reranker download, no GPU).
     """
     import numpy as np
@@ -147,7 +146,57 @@ def compute_batch_loss(model, tokenizer, rows, max_length: int = 512,
         doc_year=torch.tensor(flat["doc_year"], dtype=torch.long, device=device),
     )
     is_pos = torch.tensor(flat["is_positive"], dtype=torch.bool, device=device)
+    return logits, is_pos
+
+
+def compute_batch_loss(model, tokenizer, rows, max_length: int = 512,
+                       max_tags: int = 20, device: str = "cpu"):
+    """One Stage B training step → a single differentiable loss scalar.
+
+    Scores the batch via ``score_ce_batch`` then splits the logits by the
+    positive/negative flag and applies ``pairwise_bce_loss``. Teacher-score
+    weights are absent in v1 (single-positive), so the negative term is
+    unweighted.
+    """
+    logits, is_pos = score_ce_batch(
+        model, tokenizer, rows, max_length=max_length, max_tags=max_tags,
+        device=device,
+    )
     return pairwise_bce_loss(logits[is_pos], logits[~is_pos])
+
+
+def ce_group_metrics(logits, is_positive):
+    """In-group ranking metrics → ``(top1_accuracy, mean_nDCG)`` as floats.
+
+    ``logits`` (N,) and ``is_positive`` (N,) come from ``flatten_ce_pairs``
+    order: each row contributes ``[positive, neg_1, ..., neg_K]``, so every
+    ``True`` in ``is_positive`` starts a new per-query group. Mirrors the
+    bi-encoder's ``_val_metrics_from_scores`` exactly so the train/val curves
+    are comparable across both stages:
+      - rank of the positive = 1 + (# candidates scoring strictly higher),
+        so a tie does NOT outrank the positive (matches argmax==0 semantics);
+      - nDCG (single relevant item) = 1 / log2(rank + 1), ideal 1.0 at rank 1;
+      - top1 = fraction of groups whose positive is ranked first.
+    Averaged over groups. Returns (0.0, 0.0) when there are no positives.
+    """
+    import math
+
+    import torch
+
+    pos_idx = torch.nonzero(is_positive, as_tuple=False).flatten().tolist()
+    if not pos_idx:
+        return 0.0, 0.0
+    bounds = pos_idx + [len(logits)]
+    top1_sum = 0.0
+    ndcg_sum = 0.0
+    for gi, start in enumerate(pos_idx):
+        group = logits[start:bounds[gi + 1]]
+        pos_score = logits[start]
+        rank = float((group > pos_score).sum().item()) + 1.0
+        top1_sum += 1.0 if rank == 1.0 else 0.0
+        ndcg_sum += 1.0 / math.log2(rank + 1.0)
+    n = len(pos_idx)
+    return top1_sum / n, ndcg_sum / n
 
 
 def main():
@@ -170,7 +219,24 @@ def main():
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--max-tags", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--log-every", type=int, default=25)
+    parser.add_argument("--log-every", type=int, default=25,
+                        help="Log train loss + in-group top1/nDCG every N opt-steps "
+                             "(stderr + TensorBoard at {output_dir}/runs).")
+    parser.add_argument("--val-fraction", type=float, default=0.05,
+                        help="Hold this fraction of the triples out for validation "
+                             "(0 = no val pass). Split is leak-safe via --split-key, "
+                             "mirroring the Stage A bi-encoder.")
+    parser.add_argument("--split-key", default="user_id",
+                        choices=["user_id", "session_id", "row"],
+                        help="Train/val partition key. 'user_id' (default) keeps every "
+                             "session of a user on one side; 'row' = no grouping.")
+    parser.add_argument("--val-every-n-steps", type=int, default=500,
+                        help="Run a val pass (loss + top1/nDCG) every N opt-steps. A CE "
+                             "val pass is a full cross-encoder forward, so this is gated "
+                             "and bounded by --val-max-rows.")
+    parser.add_argument("--val-max-rows", type=int, default=1000,
+                        help="Cap rows scored per val pass so each pass stays ~1 min "
+                             "(0 = use the whole held-out val set).")
     parser.add_argument("--checkpoint-every-n-steps", type=int, default=0,
                         help="Save a rolling checkpoint to {output_dir}/checkpoint_latest/ "
                              "every N optimizer steps (0 = off). A single epoch here is "
@@ -234,20 +300,100 @@ def main():
         print("[train-ce] gradient checkpointing ON", file=sys.stderr)
     tokenizer = AutoTokenizer.from_pretrained(args.base_model)
 
-    # --- data: reuse Stage A dataset (single-positive v1: teacher_scores=None) ---
+    # --- data: reuse Stage A dataset (single-positive v1: teacher_scores=None).
+    # Carve a leak-safe val split off the triples so we can log val loss + nDCG
+    # during training, exactly like the Stage A bi-encoder. val_fraction=0 (or a
+    # split that yields an empty val set) → train on everything, no val pass.
+    _use_val = args.val_fraction > 0
     dataset = TripleJsonlDataset(
         args.triples, n_negatives=args.n_negatives, seed=args.seed,
-        split="all", artifacts=artifacts, teacher_scores=None,
+        split="train" if _use_val else "all", val_fraction=args.val_fraction,
+        split_key=args.split_key, artifacts=artifacts, teacher_scores=None,
     )
-    # collate_fn=identity: compute_batch_loss consumes the raw list of row dicts.
+    # collate_fn=identity: score_ce_batch consumes the raw list of row dicts.
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
                         collate_fn=lambda rows: rows)
-    print(f"[train-ce] {len(dataset)} rows, bs={args.batch_size}, "
-          f"{args.n_negatives} negs/row, device={device}", file=sys.stderr)
+    val_loader = None
+    if _use_val:
+        val_dataset = TripleJsonlDataset(
+            args.triples, n_negatives=args.n_negatives, seed=args.seed,
+            split="val", val_fraction=args.val_fraction,
+            split_key=args.split_key, artifacts=artifacts, teacher_scores=None,
+        )
+        if len(val_dataset) > 0:
+            # shuffle=False → the val set is a fixed, deterministic slice so the
+            # val curve is apples-to-apples across opt-steps.
+            val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
+                                    shuffle=False, collate_fn=lambda rows: rows)
+        else:
+            _use_val = False
+    print(f"[train-ce] {len(dataset)} train rows"
+          + (f" / {len(val_dataset)} val rows (split_key={args.split_key})"
+             if val_loader is not None else " (no val split)")
+          + f", bs={args.batch_size}, {args.n_negatives} negs/row, device={device}",
+          file=sys.stderr)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     use_amp = device == "cuda"
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    # TensorBoard: same channel as the bi-encoder (open {output_dir}/runs in nb 71's
+    # launcher cell, in parallel with training). Falls back to stderr-only if the
+    # writer can't be created.
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(log_dir=str(Path(args.output_dir) / "runs"))
+    except Exception as e:  # pragma: no cover - TB optional
+        writer = None
+        print(f"[train-ce] TensorBoard unavailable ({e}); stderr metrics only",
+              file=sys.stderr)
+
+    def _log_scalar(tag: str, value: float, global_step: int) -> None:
+        if writer is not None:
+            writer.add_scalar(tag, value, global_step)
+
+    def _val_now():
+        """Forward-only pass over up to --val-max-rows of the held-out val set.
+        Returns (mean_loss, top1, mean_nDCG) — the same triple the bi-encoder's
+        _val_loss_now reports. Restores model.train() on exit."""
+        if val_loader is None:
+            return None
+        # Re-seed the val dataset's negative sampler so every pass scores the
+        # SAME fixed candidate sets — otherwise the per-__getitem__ RNG advances
+        # and each pass would draw different negatives, adding sampling noise to
+        # the val curve. With a fixed seed the model is the only variable, so
+        # val_loss/nDCG are directly comparable across opt-steps.
+        val_loader.dataset.rng.seed(args.seed)
+        model.eval()
+        loss_sum = 0.0
+        n_batches = 0
+        t1_sum = 0.0
+        ndcg_sum = 0.0
+        groups = 0
+        seen = 0
+        with torch.no_grad():
+            for vrows in val_loader:
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16,
+                                    enabled=use_amp):
+                    vlogits, vis_pos = score_ce_batch(
+                        model, tokenizer, vrows, max_length=args.max_length,
+                        max_tags=args.max_tags, device=device,
+                    )
+                    vloss = pairwise_bce_loss(vlogits[vis_pos], vlogits[~vis_pos])
+                loss_sum += float(vloss.item())
+                n_batches += 1
+                ng = int(vis_pos.sum().item())  # one positive per row → groups in batch
+                bt1, bndcg = ce_group_metrics(vlogits.float(), vis_pos)
+                t1_sum += bt1 * ng       # micro-average over groups, not batches
+                ndcg_sum += bndcg * ng
+                groups += ng
+                seen += len(vrows)
+                if args.val_max_rows and seen >= args.val_max_rows:
+                    break
+        model.train()
+        if n_batches == 0 or groups == 0:
+            return None
+        return loss_sum / n_batches, t1_sum / groups, ndcg_sum / groups
 
     def _save_checkpoint(tag: str, epoch: int, step: int, loss_val: float) -> None:
         """Save the full model to {output_dir}/{tag}/ + a training_state.json.
@@ -272,25 +418,73 @@ def main():
     model.train()
     step = 0
     last_loss = float("nan")
+    best_val_loss = float("inf")
     for epoch in range(args.epochs):
         for rows in loader:
+            # One forward → reused for the loss (backprop) AND the train metrics,
+            # so logging adds no extra forward pass.
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
-                loss = compute_batch_loss(
+                logits, is_pos = score_ce_batch(
                     model, tokenizer, rows, max_length=args.max_length,
                     max_tags=args.max_tags, device=device,
                 )
+                loss = pairwise_bce_loss(logits[is_pos], logits[~is_pos])
             loss.backward()
+            # Unclipped grad-norm (measure-only, max_norm=inf), logged BEFORE the
+            # step — same diagnostic the bi-encoder surfaces.
+            grad_norm = float(torch.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=float("inf")))
             optimizer.step()
             optimizer.zero_grad()
             step += 1
             last_loss = float(loss.item())
             if step % args.log_every == 0:
-                print(f"[train-ce] epoch={epoch} step={step} loss={last_loss:.4f}",
-                      file=sys.stderr)
+                with torch.no_grad():
+                    t_top1, t_ndcg = ce_group_metrics(logits.detach().float(), is_pos)
+                _log_scalar("train/loss", last_loss, step)
+                _log_scalar("train/lr", optimizer.param_groups[0]["lr"], step)
+                _log_scalar("train/grad_norm", grad_norm, step)
+                _log_scalar("train/top1_ingroup", t_top1, step)
+                _log_scalar("train/ndcg_ingroup", t_ndcg, step)
+                print(f"[train-ce] epoch={epoch} step={step} loss={last_loss:.4f} "
+                      f"train_top1={t_top1:.3f} train_ndcg={t_ndcg:.4f} "
+                      f"grad_norm={grad_norm:.3f}", file=sys.stderr)
+            # Periodic val pass (loss + top1/nDCG) — fires after the optimizer step
+            # so it reflects the latest update, mirroring the bi-encoder.
+            if val_loader is not None and args.val_every_n_steps > 0 \
+                    and step % args.val_every_n_steps == 0:
+                vres = _val_now()
+                if vres is not None:
+                    vl, vt1, vndcg = vres
+                    _log_scalar("val/loss", vl, step)
+                    _log_scalar("val/top1_acc", vt1, step)
+                    _log_scalar("val/ndcg", vndcg, step)
+                    improved = vl < best_val_loss
+                    if improved:
+                        best_val_loss = vl
+                    print(f"[train-ce] epoch={epoch} step={step} val_loss={vl:.4f} "
+                          f"val_top1={vt1:.3f} val_ndcg={vndcg:.4f}"
+                          f"{' (new best)' if improved else ''}", file=sys.stderr)
             if args.checkpoint_every_n_steps and step % args.checkpoint_every_n_steps == 0:
                 _save_checkpoint("checkpoint_latest", epoch, step, last_loss)
         # Per-epoch checkpoint (resumable; survives disconnect when on Drive).
         _save_checkpoint(f"checkpoint_epoch_{epoch + 1}", epoch, step, last_loss)
+
+    # Final val pass (logged at the last step so it lands on the same x-axis as
+    # the periodic val curve), in case --val-every-n-steps missed the last step.
+    if val_loader is not None:
+        vres = _val_now()
+        if vres is not None:
+            vl, vt1, vndcg = vres
+            _log_scalar("val/loss", vl, step)
+            _log_scalar("val/top1_acc", vt1, step)
+            _log_scalar("val/ndcg", vndcg, step)
+            best_val_loss = min(best_val_loss, vl)
+            print(f"[train-ce] FINAL step={step} val_loss={vl:.4f} "
+                  f"val_top1={vt1:.3f} val_ndcg={vndcg:.4f} "
+                  f"(best_loss={best_val_loss:.4f})", file=sys.stderr)
+    if writer is not None:
+        writer.close()
 
     # --- final save (backbone + modality/scoring heads + config) + optional Hub push ---
     model.save_pretrained(args.output_dir)

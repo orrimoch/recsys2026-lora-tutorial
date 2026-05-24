@@ -1,4 +1,6 @@
 """Unit tests for the Stage B cross-encoder training helpers (Phase 6c)."""
+import math
+
 import torch
 import torch.nn as nn
 from types import SimpleNamespace
@@ -6,6 +8,7 @@ from types import SimpleNamespace
 from mcrs.training.multimodal_bi_encoder import MultiModalConfig
 from mcrs.training.multimodal_cross_encoder import MultiModalCrossEncoder
 from scripts.train_cross_encoder import (
+    ce_group_metrics,
     compute_batch_loss,
     flatten_ce_pairs,
     pairwise_bce_loss,
@@ -199,6 +202,63 @@ def test_compute_batch_loss_lower_when_model_ranks_well():
 
 
 # ---------------------------------------------------------------------------
+# In-group ranking metrics (train/val viewing parity with the bi-encoder).
+# `ce_group_metrics` segments the flat (query, doc) logits — ordered
+# [pos, neg_1..neg_K] per row by flatten_ce_pairs — into per-query groups via
+# the is_positive flags, then computes top1 + nDCG the SAME way the bi-encoder's
+# _val_metrics_from_scores does (rank = 1 + #cands strictly above the positive;
+# nDCG = 1/log2(rank+1)). Pure tensor op; no model needed.
+# ---------------------------------------------------------------------------
+
+
+def test_ce_group_metrics_perfect_ranking():
+    """Positive is the top score in every group → top1=1, ndcg=1."""
+    logits = torch.tensor([5.0, 1.0, 0.0, 4.0, -1.0])  # groups: [5,1,0], [4,-1]
+    is_pos = torch.tensor([True, False, False, True, False])
+
+    top1, ndcg = ce_group_metrics(logits, is_pos)
+
+    assert abs(top1 - 1.0) < 1e-6
+    assert abs(ndcg - 1.0) < 1e-6
+
+
+def test_ce_group_metrics_positive_at_rank_2_drops_ndcg():
+    """One negative outscores the positive → rank 2 → ndcg = 1/log2(3), top1=0."""
+    logits = torch.tensor([1.0, 2.0, 0.0])  # single group, positive at index 0
+    is_pos = torch.tensor([True, False, False])
+
+    top1, ndcg = ce_group_metrics(logits, is_pos)
+
+    assert top1 == 0.0
+    assert abs(ndcg - (1.0 / math.log2(3))) < 1e-6
+
+
+def test_ce_group_metrics_handles_ragged_group_sizes():
+    """Groups need not be equal length (a row may carry < n_negatives). A
+    1-positive/0-negative group ranks the positive first (rank 1)."""
+    logits = torch.tensor([3.0, 9.0, 0.5])  # group A: [3,9] (rank 2); group B: [0.5] (rank 1)
+    is_pos = torch.tensor([True, False, True])
+
+    top1, ndcg = ce_group_metrics(logits, is_pos)
+
+    assert abs(top1 - 0.5) < 1e-6  # A wrong, B correct
+    expected = ((1.0 / math.log2(3)) + 1.0) / 2
+    assert abs(ndcg - expected) < 1e-6
+
+
+def test_ce_group_metrics_ties_favor_the_positive():
+    """A negative tying the positive does NOT outrank it (strictly-greater
+    count), matching the bi-encoder argmax==0 tie semantics → top1 stays 1."""
+    logits = torch.tensor([2.0, 2.0])
+    is_pos = torch.tensor([True, False])
+
+    top1, ndcg = ce_group_metrics(logits, is_pos)
+
+    assert abs(top1 - 1.0) < 1e-6
+    assert abs(ndcg - 1.0) < 1e-6
+
+
+# ---------------------------------------------------------------------------
 # Disconnect-safety contract (checkpointing + resume). The training loop is
 # GPU-bound, so these are source-level guards: a single epoch is ~15k steps
 # (hours on a small GPU), and the loop previously saved ONLY at the very end —
@@ -237,3 +297,48 @@ def test_train_ce_final_upload_excludes_checkpoint_dirs():
     from scripts import train_cross_encoder as mod
     main_src = inspect.getsource(mod.main)
     assert "ignore_patterns" in main_src, "final Hub upload must ignore checkpoint dirs"
+
+
+# ---------------------------------------------------------------------------
+# Train/val status-viewing parity with the Stage A bi-encoder. Source-level
+# guards (the loop is GPU-bound): a leak-safe val split + TensorBoard logging of
+# train AND val loss + nDCG must be wired into main().
+# ---------------------------------------------------------------------------
+
+
+def test_train_ce_exposes_val_split_and_logging_flags():
+    import inspect
+    from scripts import train_cross_encoder as mod
+    main_src = inspect.getsource(mod.main)
+    for flag in ("--val-fraction", "--split-key", "--val-every-n-steps",
+                 "--val-max-rows"):
+        assert flag in main_src, f"missing CLI flag: {flag}"
+
+
+def test_train_ce_builds_leak_safe_val_split():
+    """Val set is carved with split='val' + split_key (default user_id), so a
+    user's sessions never straddle train/val — same contract as Stage A."""
+    import inspect
+    from scripts import train_cross_encoder as mod
+    main_src = inspect.getsource(mod.main)
+    assert 'split="val"' in main_src, "no held-out val split"
+    assert "split_key=args.split_key" in main_src, "val split must honor --split-key"
+
+
+def test_train_ce_logs_train_and_val_metrics_to_tensorboard():
+    import inspect
+    from scripts import train_cross_encoder as mod
+    main_src = inspect.getsource(mod.main)
+    assert "SummaryWriter" in main_src, "no TensorBoard writer"
+    for tag in ("train/loss", "train/ndcg_ingroup", "val/loss", "val/ndcg"):
+        assert tag in main_src, f"missing TensorBoard scalar: {tag}"
+
+
+def test_train_ce_val_pass_uses_no_grad_and_restores_train_mode():
+    """The val pass must be forward-only (model.eval + no_grad) and put the
+    model back in train() so it doesn't poison the next training step."""
+    import inspect
+    from scripts import train_cross_encoder as mod
+    main_src = inspect.getsource(mod.main)
+    assert "model.eval()" in main_src and "torch.no_grad()" in main_src
+    assert "model.train()" in main_src, "val pass must restore train mode"
