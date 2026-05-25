@@ -42,6 +42,7 @@ import os
 import random
 import re
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -244,6 +245,10 @@ def extract_features(
     age_group = user_info.get("age_group", "unknown")
     country = user_info.get("country_code", "unknown")
     gender = user_info.get("gender", "unknown")
+    # Session-level (candidate-independent) — compute once, not once per candidate.
+    last_goal_move = last_turn_moved_toward_goal(
+        session_info.get("goal_progress_assessments")
+    )
 
     rows: list[dict] = []
     for c in candidates:
@@ -269,9 +274,6 @@ def extract_features(
 
         rs_sin, rs_cos = compute_release_year_cyclical(rd)
         tag_overlap = compute_tag_overlap(query, m.get("tag_list"))
-        last_goal_move = last_turn_moved_toward_goal(
-            session_info.get("goal_progress_assessments")
-        )
         pop_pct = pop_rank_pct.get(tid, 0.5) if pop_rank_pct is not None else 0.5
 
         row = {
@@ -398,8 +400,10 @@ def build(
             played_tids_list.append(list(prior_music["content"]))
 
     print(f"[lgbm-features] built {len(queries)} queries; running wRRF topk={topk}")
-    # Batch through wRRF in chunks of 16 to cap memory.
-    CHUNK = 16
+    # Batch through wRRF in chunks. A larger CHUNK feeds more queries per union
+    # call so the dense channel encodes in big GPU batches (see SUB_B in
+    # dense_precomputed). 256 is safe once JAX preallocation is disabled.
+    CHUNK = 256
     # Accumulate as periodic compact DataFrames rather than one giant list of
     # dicts: at full scale (--n-sessions 999999 x topk candidates) the dict list
     # alone can blow host RAM (tens of GB) and crash the run. Flush the buffer to
@@ -409,6 +413,8 @@ def build(
     all_frames: list[pd.DataFrame] = []
     row_buf: list[dict] = []
     total_rows = 0
+    t_union = 0.0   # cumulative retrieval + GPU-encode time
+    t_feat = 0.0    # cumulative python feature-extraction time
     for i in tqdm(range(0, len(queries), CHUNK), desc="wrrf batches"):
         chunk_queries = queries[i:i+CHUNK]
         # Feed the session-aware union channels the prior played track_ids +
@@ -419,10 +425,13 @@ def build(
             {"history_tids": played_tids_list[i + j]} for j in range(chunk_n)
         ]
         chunk_user_ids = [metas[i + j]["user_id"] for j in range(chunk_n)]
+        _t0 = time.perf_counter()
         chunk_results = scorer.run(
             chunk_queries, topk=topk,
             batch_context=chunk_context, user_ids=chunk_user_ids,
         )
+        t_union += time.perf_counter() - _t0
+        _t0 = time.perf_counter()
         for j, cand_list in enumerate(chunk_results):
             sess_info = metas[i + j]
             uid = sess_info["user_id"]
@@ -445,6 +454,7 @@ def build(
                 played_meta=played_meta,
             )
             row_buf.extend(rows)
+        t_feat += time.perf_counter() - _t0
         if len(row_buf) >= FLUSH_ROWS:
             all_frames.append(pd.DataFrame(row_buf))
             total_rows += len(row_buf)
@@ -454,6 +464,7 @@ def build(
         all_frames.append(pd.DataFrame(row_buf))
         total_rows += len(row_buf)
     print(f"[lgbm-features] total rows: {total_rows}")
+    print(f"[lgbm-features] timing: union(retrieval+encode)={t_union:.1f}s  features={t_feat:.1f}s")
     df_out = pd.concat(all_frames, ignore_index=True) if all_frames else pd.DataFrame()
     # Label distribution sanity
     pos = int(df_out["label"].sum())

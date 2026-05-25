@@ -299,10 +299,12 @@ class DENSE_PRECOMPUTED:
         hits = len(queries) - len(missing_idx)
         if missing_idx:
             to_encode = [queries[i] for i in missing_idx]
-            # Encode in sub-batches to bound GPU/MPS memory. SUB_B=16 keeps the
-            # transient activation spike (sub_b x 512 tokens through the encoder)
-            # small — that batch is the single largest GPU allocation in a run.
-            SUB_B = 16
+            # Encode in sub-batches. With JAX preallocation disabled the GPU is
+            # free, so a larger batch (128) cuts the number of forward passes ~8x
+            # vs 16 — the main query-encoding speedup — while staying well within
+            # memory for a 0.6B encoder at 512 tokens (~5 GB). empty_cache() below
+            # releases the reserved blocks afterward.
+            SUB_B = 128
             encoded_parts: list[np.ndarray] = []
             for i in range(0, len(to_encode), SUB_B):
                 encoded_parts.append(self._encode_queries(to_encode[i:i + SUB_B]))
