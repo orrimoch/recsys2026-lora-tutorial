@@ -50,6 +50,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINES_DIR = REPO_ROOT / "music-crs-baselines"
 sys.path.insert(0, str(BASELINES_DIR))
 
+# Disable JAX GPU preallocation BEFORE importing datasets/transformers (they pull
+# JAX transitively, and JAX grabs ~75% of VRAM on first use). Without this, this
+# script — run as a !python subprocess from the notebook — would have JAX steal
+# the GPU from its own torch encoder. Must precede the imports below. Mirrors the
+# nb 70/71 cell-1 env setup.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+os.environ.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from tqdm import tqdm  # noqa: E402
