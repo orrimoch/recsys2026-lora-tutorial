@@ -31,6 +31,8 @@ from typing import Any, Optional
 
 import numpy as np
 
+from ..retrieval_modules.session_history import session_match_features
+
 
 _HELPERS_CACHE: Optional[dict] = None
 
@@ -228,17 +230,33 @@ class LGBM_RERANKER:
         f_idx = {f: i for i, f in enumerate(self.features)}
 
         # Pull extended-feature helpers only if the trained model needs them.
+        # Stage C session-continuity features are listed here for documentation,
+        # but are computed below via session_match_features regardless of the
+        # `helpers` bundle (they don't need it — only played_meta).
+        _SESSION_MATCH_KEYS = (
+            "same_artist", "same_album", "artist_in_session_count",
+            "session_tag_overlap",
+        )
         extended_keys = {
             "release_year_sin", "release_year_cos", "tag_overlap_count",
             "last_turn_moved_toward_goal", "bm25_rank_inv", "dense_meta_rank_inv",
             "dense_lyrics_rank_inv", "ce_score", "ce_rank_inv",
             "turn_number_feat", "prior_track_count", "query_drift_score",
             "pop_rank_pct", "is_warm_user",
+            *_SESSION_MATCH_KEYS,
         }
-        need_helpers = any(k in f_idx for k in extended_keys)
+        need_helpers = any(
+            k in f_idx for k in (extended_keys - set(_SESSION_MATCH_KEYS))
+        )
         helpers = _lgbm_feature_helpers() if need_helpers else None
         sess = extra_session_info or {}
         last_goal = helpers["last_goal"](sess.get("goal_progress_assessments")) if helpers else -1
+
+        # Session-continuity inputs: resolve the prior played track_ids to their
+        # metadata dicts ONCE (shared across all candidates of this query).
+        played_tids = (extra_session_info or {}).get("played_tids", []) or []
+        played_meta = [self.tid_to_track[t] for t in played_tids if t in self.tid_to_track]
+        need_session_match = any(k in f_idx for k in _SESSION_MATCH_KEYS)
 
         for rank, tid in enumerate(candidate_tids, start=1):
             m = self.tid_to_track.get(tid, {})
@@ -270,6 +288,17 @@ class LGBM_RERANKER:
             X[rank - 1, f_idx["user_age_group"]] = ag
             X[rank - 1, f_idx["user_country"]] = cc
             X[rank - 1, f_idx["user_gender"]] = gn
+
+            # Stage C session-continuity features (same_artist / same_album /
+            # artist_in_session_count / session_tag_overlap). Computed via the
+            # SHARED session_match_features (identical to training) — no helpers
+            # bundle required, only played_meta. Guarded by f_idx so models that
+            # don't list these columns are unaffected.
+            if need_session_match:
+                _sf = session_match_features(m, played_meta)
+                for _k in _SESSION_MATCH_KEYS:
+                    if _k in f_idx:
+                        X[rank - 1, f_idx[_k]] = _sf[_k]
 
             # Extended (Stage C) features — guarded by f_idx so 11-col models
             # keep working unchanged.

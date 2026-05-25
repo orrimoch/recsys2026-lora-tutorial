@@ -1,0 +1,102 @@
+"""FIX C2: the LGBM reranker must compute the 4 Stage-C session-continuity
+features at inference (same_artist / same_album / artist_in_session_count /
+session_tag_overlap) from extra_session_info['played_tids'], using the SHARED
+session_match_features (identical to the training feature builder).
+
+We construct a minimal LGBM_RERANKER via __new__ (skips heavy __init__ that
+loads boosters + HF datasets) and set just the attributes that
+_compute_feature_matrix touches, then assert the matrix columns are populated.
+"""
+import numpy as np
+
+from mcrs.rerankers.lgbm_rerank import LGBM_RERANKER
+
+
+def _make_stub(features):
+    r = LGBM_RERANKER.__new__(LGBM_RERANKER)
+    r.features = features
+    # _compute_feature_matrix always pre-encodes these 5 session-level
+    # categoricals via _encode_cat, so cat_index must hold their keys.
+    r.categorical_features = ["goal_category", "goal_specificity",
+                              "user_age_group", "user_country", "user_gender"]
+    r.cat_levels = {c: [] for c in r.categorical_features}
+    r.cat_index = {c: {} for c in r.categorical_features}
+    # Track catalog: cand1 by a session artist, cand2 by a stranger.
+    r.tid_to_track = {
+        "p1": {"artist_name": "Radiohead", "album_name": "OK Computer",
+               "tag_list": ["rock", "alt"], "popularity": 10.0, "release_date": "1997"},
+        "c_same": {"artist_name": "Radiohead", "album_name": "In Rainbows",
+                   "tag_list": ["rock"], "popularity": 5.0, "release_date": "2007"},
+        "c_other": {"artist_name": "Beyonce", "album_name": "Lemonade",
+                    "tag_list": ["pop"], "popularity": 99.0, "release_date": "2016"},
+    }
+    r.cfbpr_user_embs = {}
+    r.cfbpr_tid_to_idx = {}
+    r.cfbpr_track_mat = np.zeros((0, 8), dtype=np.float64)
+    r._user_meta = {}
+    return r
+
+
+# The reranker loop always writes the base-11 columns unconditionally, so any
+# trained model's feature list contains them. Mirror that here.
+BASE_FEATURES = ["wrrf_rank", "cfbpr_score", "pop_log", "recency_years",
+                 "tag_count", "artist_in_query", "goal_category",
+                 "goal_specificity", "user_age_group", "user_country",
+                 "user_gender"]
+SESSION_FEATURES = ["same_artist", "same_album", "artist_in_session_count",
+                    "session_tag_overlap"]
+
+
+def test_session_features_populated_from_played_tids():
+    # Model whose feature list is base-11 + the 4 session features.
+    features = BASE_FEATURES + SESSION_FEATURES
+    r = _make_stub(features)
+    f_idx = {f: i for i, f in enumerate(features)}
+
+    X = r._compute_feature_matrix(
+        query="something upbeat",
+        candidate_tids=["c_same", "c_other"],
+        user_id=None,
+        goal_category=None,
+        goal_specificity=None,
+        user_profile_raw=None,
+        extra_session_info={"played_tids": ["p1"]},  # session played a Radiohead track
+    )
+
+    # Row 0 = c_same (Radiohead, shares the rock tag with p1).
+    assert X[0, f_idx["same_artist"]] == 1
+    assert X[0, f_idx["same_album"]] == 0      # different album
+    assert X[0, f_idx["artist_in_session_count"]] == 1
+    assert X[0, f_idx["session_tag_overlap"]] == 1  # "rock" shared
+
+    # Row 1 = c_other (Beyonce, pop) — no overlap with the session.
+    assert X[1, f_idx["same_artist"]] == 0
+    assert X[1, f_idx["same_album"]] == 0
+    assert X[1, f_idx["artist_in_session_count"]] == 0
+    assert X[1, f_idx["session_tag_overlap"]] == 0
+
+
+def test_no_played_tids_yields_zero_session_features():
+    features = BASE_FEATURES + SESSION_FEATURES
+    r = _make_stub(features)
+    f_idx = {f: i for i, f in enumerate(features)}
+    X = r._compute_feature_matrix(
+        query="q", candidate_tids=["c_same"], user_id=None,
+        goal_category=None, goal_specificity=None, user_profile_raw=None,
+        extra_session_info={"played_tids": []},
+    )
+    for k in SESSION_FEATURES:
+        assert X[0, f_idx[k]] == 0
+
+
+def test_legacy_11col_model_untouched_no_session_columns():
+    # A model that does NOT list the session features must run without error
+    # and produce only the base-11 layout (no crash, no extra columns).
+    features = list(BASE_FEATURES)
+    r = _make_stub(features)
+    X = r._compute_feature_matrix(
+        query="q", candidate_tids=["c_same"], user_id=None,
+        goal_category=None, goal_specificity=None, user_profile_raw=None,
+        extra_session_info={"played_tids": ["p1"]},
+    )
+    assert X.shape == (1, len(features))
