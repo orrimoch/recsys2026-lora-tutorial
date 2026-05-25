@@ -72,6 +72,7 @@ def load_track_meta_lookup(item_db: MusicCatalogDB) -> dict[str, dict]:
             return v
         out[tid] = {
             "artist_name": _first(meta.get("artist_name")),
+            "album_name": _first(meta.get("album_name")),
             "tag_list": meta.get("tag_list") or [],
             "popularity": float(meta.get("popularity") or 0.0),
             "release_date": meta.get("release_date"),
@@ -170,6 +171,19 @@ def query_drift_score(current_query, prior_queries, embedder=None):
     return float(embs[0] @ embs[1])
 
 
+def session_match_features(cand_meta: dict, played_meta: list[dict]) -> dict:
+    """Structural session-continuity features for one candidate."""
+    c_artist = str(cand_meta.get("artist_name") or "").strip().lower()
+    c_album = str(cand_meta.get("album_name") or "").strip().lower()
+    artists = [str(m.get("artist_name") or "").strip().lower() for m in played_meta]
+    albums = [str(m.get("album_name") or "").strip().lower() for m in played_meta]
+    return {
+        "same_artist": int(bool(c_artist) and c_artist in artists),
+        "same_album": int(bool(c_album) and c_album in albums),
+        "artist_in_session_count": sum(1 for a in artists if a and a == c_artist),
+    }
+
+
 def build_pop_rank_pct_map(track_meta):
     """Returns {track_id: rank_pct in [0, 1]} where 0 = most popular, 1 = least.
 
@@ -199,8 +213,11 @@ def extract_features(
     cfbpr_user_embs: dict[str, np.ndarray],
     query_tokens: set[str],
     pop_rank_pct: dict[str, float] | None = None,
+    played_meta: list[dict] | None = None,
 ) -> list[dict]:
     """One dict per candidate — becomes one row in the parquet output."""
+    if played_meta is None:
+        played_meta = []
     user_id = session_info["user_id"]
     user_emb = cfbpr_user_embs.get(user_id)
     goal_cat = (session_info.get("conversation_goal") or {}).get("category") or "unknown"
@@ -238,7 +255,7 @@ def extract_features(
         )
         pop_pct = pop_rank_pct.get(tid, 0.5) if pop_rank_pct is not None else 0.5
 
-        rows.append({
+        row = {
             # ids
             "query_id": f"{session_info['session_id']}#{session_info['turn_number']}",
             "session_id": session_info["session_id"],
@@ -283,7 +300,10 @@ def extract_features(
             "user_gender": str(gender),
             # label
             "label": 1 if tid == gold_tid else 0,
-        })
+        }
+        # session-continuity features (29-31)
+        row.update(session_match_features(m, played_meta))
+        rows.append(row)
     return rows
 
 
@@ -323,6 +343,7 @@ def build(
     metas: list[dict] = []
     golds: list[str] = []
     query_tokens_list: list[set[str]] = []
+    played_tids_list: list[list[str]] = []
     for sess in tqdm(sessions, desc="sessions"):
         convos = sess["conversations"]
         df = pd.DataFrame(convos)
@@ -353,6 +374,9 @@ def build(
             })
             golds.append(gold_tid)
             query_tokens_list.append(_tokenize_simple(retrieval_input))
+            # Collect track_ids played BEFORE this turn (for session-continuity features).
+            prior_music = df[(df["role"] == "music") & (df["turn_number"] < turn_n)]
+            played_tids_list.append(list(prior_music["content"]))
 
     print(f"[lgbm-features] built {len(queries)} queries; running wRRF topk={topk}")
     # Batch through wRRF in chunks of 16 to cap memory.
@@ -365,6 +389,9 @@ def build(
             sess_info = metas[i + j]
             uid = sess_info["user_id"]
             uinfo = user_meta.get(uid, {})
+            # Resolve prior played track_ids -> metadata dicts for session-continuity features.
+            prior_tids = played_tids_list[i + j]
+            played_meta = [track_meta[t] for t in prior_tids if t in track_meta]
             rows = extract_features(
                 query=chunk_queries[j],
                 candidates=cand_list,
@@ -377,6 +404,7 @@ def build(
                 cfbpr_user_embs=cfbpr_user_embs,
                 query_tokens=query_tokens_list[i + j],
                 pop_rank_pct=pop_rank_pct,
+                played_meta=played_meta,
             )
             all_rows.extend(rows)
 
