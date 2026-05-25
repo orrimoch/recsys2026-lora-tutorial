@@ -23,3 +23,30 @@ def played_tids_from_context(ctx: Optional[dict], catalog_tids: set) -> list[str
             if c in catalog_tids:
                 out.append(c)
     return out
+
+
+def session_match_features(cand_meta: dict, played_meta: list[dict]) -> dict:
+    """Structural session-continuity features for one candidate.
+
+    SHARED between training (scripts/build_lgbm_features.py) and inference
+    (mcrs/rerankers/lgbm_rerank.py) to guarantee identical train/serve features.
+
+    Keys: same_artist, same_album, artist_in_session_count, session_tag_overlap.
+    All comparisons are case-insensitive and whitespace-trimmed.
+    """
+    c_artist = str(cand_meta.get("artist_name") or "").strip().lower()
+    c_album = str(cand_meta.get("album_name") or "").strip().lower()
+    artists = [str(m.get("artist_name") or "").strip().lower() for m in played_meta]
+    albums = [str(m.get("album_name") or "").strip().lower() for m in played_meta]
+    c_tags = {str(t).strip().lower() for t in (cand_meta.get("tag_list") or []) if t}
+    session_tags: set[str] = set()
+    for m in played_meta:
+        for t in (m.get("tag_list") or []):
+            if t:
+                session_tags.add(str(t).strip().lower())
+    return {
+        "same_artist": int(bool(c_artist) and c_artist in artists),
+        "same_album": int(bool(c_album) and c_album in albums),
+        "artist_in_session_count": sum(1 for a in artists if a and a == c_artist),
+        "session_tag_overlap": len(c_tags & session_tags),
+    }

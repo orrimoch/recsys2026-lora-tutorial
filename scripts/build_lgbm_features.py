@@ -58,6 +58,13 @@ from datasets import load_dataset, concatenate_datasets  # noqa: E402
 from mcrs.db_item import MusicCatalogDB  # noqa: E402
 from mcrs.retrieval_modules import load_retrieval_module  # noqa: E402
 from mcrs.retrieval_modules.cf_bpr import CF_BPR  # noqa: E402
+# session_match_features lives in the shared session_history module so that
+# training (this script) and inference (mcrs/rerankers/lgbm_rerank.py) use the
+# IDENTICAL implementation (no train/serve feature skew). Re-exported here so
+# existing callers/tests that import it from this script keep working.
+from mcrs.retrieval_modules.session_history import (  # noqa: E402,F401
+    session_match_features,
+)
 
 
 # ------------------------------------------------------------------ cached lookups
@@ -169,26 +176,6 @@ def query_drift_score(current_query, prior_queries, embedder=None):
         return 1.0
     embs = embedder.encode([current_query, prior_queries[0]], normalize_embeddings=True)
     return float(embs[0] @ embs[1])
-
-
-def session_match_features(cand_meta: dict, played_meta: list[dict]) -> dict:
-    """Structural session-continuity features for one candidate."""
-    c_artist = str(cand_meta.get("artist_name") or "").strip().lower()
-    c_album = str(cand_meta.get("album_name") or "").strip().lower()
-    artists = [str(m.get("artist_name") or "").strip().lower() for m in played_meta]
-    albums = [str(m.get("album_name") or "").strip().lower() for m in played_meta]
-    c_tags = {str(t).strip().lower() for t in (cand_meta.get("tag_list") or []) if t}
-    session_tags: set[str] = set()
-    for m in played_meta:
-        for t in (m.get("tag_list") or []):
-            if t:
-                session_tags.add(str(t).strip().lower())
-    return {
-        "same_artist": int(bool(c_artist) and c_artist in artists),
-        "same_album": int(bool(c_album) and c_album in albums),
-        "artist_in_session_count": sum(1 for a in artists if a and a == c_artist),
-        "session_tag_overlap": len(c_tags & session_tags),
-    }
 
 
 def build_pop_rank_pct_map(track_meta):
