@@ -473,6 +473,31 @@ def load_retrieval_module(
             ],
             k=60,
         )
+    elif retrieval_type == "same_artist":
+        from .same_artist import SameArtistRetriever
+        return SameArtistRetriever(dataset_name, track_split_types, corpus_types, cache_dir)
+    elif retrieval_type == "session_cf":
+        from .session_cf import SessionCFRetriever
+        return SessionCFRetriever(dataset_name, track_split_types, corpus_types, cache_dir)
+    elif retrieval_type == "wrrf_union_v1":
+        # 4-channel recall union: lexical + frozen-Qwen semantic + session artist
+        # continuity + session CF.
+        return RRF_MODEL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            sub_specs=[
+                {"type": "bm25",
+                 "corpus_types": ["track_name", "artist_name", "album_name",
+                                  "release_date", "tag_list"],
+                 "topk_internal": 100, "weight": float(extra_config.get("w_bm25", 1.0))},
+                {"type": "dense_metadata_qwen3", "corpus_types": corpus_types,
+                 "topk_internal": 100, "weight": float(extra_config.get("w_qwen", 0.7))},
+                {"type": "same_artist", "topk_internal": 100,
+                 "weight": float(extra_config.get("w_artist", 1.0))},
+                {"type": "session_cf", "topk_internal": 100,
+                 "weight": float(extra_config.get("w_cf", 0.7))},
+            ],
+            k=60,
+        )
     # Sequential retrieve-then-rerank.
     elif retrieval_type == "bm25_then_dense_rerank_v1":
         # BM25 (v2a 5-field corpus) first-stage top-100 → dense metadata+instruct rerank.
