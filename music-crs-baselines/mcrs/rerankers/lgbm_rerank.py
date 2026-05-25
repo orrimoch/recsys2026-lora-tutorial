@@ -73,6 +73,23 @@ def _first(v):
     return v
 
 
+def _flatten_track_row(r: dict) -> dict:
+    """Flatten a raw track-metadata dataset row to the fields the reranker and
+    the shared session_match_features consume.
+
+    MUST stay schema-aligned with build_lgbm_features.load_track_meta_lookup so
+    train and serve compute identical features. In particular album_name is
+    required: same_album is real during training but is silently pinned to 0 at
+    inference if it is dropped here (train/serve skew)."""
+    return {
+        "artist_name": _first(r.get("artist_name")) or "",
+        "album_name": _first(r.get("album_name")) or "",
+        "tag_list": r.get("tag_list") or [],
+        "popularity": float(r.get("popularity") or 0.0),
+        "release_date": r.get("release_date"),
+    }
+
+
 def _tokenize_simple(s: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", (s or "").lower()))
 
@@ -138,12 +155,7 @@ class LGBM_RERANKER:
         concat = concatenate_datasets([ds[s] for s in track_split_types])
         self.tid_to_track: dict[str, dict] = {}
         for r in concat:
-            self.tid_to_track[r["track_id"]] = {
-                "artist_name": _first(r.get("artist_name")) or "",
-                "tag_list": r.get("tag_list") or [],
-                "popularity": float(r.get("popularity") or 0.0),
-                "release_date": r.get("release_date"),
-            }
+            self.tid_to_track[r["track_id"]] = _flatten_track_row(r)
         print(f"[lgbm-rerank] cached {len(self.tid_to_track)} track rows")
 
     def _load_cfbpr(self, cache_dir: str) -> None:
