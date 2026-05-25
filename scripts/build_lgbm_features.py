@@ -115,18 +115,31 @@ class WRRFRunner:
     per-sub ranks — so feature computation is cheap and deterministic."""
 
     def __init__(self, cache_dir: str, corpus_types: list[str]):
+        # wrrf_union_v1 is the 4-channel recall union (lexical + frozen-Qwen
+        # semantic + same-artist session continuity + session CF). The session
+        # channels need batch_context['history_tids'] to fire — see run().
         self.wrrf = load_retrieval_module(
-            "wrrf_bm25_dense_lyrics_v1",
+            "wrrf_union_v1",
             "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
             ["all_tracks"],
             corpus_types,
             cache_dir,
         )
 
-    def run(self, queries: list[str], topk: int) -> list[list[dict]]:
+    def run(self, queries: list[str], topk: int,
+            batch_context=None, user_ids=None) -> list[list[dict]]:
         """Per-query list of {tid, wrrf_rank} for the top-K fused candidates.
-        wrrf_rank = 1 for the top of wRRF output, K for the bottom."""
-        fused_per_q = self.wrrf.batch_text_to_item_retrieval(queries, topk=topk)
+        wrrf_rank = 1 for the top of wRRF output, K for the bottom.
+
+        batch_context (per-query {history_tids: [...]}) + user_ids feed the
+        session-aware union channels. RRF_MODEL accepts both; keep a try/except
+        fallback to the no-kwargs call for safety against older retrievers."""
+        try:
+            fused_per_q = self.wrrf.batch_text_to_item_retrieval(
+                queries, topk=topk, user_ids=user_ids, batch_context=batch_context,
+            )
+        except TypeError:
+            fused_per_q = self.wrrf.batch_text_to_item_retrieval(queries, topk=topk)
         return [
             [{"tid": tid, "wrrf_rank": r + 1} for r, tid in enumerate(tids)]
             for tids in fused_per_q
@@ -378,7 +391,18 @@ def build(
     all_rows: list[dict] = []
     for i in tqdm(range(0, len(queries), CHUNK), desc="wrrf batches"):
         chunk_queries = queries[i:i+CHUNK]
-        chunk_results = scorer.run(chunk_queries, topk=topk)
+        # Feed the session-aware union channels the prior played track_ids +
+        # per-query user_id. Mirror the existing prior_tids = played_tids_list[i+j]
+        # indexing so batch_context[j] lines up with chunk_queries[j].
+        chunk_n = len(chunk_queries)
+        chunk_context = [
+            {"history_tids": played_tids_list[i + j]} for j in range(chunk_n)
+        ]
+        chunk_user_ids = [metas[i + j]["user_id"] for j in range(chunk_n)]
+        chunk_results = scorer.run(
+            chunk_queries, topk=topk,
+            batch_context=chunk_context, user_ids=chunk_user_ids,
+        )
         for j, cand_list in enumerate(chunk_results):
             sess_info = metas[i + j]
             uid = sess_info["user_id"]
