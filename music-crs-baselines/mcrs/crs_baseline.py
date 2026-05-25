@@ -526,11 +526,14 @@ class CRS_BASELINE:
         batch_context = []
         for data in batch_data:
             prior_history = data.get("session_memory", [])  # {role, content} dicts
+            _played = [str(t.get("content")) for t in prior_history
+                       if t.get("role") == "music" and t.get("content")]
             batch_context.append({
                 "chat_history": prior_history,
                 "current_user_query": data["user_query"],
                 "user_profile": data.get("user_profile_raw"),
                 "conversation_goal": data.get("conversation_goal"),
+                "history_tids": _played,
             })
 
         # Stage 1: Batch retrieval. Pull retrieval_topk (default 20; 40 when
