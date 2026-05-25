@@ -1,7 +1,9 @@
-# Submission: Stage A union (4-channel wRRF) + Stage C LGBM LambdaRank.
+# Submission: Stage A union (3-channel wRRF) + Stage C LGBM LambdaRank.
 #
 # Single-axis change vs config 182: drops the chain reranker (CE → LGBM)
-# and replaces retrieval with the 4-channel union (wrrf_union_v1).
+# and replaces retrieval with the union (wrrf_union_v1 = BM25 + dense-Qwen +
+# same_artist). session_cf was dropped after the G1 ablation (marginal recall
+# +0.002 @100, below the 0.01 keep rule).
 # Cross-encoder (Stage B) is intentionally absent — union recall feeds
 # directly into the LGBM LambdaRank reranker (retrieval_topk=100 → top-20).
 #

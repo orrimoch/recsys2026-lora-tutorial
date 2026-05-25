@@ -115,9 +115,10 @@ class WRRFRunner:
     per-sub ranks — so feature computation is cheap and deterministic."""
 
     def __init__(self, cache_dir: str, corpus_types: list[str]):
-        # wrrf_union_v1 is the 4-channel recall union (lexical + frozen-Qwen
-        # semantic + same-artist session continuity + session CF). The session
-        # channels need batch_context['history_tids'] to fire — see run().
+        # wrrf_union_v1 is the 3-channel recall union (lexical + frozen-Qwen
+        # semantic + same-artist session continuity); session_cf was dropped
+        # after the G1 ablation. The same-artist channel needs
+        # batch_context['history_tids'] to fire — see run().
         self.wrrf = load_retrieval_module(
             "wrrf_union_v1",
             "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",

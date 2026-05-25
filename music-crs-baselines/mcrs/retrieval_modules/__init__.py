@@ -480,8 +480,13 @@ def load_retrieval_module(
         from .session_cf import SessionCFRetriever
         return SessionCFRetriever(dataset_name, track_split_types, corpus_types, cache_dir)
     elif retrieval_type == "wrrf_union_v1":
-        # 4-channel recall union: lexical + frozen-Qwen semantic + session artist
-        # continuity + session CF.
+        # 3-channel recall union: lexical + frozen-Qwen semantic + session
+        # artist continuity. session_cf was DROPPED after the G1 ablation
+        # (2026-05-25): its marginal recall was +0.002 @100 / +0.008 @20 over
+        # the union-without-it — below the 0.01 keep rule (user-CF is near-inert
+        # here). This removes only the recall channel; cfbpr_score stays as an
+        # LGBM rerank feature pending G2 importances. Union recall after drop:
+        # ~0.478 @100, ~0.346 @20 (vs 4ch 0.480 / 0.354).
         return RRF_MODEL(
             dataset_name, track_split_types, corpus_types, cache_dir,
             sub_specs=[
@@ -493,8 +498,6 @@ def load_retrieval_module(
                  "topk_internal": 100, "weight": float(extra_config.get("w_qwen", 0.7))},
                 {"type": "same_artist", "topk_internal": 100,
                  "weight": float(extra_config.get("w_artist", 1.0))},
-                {"type": "session_cf", "topk_internal": 100,
-                 "weight": float(extra_config.get("w_cf", 0.7))},
             ],
             k=60,
         )
