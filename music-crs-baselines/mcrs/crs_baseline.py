@@ -526,8 +526,11 @@ class CRS_BASELINE:
         batch_context = []
         for data in batch_data:
             prior_history = data.get("session_memory", [])  # {role, content} dicts
-            _played = [str(t.get("content")) for t in prior_history
-                       if t.get("role") == "music" and t.get("content")]
+            # Source RAW played track_ids: prefer t['track_id'] (the inference
+            # parser carries it alongside the expanded-text content); fall back
+            # to content for turns that still hold a raw id (eval harness).
+            _played = [str(t.get("track_id") or t.get("content")) for t in prior_history
+                       if t.get("role") == "music" and (t.get("track_id") or t.get("content"))]
             batch_context.append({
                 "chat_history": prior_history,
                 "current_user_query": data["user_query"],
@@ -568,6 +571,12 @@ class CRS_BASELINE:
         # (e.g. BGE cross-encoder) accept-and-ignore, while task-aware ones
         # (LGBM LambdaMART) use them as categorical features.
         if self.reranker is not None:
+            # Per-query session info for rerankers that compute session-continuity
+            # features (LGBM LambdaMART). played_tids = the RAW prior track_ids
+            # already threaded into batch_context['history_tids'] above.
+            extra_session_info = [
+                {"played_tids": bc.get("history_tids", [])} for bc in batch_context
+            ]
             try:
                 batch_retrieval_items = self.reranker.rerank(
                     retrieval_inputs, batch_retrieval_items, topk=20,
@@ -575,9 +584,11 @@ class CRS_BASELINE:
                     goal_categories=goal_categories,
                     goal_specificities=goal_specificities,
                     user_profiles_raw=user_profiles_raw,
+                    extra_session_info=extra_session_info,
                 )
             except TypeError:
-                # Back-compat: reranker predates the side-channel kwargs.
+                # Back-compat: reranker predates the side-channel kwargs
+                # (e.g. BGE cross-encoder doesn't accept extra_session_info).
                 batch_retrieval_items = self.reranker.rerank(
                     retrieval_inputs, batch_retrieval_items, topk=20,
                 )

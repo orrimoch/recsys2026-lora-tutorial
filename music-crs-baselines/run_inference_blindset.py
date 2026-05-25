@@ -30,7 +30,17 @@ def chat_history_parser(conversations, music_crs, target_turn_number, chat_histo
         current_content = turn_data['content']
         if turn_data['role'] == "music":
             current_role = "assistant"
+            # content -> expanded metadata text (the LM needs it), but ALSO
+            # carry the raw track_id so the session channels + LGBM reranker
+            # can recover the actually-played catalog ids (not expanded text).
+            raw_track_id = turn_data['content']
             current_content = music_crs.item_db.id_to_metadata(turn_data['content'])
+            chat_history.append({
+                "role": current_role,
+                "content": current_content,
+                "track_id": raw_track_id,
+            })
+            continue
         chat_history.append({
             "role": current_role,
             "content": current_content

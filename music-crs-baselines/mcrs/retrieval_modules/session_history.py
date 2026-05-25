@@ -19,6 +19,14 @@ def played_tids_from_context(ctx: Optional[dict], catalog_tids: set) -> list[str
     out: list[str] = []
     for turn in ctx.get("chat_history", []) or []:
         if turn.get("role") in ("music", "assistant"):
+            # Prefer an explicit raw track_id (the inference parser expands
+            # music-turn content to metadata TEXT, so content is no longer a
+            # catalog id; track_id carries the original id). Fall back to
+            # content for turns that still hold a raw id (eval harness / tests).
+            tid = turn.get("track_id")
+            if tid is not None and str(tid) in catalog_tids:
+                out.append(str(tid))
+                continue
             c = str(turn.get("content", ""))
             if c in catalog_tids:
                 out.append(c)
