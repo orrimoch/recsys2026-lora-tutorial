@@ -299,11 +299,21 @@ class DENSE_PRECOMPUTED:
         hits = len(queries) - len(missing_idx)
         if missing_idx:
             to_encode = [queries[i] for i in missing_idx]
-            # Encode in sub-batches to bound MPS memory.
-            SUB_B = 32
+            # Encode in sub-batches to bound GPU/MPS memory. SUB_B=16 keeps the
+            # transient activation spike (sub_b x 512 tokens through the encoder)
+            # small — that batch is the single largest GPU allocation in a run.
+            SUB_B = 16
             encoded_parts: list[np.ndarray] = []
             for i in range(0, len(to_encode), SUB_B):
                 encoded_parts.append(self._encode_queries(to_encode[i:i + SUB_B]))
+            # Release the encoder's reserved cache so the process does not hold a
+            # high-water mark for its lifetime (matters when sharing a GPU).
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
             encoded = np.concatenate(encoded_parts, axis=0) if encoded_parts else np.zeros((0, self.track_mat.shape[1]), dtype=np.float32)
             for j, q in enumerate(to_encode):
                 self._query_cache[q] = encoded[j].astype(np.float32)

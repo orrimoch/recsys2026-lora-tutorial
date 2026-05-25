@@ -87,8 +87,9 @@ def load_track_meta_lookup(item_db: MusicCatalogDB) -> dict[str, dict]:
     return out
 
 
-def load_track_cfbpr(cache_dir: str) -> tuple[dict[str, int], np.ndarray]:
-    """{track_id -> row_idx} + the L2-normalized (T, 128) matrix."""
+def load_track_cfbpr(cache_dir: str) -> tuple[dict[str, int], np.ndarray, dict]:
+    """{track_id -> row_idx} + the L2-normalized (T, 128) track matrix +
+    {user_id -> 128-vec} warm-user embeddings (used for the cfbpr_score feature)."""
     cf = CF_BPR("", ["all_tracks"], [], cache_dir=cache_dir)
     tid_to_idx = {t: i for i, t in enumerate(cf.track_ids)}
     return tid_to_idx, cf.track_mat, cf.user_embs
@@ -389,7 +390,15 @@ def build(
     print(f"[lgbm-features] built {len(queries)} queries; running wRRF topk={topk}")
     # Batch through wRRF in chunks of 16 to cap memory.
     CHUNK = 16
-    all_rows: list[dict] = []
+    # Accumulate as periodic compact DataFrames rather than one giant list of
+    # dicts: at full scale (--n-sessions 999999 x topk candidates) the dict list
+    # alone can blow host RAM (tens of GB) and crash the run. Flush the buffer to
+    # a DataFrame every FLUSH_ROWS rows; the final pd.concat yields the identical
+    # frame (same columns/order, since extract_features returns consistent keys).
+    FLUSH_ROWS = 200_000
+    all_frames: list[pd.DataFrame] = []
+    row_buf: list[dict] = []
+    total_rows = 0
     for i in tqdm(range(0, len(queries), CHUNK), desc="wrrf batches"):
         chunk_queries = queries[i:i+CHUNK]
         # Feed the session-aware union channels the prior played track_ids +
@@ -425,10 +434,17 @@ def build(
                 pop_rank_pct=pop_rank_pct,
                 played_meta=played_meta,
             )
-            all_rows.extend(rows)
+            row_buf.extend(rows)
+        if len(row_buf) >= FLUSH_ROWS:
+            all_frames.append(pd.DataFrame(row_buf))
+            total_rows += len(row_buf)
+            row_buf = []
 
-    print(f"[lgbm-features] total rows: {len(all_rows)}")
-    df_out = pd.DataFrame(all_rows)
+    if row_buf:
+        all_frames.append(pd.DataFrame(row_buf))
+        total_rows += len(row_buf)
+    print(f"[lgbm-features] total rows: {total_rows}")
+    df_out = pd.concat(all_frames, ignore_index=True) if all_frames else pd.DataFrame()
     # Label distribution sanity
     pos = int(df_out["label"].sum())
     print(f"[lgbm-features] positives: {pos}  negatives: {len(df_out) - pos}")
