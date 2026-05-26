@@ -144,6 +144,7 @@ class LGBM_RERANKER:
               f"val_ndcg20={meta.get('best_val_ndcg20'):.4f})")
         # Track metadata lookup + cf-bpr tables (lightweight, reused).
         self._load_track_meta(item_db_name, track_split_types)
+        self._build_pop_rank_pct()
         self._load_cfbpr(cache_dir)
         # Lazy-load user metadata when first rerank() call arrives.
         self._user_meta: Optional[dict[str, dict]] = None
@@ -157,6 +158,23 @@ class LGBM_RERANKER:
         for r in concat:
             self.tid_to_track[r["track_id"]] = _flatten_track_row(r)
         print(f"[lgbm-rerank] cached {len(self.tid_to_track)} track rows")
+
+    def _build_pop_rank_pct(self) -> None:
+        """Popularity percentile per track (0=most popular, 1=least), built from
+        the SAME catalog the trainer used (self.tid_to_track). MUST match
+        build_lgbm_features.build_pop_rank_pct_map: the pop_rank_pct feature was
+        previously read from a caller-supplied dict that nothing passed, so it was
+        a constant 0.5 at inference (a top-gain feature dead at serve -> the
+        reranker couldn't reorder). Self-computing it fixes train/serve skew for
+        every caller (dev eval + production)."""
+        items = [(t, float(m.get("popularity") or 0.0))
+                 for t, m in self.tid_to_track.items()]
+        items.sort(key=lambda x: -x[1])
+        n = max(1, len(items))
+        self.pop_rank_pct: dict[str, float] = {}
+        for rank, (t, pop) in enumerate(items):
+            self.pop_rank_pct[t] = 0.5 if pop <= 0.0 else rank / n
+        print(f"[lgbm-rerank] built pop_rank_pct for {len(self.pop_rank_pct)} tracks")
 
     def _load_cfbpr(self, cache_dir: str) -> None:
         # Reuse cf-bpr tables via the CF_BPR class so singleton caches hit.
@@ -349,7 +367,8 @@ class LGBM_RERANKER:
                 if "query_drift_score" in f_idx:
                     X[rank - 1, f_idx["query_drift_score"]] = float(sess.get("query_drift_score", 1.0))
                 if "pop_rank_pct" in f_idx:
-                    X[rank - 1, f_idx["pop_rank_pct"]] = float(cand_extra.get("pop_rank_pct", 0.5))
+                    # Self-computed map (matches training); was a dead 0.5 before.
+                    X[rank - 1, f_idx["pop_rank_pct"]] = float(self.pop_rank_pct.get(tid, 0.5))
                 if "is_warm_user" in f_idx:
                     X[rank - 1, f_idx["is_warm_user"]] = int(cfbpr_user_vec is not None)
 

@@ -42,6 +42,27 @@ def test_flatten_track_row_handles_missing_album():
     assert flat["album_name"] == ""              # absent -> empty, never KeyError
 
 
+def test_pop_rank_pct_built_and_nonconstant():
+    """Regression: pop_rank_pct (a top-gain feature) was read from a caller dict
+    nothing supplied -> constant 0.5 at inference -> dead feature -> reranker
+    couldn't reorder. The reranker must self-build the percentile map from
+    tid_to_track, matching build_lgbm_features.build_pop_rank_pct_map semantics
+    (0 = most popular, 1 = least, missing/zero popularity -> 0.5)."""
+    r = LGBM_RERANKER.__new__(LGBM_RERANKER)
+    r.tid_to_track = {
+        "hot": {"popularity": 100.0},
+        "mid": {"popularity": 10.0},
+        "cold": {"popularity": 1.0},
+        "nopop": {"popularity": 0.0},
+    }
+    r._build_pop_rank_pct()
+    assert r.pop_rank_pct["hot"] == 0.0          # most popular -> 0/N
+    assert r.pop_rank_pct["nopop"] == 0.5         # zero popularity -> neutral
+    # strictly increasing pct as popularity drops (not a dead constant)
+    assert r.pop_rank_pct["hot"] < r.pop_rank_pct["mid"] < r.pop_rank_pct["cold"]
+    assert len({r.pop_rank_pct[t] for t in ("hot", "mid", "cold")}) == 3
+
+
 def test_same_album_fires_through_inference_loader_path():
     """Build tid_to_track exactly as production does (via _flatten_track_row from
     raw rows) and confirm same_album == 1 when a candidate shares the played
