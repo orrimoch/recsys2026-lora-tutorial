@@ -18,6 +18,37 @@ QWEN3_MUSIC_INSTRUCT = (
 )
 
 
+def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = None) -> list[dict]:
+    """Sub-retriever specs for wrrf_union_v1. HyDE is opt-in via use_hyde.
+
+    Kept as a standalone helper so the channel-gating logic is unit-testable
+    without constructing any retriever (the hyde_qwen3 build loads Qwen2.5-7B).
+    """
+    ec = extra_config or {}
+    corpus_types = corpus_types or ["track_name", "artist_name", "album_name"]
+    specs = [
+        {"type": "bm25",
+         "corpus_types": ["track_name", "artist_name", "album_name",
+                          "release_date", "tag_list"],
+         "topk_internal": 100, "weight": float(ec.get("w_bm25", 1.0))},
+        {"type": "dense_metadata_qwen3", "corpus_types": corpus_types,
+         "topk_internal": 100, "weight": float(ec.get("w_qwen", 0.7))},
+        {"type": "same_artist", "topk_internal": 100,
+         "weight": float(ec.get("w_artist", 1.0))},
+    ]
+    if ec.get("use_hyde"):
+        specs.append({
+            "type": "hyde_qwen3", "topk_internal": 100,
+            "weight": float(ec.get("w_hyde", 1.0)),
+            "extra_config": {
+                "hyde_model": ec.get("hyde_model", "Qwen/Qwen2.5-7B-Instruct"),
+                "n_docs": int(ec.get("hyde_n_docs", 3)),
+                "topk_per_doc": int(ec.get("hyde_topk_per_doc", 100)),
+            },
+        })
+    return specs
+
+
 def load_retrieval_module(
         retrieval_type: str,
         dataset_name: str,
@@ -479,6 +510,27 @@ def load_retrieval_module(
     elif retrieval_type == "session_cf":
         from .session_cf import SessionCFRetriever
         return SessionCFRetriever(dataset_name, track_split_types, corpus_types, cache_dir)
+    elif retrieval_type == "hyde_qwen3":
+        # HyDE recall channel: an LLM writes pseudo-track descriptions, the qwen3
+        # dense retriever matches them in the catalog embedding space, and RRF
+        # fuses the per-doc lists. NOTE: LLAMA_MODEL is the generic HF causal-LM
+        # wrapper (name is legacy) — it loads whatever `hyde_model` names, i.e.
+        # Qwen2.5-7B-Instruct here, NOT Llama.
+        import os
+        from ..lm_modules.llama import LLAMA_MODEL
+        from ..query_rewriters.hyde import HydeGenerator
+        from .hyde_qwen3 import HydeQwen3Retriever
+        lm = LLAMA_MODEL(model_name=extra_config.get("hyde_model", "Qwen/Qwen2.5-7B-Instruct"))
+        prompt_path = os.path.join(
+            os.path.dirname(__file__), "..", "system_prompts", "hyde_pseudo_track.txt")
+        generator = HydeGenerator(
+            lm, prompt_path, cache_dir=cache_dir,
+            n_docs=int(extra_config.get("n_docs", 3)))
+        inner = load_retrieval_module(
+            "dense_metadata_qwen3", dataset_name, track_split_types,
+            corpus_types, cache_dir, extra_config={})
+        return HydeQwen3Retriever(
+            generator, inner, topk_per_doc=int(extra_config.get("topk_per_doc", 100)))
     elif retrieval_type == "wrrf_union_v1":
         # 3-channel recall union: lexical + frozen-Qwen semantic + session
         # artist continuity. session_cf was DROPPED after the G1 ablation
@@ -489,16 +541,7 @@ def load_retrieval_module(
         # ~0.478 @100, ~0.346 @20 (vs 4ch 0.480 / 0.354).
         return RRF_MODEL(
             dataset_name, track_split_types, corpus_types, cache_dir,
-            sub_specs=[
-                {"type": "bm25",
-                 "corpus_types": ["track_name", "artist_name", "album_name",
-                                  "release_date", "tag_list"],
-                 "topk_internal": 100, "weight": float(extra_config.get("w_bm25", 1.0))},
-                {"type": "dense_metadata_qwen3", "corpus_types": corpus_types,
-                 "topk_internal": 100, "weight": float(extra_config.get("w_qwen", 0.7))},
-                {"type": "same_artist", "topk_internal": 100,
-                 "weight": float(extra_config.get("w_artist", 1.0))},
-            ],
+            sub_specs=_wrrf_union_v1_specs(extra_config, corpus_types),
             k=60,
         )
     # Sequential retrieve-then-rerank.
