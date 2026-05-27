@@ -47,6 +47,15 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
                 "batch_size": int(ec.get("hyde_batch_size", 16)),
             },
         })
+    if ec.get("use_sasrec"):
+        specs.append({
+            "type": "sasrec_seq", "topk_internal": 100,
+            "weight": float(ec.get("w_sasrec", 1.0)),
+            "extra_config": {
+                "model_dir": ec.get("sasrec_model_dir", "sasrec_v1"),
+                "max_len": int(ec.get("sasrec_max_len", 50)),
+            },
+        })
     return specs
 
 
@@ -538,6 +547,39 @@ def load_retrieval_module(
             corpus_types, cache_dir, extra_config={})
         return HydeQwen3Retriever(
             generator, inner, topk_per_doc=int(extra_config.get("topk_per_doc", 100)))
+    elif retrieval_type == "sasrec_seq":
+        # SASRec recall channel. Loads the trained model + precomputes the item-repr
+        # matrix; the dialog context token is encoded by bge-base-en-v1.5 (English,
+        # 768-dim), with oldest-first truncation so recent turns survive the 512-cap.
+        import os
+        import torch
+        from .sasrec_model import SasrecModel
+        from .sasrec_seq import SasrecRetriever
+        ec = extra_config or {}
+        model_dir = os.path.join(cache_dir, "retrieval_v2", "sasrec",
+                                 ec.get("model_dir", "sasrec_v1"))
+        ckpt = torch.load(os.path.join(model_dir, "sasrec.pt"), map_location="cpu")
+        model = SasrecModel(**ckpt["model_kwargs"])
+        model.load_state_dict(ckpt["state_dict"])
+        model.eval()
+        item_feats = torch.as_tensor(ckpt["item_feats"], dtype=torch.float32)
+        track_ids = ckpt["track_ids"]
+        with torch.no_grad():
+            item_repr = model.item_fusion(item_feats)
+        from sentence_transformers import SentenceTransformer
+        st = SentenceTransformer(ec.get("ctx_model", "BAAI/bge-base-en-v1.5"))
+        st.max_seq_length = 512
+        try:
+            st.tokenizer.truncation_side = "left"  # keep most-recent turns
+        except Exception:
+            pass
+
+        def _text_encode(texts):
+            return st.encode(list(texts), convert_to_numpy=True,
+                             normalize_embeddings=True, show_progress_bar=False)
+
+        return SasrecRetriever(model, item_repr, track_ids, item_feats, _text_encode,
+                               max_len=int(ec.get("max_len", 50)))
     elif retrieval_type == "wrrf_union_v1":
         # 3-channel recall union: lexical + frozen-Qwen semantic + session
         # artist continuity. session_cf was DROPPED after the G1 ablation
