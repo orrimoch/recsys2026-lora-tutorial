@@ -46,9 +46,9 @@ the dataset schema in the first implementation task.)
 
 Sequence encoder. Causal self-attention (2 layers, dim `d`) over the sequence
 `[context_token, item_1, …, item_t]`, producing a session-state vector from the
-final position. Position 0 is a conversation context token: the Qwen3 embedding
-of the dialog so far (the same `role: content` text the BM25/dense channels
-query on, via the shared Qwen3-Embedding-0.6B) projected to `d`. It conditions
+final position. Position 0 is a conversation context token: the bge-base-en-v1.5
+(768-dim, English, CLS-pooled) embedding of the USER-turns-only dialog so far,
+projected to `d` (`ctx_in_dim=768`; see Context encoder below). It conditions
 the model on the user's stated intent and makes it productive from turn 1, when
 no tracks have been played yet. Positions 1..t are the played-track item-reprs.
 Learned positional embeddings index the played-track SUBSEQUENCE position (1st
@@ -80,6 +80,18 @@ Deliberate v1 calls (approved):
   crs_baseline.py:663 it is NOT available at Blind inference, so conditioning on
   it would reintroduce train/serve skew on the scored set; it is also coarse and
   largely subsumed by the conversation context token.
+- Context encoder (decided 2026-05-27): `BAAI/bge-base-en-v1.5` (110M, 768-dim,
+  English, project-approved). The context text is the USER turns only — played-
+  track metadata is omitted because those tracks are already in the item sequence
+  (no double-count) and it keeps the text short. Natural text, NO stopword/keyword
+  preprocessing (it degrades a dense transformer — negations/comparatives carry
+  meaning; keyword focus belongs to the BM25 channel). If the user-turns text
+  exceeds bge-base-en's 512-token limit, trim OLDEST first (`truncation_side='left'`).
+  The dialog text reaches the channel via `batch_context['user_dialog']` for
+  train/serve parity. Kept as a cheap A/B: full-dialog (oldest-first trim), since
+  the qwen3 item text-embedding is weak. If a dev dialog-length check shows many
+  conversations exceed 512 tokens, escalate to a long-context English encoder
+  (`gte-base-en-v1.5`, 8192) — not BGE (the English BGE line caps at 512).
 
 ## Data flow
 
