@@ -19,7 +19,7 @@ from mcrs.retrieval_modules.sasrec_model import (  # noqa: E402
     SasrecModel, build_user_dialog, next_item_loss)
 
 TRACK_EMB = "talkpl-ai/TalkPlayData-Challenge-Track-Embeddings"
-META_COL, CLAP_COL, CF_COL = "metadata-qwen3_embedding_0.6b", "laion_clap", "cf-bpr"
+META_COL, CLAP_COL, CF_COL = "metadata-qwen3_embedding_0.6b", "audio-laion_clap", "cf-bpr"
 CTX_MODEL = "BAAI/bge-base-en-v1.5"
 
 
@@ -34,19 +34,24 @@ def _impute(mat, valid):
 
 
 def load_item_feats(splits):
-    """Concatenate the 3 frozen modality embeddings -> (N, 1664), imputed,
-    aligned to one track_id order."""
+    """Concatenate the 3 frozen modality embeddings -> (N, sum of modality dims),
+    imputed, aligned to one track_id order. Each modality's dim is inferred from
+    its first non-empty row, so a dim change can't silently wipe a modality."""
     ds = concatenate_datasets([load_dataset(TRACK_EMB)[s] for s in splits])
     track_ids = list(ds["track_id"])
     parts = []
-    for col, dim in [(META_COL, 1024), (CLAP_COL, 512), (CF_COL, 128)]:
+    for col in (META_COL, CLAP_COL, CF_COL):
         raw = ds[col]
+        dim = next((len(v) for v in raw if v is not None and len(v) > 0), None)
+        if dim is None:
+            raise ValueError(f"column {col!r} has no non-empty rows")
         mat = np.zeros((len(track_ids), dim), dtype=np.float32)
         valid = np.zeros(len(track_ids), dtype=bool)
         for i, v in enumerate(raw):
             if v is not None and len(v) == dim:
                 mat[i] = v
                 valid[i] = True
+        print(f"[sasrec] {col}: dim={dim} valid={int(valid.sum())}/{len(track_ids)}")
         parts.append(_impute(mat, valid))
     return track_ids, np.concatenate(parts, axis=1)
 
