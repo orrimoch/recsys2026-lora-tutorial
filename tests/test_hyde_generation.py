@@ -32,48 +32,65 @@ def test_parse_hyde_output_tolerates_missing_intent_and_paren_numbering():
 
 
 class _FakeLM:
-    """Stub matching the LLAMA_MODEL surface HydeGenerator uses."""
-
-    def __init__(self, canned: str):
-        self.canned = canned
-
-        class _Tok:
-            def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
-                return "PROMPT"
-
-        self.tokenizer = _Tok()
-        self.lm = self            # _generate_one is monkeypatched in the test
-        self.device = "cpu"
+    """Minimal stub — HydeGenerator only stores the lm; generation is batched
+    via _generate_raw, which the tests monkeypatch (no real model needed)."""
 
 
 def test_generator_caches_and_parses(tmp_path, monkeypatch):
     prompt = tmp_path / "p.txt"
     prompt.write_text("SYS", encoding="utf-8")
-    lm = _FakeLM("INTENT: x\n1. doc one\n2. doc two\n")
-    gen = HydeGenerator(lm, str(prompt), cache_dir=str(tmp_path))
+    gen = HydeGenerator(_FakeLM(), str(prompt), cache_dir=str(tmp_path))
 
-    # Stub the raw generation so the test needs no real model.
-    monkeypatch.setattr(gen, "_generate_one", lambda conv: lm.canned)
-
+    monkeypatch.setattr(
+        gen, "_generate_raw",
+        lambda convs: ["INTENT: x\n1. doc one\n2. doc two\n" for _ in convs])
     out1 = gen.generate_batch(["conv A"])
     assert out1[0]["hyde_docs"] == ["doc one", "doc two"]
     assert (tmp_path / "hyde").exists()
 
-    # Second call for the same conversation must hit cache (no new generation).
+    # Second call for the same conversation must hit cache (no generation).
     called = {"n": 0}
-    monkeypatch.setattr(
-        gen, "_generate_one",
-        lambda conv: (called.__setitem__("n", called["n"] + 1), "")[1],
-    )
+
+    def _spy(convs):
+        called["n"] += len(convs)
+        return ["" for _ in convs]
+
+    monkeypatch.setattr(gen, "_generate_raw", _spy)
     out2 = gen.generate_batch(["conv A"])
     assert out2[0]["hyde_docs"] == ["doc one", "doc two"]
-    assert called["n"] == 0  # served from disk cache
+    assert called["n"] == 0
 
 
 def test_generator_fallback_when_no_docs(tmp_path, monkeypatch):
     prompt = tmp_path / "p.txt"
     prompt.write_text("SYS", encoding="utf-8")
-    gen = HydeGenerator(_FakeLM(""), str(prompt), cache_dir=str(tmp_path))
-    monkeypatch.setattr(gen, "_generate_one", lambda conv: "garbage with no numbers")
+    gen = HydeGenerator(_FakeLM(), str(prompt), cache_dir=str(tmp_path))
+    monkeypatch.setattr(gen, "_generate_raw",
+                        lambda convs: ["garbage with no numbers" for _ in convs])
     out = gen.generate_batch(["conv B"])
     assert out[0]["hyde_docs"] == ["conv B"]  # falls back to the conversation
+
+
+def test_generator_batches_only_misses_and_preserves_order(tmp_path, monkeypatch):
+    prompt = tmp_path / "p.txt"
+    prompt.write_text("SYS", encoding="utf-8")
+    gen = HydeGenerator(_FakeLM(), str(prompt), cache_dir=str(tmp_path))
+
+    def _echo(convs):
+        return [f"INTENT: i\n1. d::{c}\n" for c in convs]
+
+    monkeypatch.setattr(gen, "_generate_raw", _echo)
+    gen.generate_batch(["B"])  # pre-cache conversation "B"
+
+    seen = {"convs": None}
+
+    def _spy(convs):
+        seen["convs"] = list(convs)
+        return _echo(convs)
+
+    monkeypatch.setattr(gen, "_generate_raw", _spy)
+    out = gen.generate_batch(["A", "B", "C"])  # B is cached
+    assert seen["convs"] == ["A", "C"]            # only misses are generated
+    assert out[0]["hyde_docs"] == ["d::A"]
+    assert out[1]["hyde_docs"] == ["d::B"]        # served from cache
+    assert out[2]["hyde_docs"] == ["d::C"]

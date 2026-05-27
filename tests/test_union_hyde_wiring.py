@@ -15,3 +15,10 @@ def test_union_specs_add_hyde_when_enabled():
     assert hyde["weight"] == 0.8
     assert hyde["topk_internal"] == 100
     assert hyde["extra_config"]["hyde_model"] == "Qwen/Qwen2.5-7B-Instruct"
+    assert hyde["extra_config"]["batch_size"] == 16
+
+
+def test_union_specs_pass_through_hyde_batch_size():
+    specs = _wrrf_union_v1_specs({"use_hyde": True, "hyde_batch_size": 48})
+    hyde = next(s for s in specs if s["type"] == "hyde_qwen3")
+    assert hyde["extra_config"]["batch_size"] == 48

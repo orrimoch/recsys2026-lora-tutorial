@@ -44,6 +44,7 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
                 "hyde_model": ec.get("hyde_model", "Qwen/Qwen2.5-7B-Instruct"),
                 "n_docs": int(ec.get("hyde_n_docs", 3)),
                 "topk_per_doc": int(ec.get("hyde_topk_per_doc", 100)),
+                "batch_size": int(ec.get("hyde_batch_size", 16)),
             },
         })
     return specs
@@ -520,12 +521,18 @@ def load_retrieval_module(
         from ..lm_modules.llama import LLAMA_MODEL
         from ..query_rewriters.hyde import HydeGenerator
         from .hyde_qwen3 import HydeQwen3Retriever
-        lm = LLAMA_MODEL(model_name=extra_config.get("hyde_model", "Qwen/Qwen2.5-7B-Instruct"))
+        # hyde_model accepts an HF repo id OR a local path (e.g. a Drive-cached
+        # checkpoint) — transformers' from_pretrained handles both. sdpa attention
+        # speeds up batched decode and needs no build (unlike flash-attn).
+        lm = LLAMA_MODEL(
+            model_name=extra_config.get("hyde_model", "Qwen/Qwen2.5-7B-Instruct"),
+            attn_implementation="sdpa")
         prompt_path = os.path.join(
             os.path.dirname(__file__), "..", "system_prompts", "hyde_pseudo_track.txt")
         generator = HydeGenerator(
             lm, prompt_path, cache_dir=cache_dir,
-            n_docs=int(extra_config.get("n_docs", 3)))
+            n_docs=int(extra_config.get("n_docs", 3)),
+            batch_size=int(extra_config.get("batch_size", 16)))
         inner = load_retrieval_module(
             "dense_metadata_qwen3", dataset_name, track_split_types,
             corpus_types, cache_dir, extra_config={})
