@@ -7,6 +7,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def build_user_dialog(turns) -> str:
+    """User-turns-only dialog text: newline-join the `content` of turns whose
+    role is 'user', in order. `turns` is an iterable of dict-like rows with
+    'role' and 'content'. Played-track ('music') turns are intentionally
+    excluded — they are represented in the item sequence, not the context token."""
+    return "\n".join(
+        str(t["content"]) for t in turns if t.get("role") == "user"
+    )
+
+
 def build_session_examples(track_seqs: list[list[int]], max_len: int) -> list[tuple[list[int], int]]:
     """For each session's ordered track-index list, yield (prefix, target) for
     every position t (0-based): prefix = the up-to-max_len tracks before t,

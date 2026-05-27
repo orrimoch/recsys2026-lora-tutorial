@@ -73,3 +73,14 @@ def test_next_item_loss_decreases_on_overfit_batch():
         loss.backward(); opt.step()
         losses.append(float(loss))
     assert losses[-1] < losses[0] - 0.5
+
+
+from mcrs.retrieval_modules.sasrec_model import build_user_dialog
+
+
+def test_build_user_dialog_keeps_only_user_turns():
+    turns = [{"role": "user", "content": "play something upbeat"},
+             {"role": "music", "content": "track-uuid-1"},
+             {"role": "user", "content": "more mellow please"}]
+    assert build_user_dialog(turns) == "play something upbeat\nmore mellow please"
+    assert build_user_dialog([{"role": "music", "content": "x"}]) == ""
