@@ -39,6 +39,18 @@ class SasrecRetriever:
 
     def batch_text_to_item_retrieval(self, queries, topk, user_ids=None, batch_context=None):
         ctxs = batch_context or [{} for _ in queries]
+        # Train/serve parity: the model was trained on USER-turns-only dialog
+        # text via build_user_dialog. Callers must pass that text in
+        # batch_context['user_dialog']. If it's missing, we fall back to the raw
+        # query (which usually contains music-turn metadata) and warn loudly —
+        # the fallback works but degrades quality.
+        if any("user_dialog" not in (c or {}) for c in ctxs):
+            import warnings
+            warnings.warn(
+                "[SasrecRetriever] batch_context['user_dialog'] missing on at "
+                "least one row; falling back to the raw query (train/serve skew "
+                "possible). Pass user_dialog=build_user_dialog(prior_turns).",
+                stacklevel=2)
         results: list[list[str]] = []
         for s in range(0, len(queries), self.batch_size):
             q_batch = queries[s:s + self.batch_size]

@@ -79,8 +79,11 @@ class SasrecModel(nn.Module):
         seq = torch.cat([ctx, items], dim=1)                      # (B,L+1,d)
         pos = torch.arange(L + 1, device=seq.device)
         seq = seq + self.pos_emb(pos).unsqueeze(0)
+        # Bool causal mask matches the dtype of `src_key_padding_mask` below, so
+        # nn.TransformerEncoder doesn't emit the "mismatched mask" deprecation
+        # warning and won't break on a future PyTorch upgrade.
         causal = torch.triu(
-            torch.full((L + 1, L + 1), float("-inf"), device=seq.device), diagonal=1)
+            torch.ones(L + 1, L + 1, dtype=torch.bool, device=seq.device), diagonal=1)
         idx = torch.arange(L + 1, device=seq.device).unsqueeze(0)  # (1,L+1)
         key_padding = idx > lengths.unsqueeze(1)                   # True = pad
         h = self.encoder(seq, mask=causal, src_key_padding_mask=key_padding)
@@ -88,6 +91,13 @@ class SasrecModel(nn.Module):
         return state
 
     def score(self, state: torch.Tensor, item_matrix: torch.Tensor) -> torch.Tensor:
+        # L2-normalize state and items so the dot product is a cosine; the
+        # temperature is then well-calibrated (standard contrastive practice).
+        # Without normalization the init-scale dot products at d=128 are O(±20),
+        # which divided by 0.07 makes the softmax near one-hot from step 0 —
+        # killing the early-epoch gradient signal.
+        state = F.normalize(state, dim=-1)
+        item_matrix = F.normalize(item_matrix, dim=-1)
         return (state @ item_matrix.t()) / self.temperature
 
 
