@@ -18,6 +18,7 @@ model_kwargs, item_feats (N, item_in_dim), track_ids (len N)).
 import argparse
 import hashlib
 import os
+import random
 import sys
 
 import numpy as np
@@ -117,10 +118,39 @@ def build_test(tid_to_idx, max_seq):
     return ([r[1] for r in rows], [r[2] for r in rows], [r[3] for r in rows])
 
 
-def encode_dialogs(st, dialogs, batch_size=256):
-    """bge-base-en CLS embeddings, L2-normalized; oldest-first truncation."""
-    return st.encode(dialogs, convert_to_numpy=True, normalize_embeddings=True,
-                     batch_size=batch_size, show_progress_bar=True).astype(np.float32)
+def _ctx_cache_path(cache_dir, encoder_name, max_seq_length, truncation_side,
+                    split_label, dialogs):
+    """Content-addressed disk path for a (config, dialogs) pair."""
+    safe_enc = encoder_name.replace("/", "_")
+    h = hashlib.sha1(("\n".join(dialogs)).encode("utf-8")).hexdigest()[:16]
+    return os.path.join(
+        cache_dir, "retrieval_v2", "sasrec", "ctx_cache",
+        f"{safe_enc}__msl{max_seq_length}__ts{truncation_side}__{split_label}__{h}.npy")
+
+
+def encode_dialogs_cached(st, dialogs, cache_dir, encoder_name, max_seq_length,
+                          truncation_side, split_label, batch_size=256):
+    """Encode dialogs with the SentenceTransformer, persisted under a
+    content-hash on disk. Re-runs with identical dialogs + identical encoder
+    config skip the encoding entirely.
+
+    Cache key = (encoder_name, max_seq_length, truncation_side, sha1(dialogs)).
+    Path: {cache_dir}/retrieval_v2/sasrec/ctx_cache/...npy  (Drive-symlinked).
+    """
+    p = _ctx_cache_path(cache_dir, encoder_name, max_seq_length, truncation_side,
+                        split_label, dialogs)
+    if os.path.exists(p):
+        ctx = np.load(p)
+        print(f"[sasrec] ctx cache HIT  {split_label}: {os.path.basename(p)} "
+              f"shape={ctx.shape}")
+        return ctx
+    print(f"[sasrec] ctx cache MISS {split_label}: encoding {len(dialogs)} dialogs")
+    ctx = st.encode(dialogs, convert_to_numpy=True, normalize_embeddings=True,
+                    batch_size=batch_size, show_progress_bar=True).astype(np.float32)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    np.save(p, ctx)
+    print(f"[sasrec] ctx cached -> {os.path.basename(p)}")
+    return ctx
 
 
 def evaluate(model, ctx_t, prefixes, targets, feats_t, item_in_dim, batch_size, device):
@@ -166,8 +196,19 @@ def main():
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--val-frac", type=float, default=0.1)
+    p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Reproducibility: seed every RNG that can affect the run. Note: the bge
+    # encoder is deterministic at this batch size/precision, and the
+    # session-disjoint val split is already deterministic via SHA1(session_id).
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    print(f"[sasrec] seed={args.seed}")
 
     track_ids, feats = load_item_feats(["all_tracks"])
     tid_to_idx = {t: i for i, t in enumerate(track_ids)}
@@ -187,12 +228,12 @@ def main():
         st.tokenizer.truncation_side = "left"
     except Exception:
         pass
-    print("[sasrec] encoding train dialogs")
-    tr_ctx = encode_dialogs(st, tr_d, args.batch_size)
-    print("[sasrec] encoding val dialogs")
-    val_ctx = encode_dialogs(st, val_d, args.batch_size)
-    print("[sasrec] encoding test dialogs")
-    te_ctx = encode_dialogs(st, te_d, args.batch_size)
+    cache_kw = dict(cache_dir=args.cache_dir, encoder_name=CTX_MODEL,
+                    max_seq_length=512, truncation_side="left",
+                    batch_size=args.batch_size)
+    tr_ctx = encode_dialogs_cached(st, tr_d, split_label="train", **cache_kw)
+    val_ctx = encode_dialogs_cached(st, val_d, split_label="val", **cache_kw)
+    te_ctx = encode_dialogs_cached(st, te_d, split_label="test", **cache_kw)
     ctx_in_dim = int(tr_ctx.shape[1])
     tr_ctx_t = torch.as_tensor(tr_ctx, device=dev)
     val_ctx_t = torch.as_tensor(val_ctx, device=dev)
