@@ -6,7 +6,7 @@ from mcrs.retrieval_modules.sasrec_seq import SasrecRetriever
 
 def _build(text_encode=None):
     torch.manual_seed(0)
-    model = SasrecModel(item_in_dim=16, ctx_in_dim=12, d=8, n_layers=1,
+    model = SasrecModel(item_modality_dims=[16], ctx_in_dim=12, d=8, n_layers=1,
                         n_heads=2, max_len=5).eval()
     track_ids = [f"t{i}" for i in range(20)]
     item_feats = torch.randn(20, 16)

@@ -33,7 +33,11 @@ from mcrs.retrieval_modules.sasrec_model import (  # noqa: E402
     SasrecModel, build_user_dialog, next_item_loss)
 
 TRACK_EMB = "talkpl-ai/TalkPlayData-Challenge-Track-Embeddings"
-META_COL, CLAP_COL, CF_COL = "metadata-qwen3_embedding_0.6b", "audio-laion_clap", "cf-bpr"
+# v2 (post-review): dropped cf-bpr — it's structurally inert for the 62% new-
+# artist majority (BPR factors learned from sparse interactions; cold tracks
+# get noise). Keeping metadata (text) + CLAP (audio) only.
+META_COL, CLAP_COL = "metadata-qwen3_embedding_0.6b", "audio-laion_clap"
+MODALITY_COLS = (META_COL, CLAP_COL)
 CTX_MODEL = "BAAI/bge-base-en-v1.5"
 
 
@@ -48,13 +52,16 @@ def _impute(mat, valid):
 
 
 def load_item_feats(splits):
-    """Concatenate the 3 frozen modality embeddings -> (N, sum of modality dims),
-    imputed, aligned to one track_id order. Each modality's dim is inferred from
-    its first non-empty row, so a dim change can't silently wipe a modality."""
+    """Concatenate the configured frozen modalities -> (N, sum of dims), imputed,
+    aligned to one track_id order. Each modality's dim is inferred from its
+    first non-empty row, so a dim change can't silently wipe a modality.
+
+    Returns: (track_ids, feats, modality_dims) where modality_dims is the
+    per-modality dim list (used to construct ItemFusion's per-modality LNs)."""
     ds = concatenate_datasets([load_dataset(TRACK_EMB)[s] for s in splits])
     track_ids = list(ds["track_id"])
-    parts = []
-    for col in (META_COL, CLAP_COL, CF_COL):
+    parts, modality_dims = [], []
+    for col in MODALITY_COLS:
         raw = ds[col]
         dim = next((len(v) for v in raw if v is not None and len(v) > 0), None)
         if dim is None:
@@ -67,7 +74,8 @@ def load_item_feats(splits):
                 valid[i] = True
         print(f"[sasrec] {col}: dim={dim} valid={int(valid.sum())}/{len(track_ids)}")
         parts.append(_impute(mat, valid))
-    return track_ids, np.concatenate(parts, axis=1)
+        modality_dims.append(dim)
+    return track_ids, np.concatenate(parts, axis=1), modality_dims
 
 
 def _is_val_session(session_id, val_frac):
@@ -190,7 +198,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cache-dir", required=True)
     p.add_argument("--out", default="sasrec_v1")
-    p.add_argument("--d", type=int, default=128)
+    p.add_argument("--d", type=int, default=192)
     p.add_argument("--max-seq", type=int, default=50)
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=256)
@@ -210,17 +218,28 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
     print(f"[sasrec] seed={args.seed}")
 
-    track_ids, feats = load_item_feats(["all_tracks"])
+    track_ids, feats, modality_dims = load_item_feats(["all_tracks"])
     tid_to_idx = {t: i for i, t in enumerate(track_ids)}
     feats_t = torch.as_tensor(feats, device=dev)
-    item_in_dim = feats.shape[1]
-    print(f"[sasrec] item feats {feats.shape}")
+    print(f"[sasrec] item feats {feats.shape} modality_dims={modality_dims}")
 
     (tr_d, tr_p, tr_t), (val_d, val_p, val_t) = build_train_val(
         tid_to_idx, args.max_seq, args.val_frac)
     te_d, te_p, te_t = build_test(tid_to_idx, args.max_seq)
     print(f"[sasrec] examples train={len(tr_t)} val={len(val_t)} test={len(te_t)} "
           f"(val_frac={args.val_frac}, session-disjoint)")
+
+    # Diagnostics — partition the val/test gap into its drivers.
+    def _stats(label, prefixes, dialogs):
+        plens = np.array([len(p) for p in prefixes]) if prefixes else np.array([0])
+        clens = np.array([len(d) for d in dialogs]) if dialogs else np.array([0])
+        print(f"[sasrec] {label}: prefix_len median={int(np.median(plens))} "
+              f"p95={int(np.percentile(plens, 95))} max={int(plens.max())} | "
+              f"dialog_chars median={int(np.median(clens))} "
+              f"p95={int(np.percentile(clens, 95))} max={int(clens.max())}")
+    _stats("train", tr_p, tr_d)
+    _stats("val",   val_p, val_d)
+    _stats("test",  te_p, te_d)
 
     st = SentenceTransformer(CTX_MODEL)
     st.max_seq_length = 512
@@ -240,8 +259,10 @@ def main():
     te_ctx_t = torch.as_tensor(te_ctx, device=dev)
     print(f"[sasrec] ctx dim {ctx_in_dim}")
 
-    model = SasrecModel(item_in_dim=item_in_dim, ctx_in_dim=ctx_in_dim,
+    model = SasrecModel(item_modality_dims=modality_dims, ctx_in_dim=ctx_in_dim,
                         d=args.d, max_len=args.max_seq).to(dev)
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"[sasrec] model: d={args.d} trainable_params={n_params:,}")
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     best_r100 = -1.0
@@ -255,7 +276,7 @@ def main():
             bi = order[s:s + args.batch_size]
             L = max((len(tr_p[i]) for i in bi), default=0)
             L = max(L, 1)
-            fb = torch.zeros(len(bi), L, item_in_dim, device=dev)
+            fb = torch.zeros(len(bi), L, feats.shape[1], device=dev)
             ln = torch.zeros(len(bi), dtype=torch.long, device=dev)
             for j, i in enumerate(bi):
                 pf = tr_p[i]
@@ -273,7 +294,7 @@ def main():
             nb += 1
         train_loss = tot / max(1, nb)
         val_loss, val_r20, val_r100 = evaluate(
-            model, val_ctx_t, val_p, val_t, feats_t, item_in_dim, args.batch_size, dev)
+            model, val_ctx_t, val_p, val_t, feats_t, feats.shape[1], args.batch_size, dev)
         marker = ""
         if val_r100 > best_r100:
             best_r100 = val_r100
@@ -289,7 +310,7 @@ def main():
         print(f"[sasrec] restored best model (val_recall@100={best_r100:.4f})")
 
     te_loss, te_r20, te_r100 = evaluate(
-        model, te_ctx_t, te_p, te_t, feats_t, item_in_dim, args.batch_size, dev)
+        model, te_ctx_t, te_p, te_t, feats_t, feats.shape[1], args.batch_size, dev)
     print(f"[sasrec] TEST (standalone SASRec) recall@20={te_r20:.4f} "
           f"recall@100={te_r100:.4f} loss={te_loss:.4f}")
 
@@ -297,7 +318,8 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     torch.save({
         "state_dict": model.cpu().state_dict(),
-        "model_kwargs": {"item_in_dim": item_in_dim, "ctx_in_dim": ctx_in_dim,
+        "model_kwargs": {"item_modality_dims": list(modality_dims),
+                         "ctx_in_dim": ctx_in_dim,
                          "d": args.d, "max_len": args.max_seq},
         "item_feats": feats, "track_ids": track_ids,
     }, os.path.join(out_dir, "sasrec.pt"))

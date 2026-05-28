@@ -31,16 +31,37 @@ def build_session_examples(track_seqs: list[list[int]], max_len: int) -> list[tu
 
 
 class ItemFusion(nn.Module):
-    """Project a concatenated frozen multimodal track feature vector -> d-dim
-    item representation. Only this MLP is trained; the inputs are frozen."""
+    """Project per-modality frozen track features -> d-dim item representation.
 
-    def __init__(self, in_dim: int, d: int = 128, hidden: int = 256):
+    The frozen multimodal track embeddings come from different sources at
+    wildly different scales (Qwen3-metadata ~unit-norm, CLAP unnormalized, etc.).
+    Each modality gets its OWN LayerNorm before concat so the MLP doesn't burn
+    capacity discovering scale. After concat we expand to a wide hidden, LN +
+    GELU + dropout, then project to d. Only the LNs and the MLP are trained;
+    the input modalities are frozen catalog vectors.
+    """
+
+    def __init__(self, modality_dims: list[int], d: int = 192,
+                 hidden: int = 1024, dropout: float = 0.2):
         super().__init__()
+        self.modality_dims = list(modality_dims)
+        in_dim = sum(self.modality_dims)
+        self.norms = nn.ModuleList(
+            [nn.LayerNorm(m) for m in self.modality_dims])
         self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden), nn.GELU(), nn.Linear(hidden, d))
+            nn.Linear(in_dim, hidden),
+            nn.LayerNorm(hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, d),
+        )
 
     def forward(self, feats: torch.Tensor) -> torch.Tensor:
-        return self.net(feats)
+        # feats: (..., sum(modality_dims)). Split per modality, LN each, concat, MLP.
+        parts = torch.split(feats, self.modality_dims, dim=-1)
+        normed = torch.cat(
+            [norm(part) for norm, part in zip(self.norms, parts)], dim=-1)
+        return self.net(normed)
 
 
 class SasrecModel(nn.Module):
@@ -53,14 +74,15 @@ class SasrecModel(nn.Module):
     empty prefix (turn 1) yields the context-token state.
     """
 
-    def __init__(self, item_in_dim: int, ctx_in_dim: int = 768, d: int = 128,
-                 n_layers: int = 2, n_heads: int = 2, max_len: int = 50,
-                 temperature: float = 0.07):
+    def __init__(self, item_modality_dims: list[int], ctx_in_dim: int = 768,
+                 d: int = 192, n_layers: int = 2, n_heads: int = 2,
+                 max_len: int = 50, temperature: float = 0.07):
         super().__init__()
         self.d = d
         self.max_len = max_len
         self.temperature = temperature
-        self.item_fusion = ItemFusion(item_in_dim, d)
+        self.item_modality_dims = list(item_modality_dims)
+        self.item_fusion = ItemFusion(item_modality_dims, d)
         self.ctx_proj = nn.Linear(ctx_in_dim, d)
         self.pos_emb = nn.Embedding(max_len + 1, d)  # +1 for the context slot
         layer = nn.TransformerEncoderLayer(
