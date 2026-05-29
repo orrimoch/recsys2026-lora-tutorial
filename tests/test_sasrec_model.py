@@ -84,3 +84,32 @@ def test_build_user_dialog_keeps_only_user_turns():
              {"role": "user", "content": "more mellow please"}]
     assert build_user_dialog(turns) == "play something upbeat\nmore mellow please"
     assert build_user_dialog([{"role": "music", "content": "x"}]) == ""
+
+
+def test_new_format_checkpoint_loads_under_weights_only_true(tmp_path):
+    """A checkpoint saved with item_feats as a torch tensor (and track_ids as
+    a list[str]) must load under torch.load(..., weights_only=True). This is
+    the format scripts/train_sasrec.py emits after the save-side cleanup."""
+    model = SasrecModel(item_modality_dims=[16], ctx_in_dim=12, d=8, n_layers=1,
+                        n_heads=2, max_len=5).eval()
+    item_feats = torch.randn(20, 16, dtype=torch.float32)
+    track_ids = [f"t{i}" for i in range(20)]
+    ckpt_path = tmp_path / "sasrec.pt"
+    model_kwargs = {"item_modality_dims": [16], "ctx_in_dim": 12,
+                    "d": 8, "n_layers": 1, "n_heads": 2, "max_len": 5}
+    torch.save({
+        "state_dict": model.state_dict(),
+        "model_kwargs": model_kwargs,
+        "item_feats": item_feats,
+        "track_ids": track_ids,
+    }, ckpt_path)
+    # The point of this test: weights_only=True must succeed on this layout.
+    loaded = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    assert isinstance(loaded["item_feats"], torch.Tensor)
+    assert loaded["item_feats"].dtype == torch.float32
+    assert loaded["item_feats"].shape == (20, 16)
+    assert loaded["track_ids"] == track_ids
+    assert loaded["model_kwargs"]["d"] == 8
+    # And the state dict actually reconstructs into a SasrecModel.
+    m2 = SasrecModel(**loaded["model_kwargs"])
+    m2.load_state_dict(loaded["state_dict"])

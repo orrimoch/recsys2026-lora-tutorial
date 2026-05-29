@@ -316,12 +316,17 @@ def main():
 
     out_dir = os.path.join(args.cache_dir, "retrieval_v2", "sasrec", args.out)
     os.makedirs(out_dir, exist_ok=True)
+    # Save item_feats as a torch tensor (NOT numpy) so the checkpoint loads
+    # under PyTorch 2.6's weights_only=True. track_ids is a list[str] which is
+    # also weights_only-safe. See the loader in retrieval_modules/__init__.py
+    # (sasrec_seq branch) for the matching legacy-fallback warning.
+    item_feats_t = torch.as_tensor(feats, dtype=torch.float32).cpu()
     torch.save({
         "state_dict": model.cpu().state_dict(),
         "model_kwargs": {"item_modality_dims": list(modality_dims),
                          "ctx_in_dim": ctx_in_dim,
                          "d": args.d, "max_len": args.max_seq},
-        "item_feats": feats, "track_ids": track_ids,
+        "item_feats": item_feats_t, "track_ids": track_ids,
     }, os.path.join(out_dir, "sasrec.pt"))
     print(f"[sasrec] saved -> {out_dir}/sasrec.pt")
 

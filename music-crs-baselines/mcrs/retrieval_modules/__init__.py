@@ -552,13 +552,26 @@ def load_retrieval_module(
         # matrix; the dialog context token is encoded by bge-base-en-v1.5 (English,
         # 768-dim), with oldest-first truncation so recent turns survive the 512-cap.
         import os
+        import pickle
+        import warnings
         import torch
         from .sasrec_model import SasrecModel
         from .sasrec_seq import SasrecRetriever
         ec = extra_config or {}
         model_dir = os.path.join(cache_dir, "retrieval_v2", "sasrec",
                                  ec.get("model_dir", "sasrec_v1"))
-        ckpt = torch.load(os.path.join(model_dir, "sasrec.pt"), map_location="cpu")
+        # New checkpoints save item_feats as a torch tensor + track_ids as a
+        # list[str], both safe under PyTorch 2.6's weights_only=True. Older
+        # checkpoints (numpy item_feats) trip the safe loader's unpickler, so
+        # we fall back to weights_only=False with a warning to nudge a retrain.
+        ckpt_path = os.path.join(model_dir, "sasrec.pt")
+        try:
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        except pickle.UnpicklingError:
+            warnings.warn(
+                "legacy SASRec checkpoint loaded weights_only=False; "
+                "retrain to refresh", stacklevel=2)
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         model = SasrecModel(**ckpt["model_kwargs"])
         model.load_state_dict(ckpt["state_dict"])
         model.eval()
