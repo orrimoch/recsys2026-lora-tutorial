@@ -84,6 +84,16 @@ def _is_val_session(session_id, val_frac):
     return (h % 10000) < int(val_frac * 10000)
 
 
+def session_fold(session_id, num_folds):
+    """Deterministic OOF fold for a session, in [0, num_folds). MUST be byte-for-
+    byte identical to build_lgbm_features.session_fold — the OOF leak guarantee
+    depends on train_sasrec EXCLUDING fold k from training while
+    build_lgbm_features SELECTS fold k for feature-building, so both must map a
+    given session to the same k. Pinned by tests/test_oof_fold_assignment.py."""
+    h = int(hashlib.sha1(str(session_id).encode()).hexdigest()[:8], 16)
+    return h % num_folds
+
+
 def _walk_split(hf_split, tid_to_idx, max_seq):
     """Walk an HF conversation split -> per (session_id, music turn) yield
     (session_id, dialog text up to t, played-index prefix, target index)."""
@@ -106,16 +116,31 @@ def _walk_split(hf_split, tid_to_idx, max_seq):
     return out
 
 
-def build_train_val(tid_to_idx, max_seq, val_frac):
-    """Train-split sessions -> (train, val) lists, session-disjoint."""
+def build_train_val(tid_to_idx, max_seq, val_frac,
+                    oof_fold=None, oof_num_folds=None):
+    """Train-split sessions -> (train, val) lists, session-disjoint.
+
+    OOF mode (oof_fold + oof_num_folds set): sessions whose session_fold == oof_fold
+    are SKIPPED entirely (neither train nor val) so this model never sees fold k.
+    build_lgbm_features then SELECTS fold k and scores it with this model -> the
+    fold-k feature rows are out-of-fold (leak-free). Other folds follow the normal
+    SHA1 val-slice split for the model's own early-stopping."""
     tr = load_dataset("talkpl-ai/TalkPlayData-Challenge-Dataset", split="train")
+    oof = oof_fold is not None and oof_num_folds is not None
     train_d, train_p, train_t = [], [], []
     val_d, val_p, val_t = [], [], []
+    skipped = 0
     for sid, d, p, t in _walk_split(tr, tid_to_idx, max_seq):
+        if oof and session_fold(sid, oof_num_folds) == oof_fold:
+            skipped += 1
+            continue
         if _is_val_session(sid, val_frac):
             val_d.append(d); val_p.append(p); val_t.append(t)
         else:
             train_d.append(d); train_p.append(p); train_t.append(t)
+    if oof:
+        print(f"[sasrec] OOF fold {oof_fold}/{oof_num_folds}: held out "
+              f"{skipped} examples from training")
     return (train_d, train_p, train_t), (val_d, val_p, val_t)
 
 
@@ -211,7 +236,18 @@ def main():
     # apply_item_feats_mode in sasrec_model.py.
     p.add_argument("--item-feats-mode", default="content",
                    choices=["content", "metadata", "audio", "random"])
+    # OOF cross-fitting: train this model EXCLUDING fold `--oof-fold` of
+    # `--oof-num-folds`, so build_lgbm_features can score that fold leak-free.
+    # Omit both for the normal full-train model (sasrec_v1).
+    p.add_argument("--oof-fold", type=int, default=None,
+                   help="OOF fold index to HOLD OUT from training [0, oof-num-folds).")
+    p.add_argument("--oof-num-folds", type=int, default=None,
+                   help="Total OOF folds (set together with --oof-fold).")
     args = p.parse_args()
+    if (args.oof_fold is None) != (args.oof_num_folds is None):
+        p.error("--oof-fold and --oof-num-folds must be set together")
+    if args.oof_fold is not None and not (0 <= args.oof_fold < args.oof_num_folds):
+        p.error("--oof-fold must be in [0, --oof-num-folds)")
     dev = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Reproducibility: seed every RNG that can affect the run. Note: the bge
@@ -233,7 +269,8 @@ def main():
           f"item feats {feats.shape} modality_dims={modality_dims}")
 
     (tr_d, tr_p, tr_t), (val_d, val_p, val_t) = build_train_val(
-        tid_to_idx, args.max_seq, args.val_frac)
+        tid_to_idx, args.max_seq, args.val_frac,
+        oof_fold=args.oof_fold, oof_num_folds=args.oof_num_folds)
     te_d, te_p, te_t = build_test(tid_to_idx, args.max_seq)
     print(f"[sasrec] examples train={len(tr_t)} val={len(val_t)} test={len(te_t)} "
           f"(val_frac={args.val_frac}, session-disjoint)")

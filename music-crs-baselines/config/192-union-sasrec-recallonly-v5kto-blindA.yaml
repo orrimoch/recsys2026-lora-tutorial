@@ -1,10 +1,15 @@
 # 192 — Union (BM25 + Qwen dense + same-artist + SASRec) recall -> v5-kto
 #        responder. NO reranker stage. Blind-A.
 #
-# This is the honest current best (2026-05-29). nb74 cell-9 DEV nDCG@20:
+# SUPERSEDED 2026-05-29 by config 193 (clean LGBM reranker, 0.1558). This
+# recall-only config (0.1473) is no longer the best — the leak-free reranker
+# beats it. Kept as the no-reranker fallback / ablation reference.
+#
+# nb74 cell-9 DEV nDCG@20:
 #   recall-only (this config) = 0.1473
-#   LGBM no-sasrec            = 0.1437  (loses)
-#   LGBM +sasrec              = 0.1194  (loses; leaked feature)
+#   LGBM clean (config 193)   = 0.1558  (best)
+#   LGBM no-sasrec            = 0.1435  (loses; cf-bpr leak)
+#   LGBM +sasrec              = 0.1194  (loses; both leaked)
 # The LGBM rerank stage (config 191) is net-negative because its model-derived
 # features (sasrec_rank_inv, cfbpr_score) are in-sample leaked on the
 # train-split feature build: optimistic on the train parquet, honest on dev, so

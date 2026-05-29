@@ -79,6 +79,16 @@ from mcrs.retrieval_modules.session_history import (  # noqa: E402,F401
 )
 
 
+def session_fold(session_id, num_folds):
+    """Deterministic OOF fold for a session, in [0, num_folds). MUST be byte-for-
+    byte identical to train_sasrec.session_fold — the OOF leak guarantee depends
+    on train_sasrec EXCLUDING fold k from training while this script SELECTS fold
+    k for feature-building, so both must map a given session to the same k.
+    Pinned by tests/test_oof_fold_assignment.py."""
+    h = int(hashlib.sha1(str(session_id).encode()).hexdigest()[:8], 16)
+    return h % num_folds
+
+
 # ------------------------------------------------------------------ cached lookups
 def load_track_meta_lookup(item_db: MusicCatalogDB) -> dict[str, dict]:
     """{track_id -> flat metadata dict for feature extraction}."""
@@ -385,6 +395,8 @@ def build(
     use_sasrec: bool = False,
     w_sasrec: float = 1.0,
     sasrec_model_dir: str = "sasrec_v1",
+    oof_fold: int = None,
+    oof_num_folds: int = None,
 ) -> None:
     print(f"[lgbm-features] loading train split")
     tr = load_dataset("talkpl-ai/TalkPlayData-Challenge-Dataset", split="train")
@@ -392,6 +404,17 @@ def build(
     indices = rng.sample(range(len(tr)), min(n_sessions, len(tr)))
     sessions = tr.select(indices).to_list()
     print(f"[lgbm-features] sampled {len(sessions)} sessions (seed={seed})")
+    # OOF mode: keep ONLY sessions in fold `oof_fold`, scored by a SASRec that
+    # held that fold OUT of training (--sasrec-model-dir must point at that
+    # fold's model). Same (seed, n_sessions) across all K fold runs -> the K
+    # per-fold parquets partition the full sample; concatenate them for the
+    # leak-free OOF train parquet. See tests/test_oof_fold_assignment.py.
+    if oof_fold is not None and oof_num_folds is not None:
+        before = len(sessions)
+        sessions = [s for s in sessions
+                    if session_fold(s["session_id"], oof_num_folds) == oof_fold]
+        print(f"[lgbm-features] OOF fold {oof_fold}/{oof_num_folds}: kept "
+              f"{len(sessions)}/{before} sessions (model={sasrec_model_dir})")
 
     print(f"[lgbm-features] loading item_db + user_meta + cf-bpr + wRRF")
     item_db = MusicCatalogDB(
@@ -545,7 +568,18 @@ def main() -> int:
                    help="RRF weight for the SASRec sub (default 1.0).")
     p.add_argument("--sasrec-model-dir", type=str, default="sasrec_v1",
                    help="Model directory / HF repo for the SASRec weights (default 'sasrec_v1').")
+    # OOF cross-fitting: build features ONLY for sessions in fold `--oof-fold`,
+    # using a SASRec that held that fold out (--sasrec-model-dir -> fold model).
+    # Run once per fold (same --seed/--n-sessions) then concat the parquets.
+    p.add_argument("--oof-fold", type=int, default=None,
+                   help="OOF fold to SELECT for feature-building [0, oof-num-folds).")
+    p.add_argument("--oof-num-folds", type=int, default=None,
+                   help="Total OOF folds (set together with --oof-fold).")
     args = p.parse_args()
+    if (args.oof_fold is None) != (args.oof_num_folds is None):
+        p.error("--oof-fold and --oof-num-folds must be set together")
+    if args.oof_fold is not None and not (0 <= args.oof_fold < args.oof_num_folds):
+        p.error("--oof-fold must be in [0, --oof-num-folds)")
     # Resolve --out + --cache-dir to absolute paths so the mid-run chdir into
     # BASELINES_DIR (required by the mcrs factory's relative cache lookups)
     # doesn't misplace the output. Previous bug: --out data/lgbm_features.parquet
@@ -559,7 +593,9 @@ def main() -> int:
         build(args.n_sessions, args.topk, args.seed, args.out, args.cache_dir,
               use_sasrec=args.use_sasrec,
               w_sasrec=args.w_sasrec,
-              sasrec_model_dir=args.sasrec_model_dir)
+              sasrec_model_dir=args.sasrec_model_dir,
+              oof_fold=args.oof_fold,
+              oof_num_folds=args.oof_num_folds)
     finally:
         os.chdir(origin_cwd)
     return 0
