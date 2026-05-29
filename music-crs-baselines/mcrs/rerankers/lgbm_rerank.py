@@ -301,14 +301,18 @@ class LGBM_RERANKER:
                 year = None
             recency = (2026 - year) if year else 0.0
 
-            if cfbpr_user_vec is not None and tid in self.cfbpr_tid_to_idx:
-                tv = self.cfbpr_track_mat[self.cfbpr_tid_to_idx[tid]]
-                cfbpr_score = float(np.dot(cfbpr_user_vec, tv))
-            else:
-                cfbpr_score = 0.0
+            # cfbpr_score is a model-derived feature; a leak-free ("clean")
+            # model may omit it (see project_sasrec_lgbm_feature_leak). Guard
+            # like the extended features so its absence doesn't KeyError.
+            if "cfbpr_score" in f_idx:
+                if cfbpr_user_vec is not None and tid in self.cfbpr_tid_to_idx:
+                    tv = self.cfbpr_track_mat[self.cfbpr_tid_to_idx[tid]]
+                    cfbpr_score = float(np.dot(cfbpr_user_vec, tv))
+                else:
+                    cfbpr_score = 0.0
+                X[rank - 1, f_idx["cfbpr_score"]] = cfbpr_score
 
             X[rank - 1, f_idx["wrrf_rank"]] = rank
-            X[rank - 1, f_idx["cfbpr_score"]] = cfbpr_score
             X[rank - 1, f_idx["pop_log"]] = float(np.log1p(pop))
             X[rank - 1, f_idx["recency_years"]] = float(recency)
             X[rank - 1, f_idx["tag_count"]] = tag_count

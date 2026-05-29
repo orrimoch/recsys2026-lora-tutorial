@@ -147,3 +147,33 @@ def test_sasrec_rank_inv_fallback_to_wrrf_rank_when_key_absent():
     )
 
     assert X[0, f_idx["sasrec_rank_inv"]] == pytest.approx(1.0)  # 1/max(1,1) = 1.0
+
+
+# ---------------------------------------------------------------------------
+# leak-test: a "clean" model may omit cfbpr_score entirely (it's a leaked
+# model-derived feature). The reranker must NOT KeyError when cfbpr_score is
+# absent from the feature list. (TDD: written before guarding cfbpr_score.)
+# ---------------------------------------------------------------------------
+
+def test_clean_model_without_cfbpr_score_does_not_crash():
+    """A model whose feature list omits cfbpr_score must rerank without error.
+    Mirrors the lgbm_clean_v1 leak-test build (cfbpr_score + sasrec_rank_inv
+    dropped). Before the guard fix this raised KeyError('cfbpr_score')."""
+    features = [f for f in BASE_FEATURES if f != "cfbpr_score"] + SESSION_FEATURES
+    assert "cfbpr_score" not in features
+    r = _make_stub(features)
+    f_idx = {f: i for i, f in enumerate(features)}
+
+    X = r._compute_feature_matrix(
+        query="some query",
+        candidate_tids=["c_same", "c_other"],
+        user_id=None,
+        goal_category=None,
+        goal_specificity=None,
+        user_profile_raw=None,
+        extra_session_info={"played_tids": ["p1"]},
+    )
+
+    assert X.shape == (2, len(features))
+    # the session-continuity columns still populate (sanity the matrix is real)
+    assert X[0, f_idx["same_artist"]] == 1

@@ -1,5 +1,16 @@
 # Submission: Stage A union (3-channel wRRF + SASRec) + Stage C LGBM LambdaRank.
 #
+# DO NOT SHIP (2026-05-29). nb74 cell-9 dev gate FAILED: the LGBM rerank stage is
+# net-negative vs recall-only (DEV nDCG@20: recall-only 0.1473; LGBM no-sasrec
+# 0.1437; LGBM +sasrec 0.1194). Root cause = in-sample MODEL leak in the
+# train-split feature build: sasrec_rank_inv (SASRec memorized in-session
+# transitions) AND cfbpr_score (challenge cf-bpr user vectors fit on the same
+# plays) are leak-optimistic on the train parquet but honest on dev, so the model
+# demotes real golds at serve. The internal val (lgbm_sasrec_v1 0.6325) shares the
+# leak and is fake. See project_sasrec_lgbm_feature_leak_2026_05_29 memory.
+# Honest shippable best = config 192 (recall-only, no LGBM stage). Revive this
+# only after OOF cross-fitting the model-derived features so they beat recall-only.
+#
 # Single-axis change vs config 190: ADDS the content-fused SASRec recall channel
 # (use_sasrec) to the union AND feeds its per-candidate rank into the LGBM as the
 # sasrec_rank_inv relevance feature (reranker_model_path -> lgbm_sasrec_v1, trained
