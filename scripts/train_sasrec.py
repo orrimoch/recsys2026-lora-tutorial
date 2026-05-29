@@ -267,6 +267,11 @@ def main():
     # (the well-known Adam pitfall) and was a direct response to train_loss
     # diverging from val_loss after epoch 5 on the 10-epoch run.
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
+    # CosineAnnealingLR: stepped ONCE per epoch (not per batch). T_max =
+    # args.epochs so the cosine reaches eta_min at the final epoch; eta_min
+    # = lr * 0.1 keeps a non-trivial late-epoch LR floor.
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+        opt, T_max=args.epochs, eta_min=args.lr * 0.1)
 
     best_r100 = -1.0
     best_state = None
@@ -296,6 +301,11 @@ def main():
             tot += loss.item()
             nb += 1
         train_loss = tot / max(1, nb)
+        # Step the LR schedule once per epoch, AFTER the inner batch loop
+        # and BEFORE the val pass — so the printed LR is the rate that was
+        # used during this epoch.
+        cur_lr = opt.param_groups[0]["lr"]
+        sched.step()
         val_loss, val_r20, val_r100 = evaluate(
             model, val_ctx_t, val_p, val_t, feats_t, feats.shape[1], args.batch_size, dev)
         marker = ""
@@ -303,7 +313,7 @@ def main():
             best_r100 = val_r100
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             marker = "  * best"
-        print(f"[sasrec] epoch {ep} | train_loss={train_loss:.4f} "
+        print(f"[sasrec] epoch {ep} | lr={cur_lr:.2e} train_loss={train_loss:.4f} "
               f"val_loss={val_loss:.4f} val_recall@20={val_r20:.4f} "
               f"val_recall@100={val_r100:.4f}{marker}")
 
