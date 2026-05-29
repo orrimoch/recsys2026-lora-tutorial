@@ -41,8 +41,8 @@ class ItemFusion(nn.Module):
     the input modalities are frozen catalog vectors.
     """
 
-    def __init__(self, modality_dims: list[int], d: int = 192,
-                 hidden: int = 1024, dropout: float = 0.3):
+    def __init__(self, modality_dims: list[int], d: int = 256,
+                 hidden: int = 1536, dropout: float = 0.3):
         super().__init__()
         self.modality_dims = list(modality_dims)
         in_dim = sum(self.modality_dims)
@@ -75,7 +75,7 @@ class SasrecModel(nn.Module):
     """
 
     def __init__(self, item_modality_dims: list[int], ctx_in_dim: int = 768,
-                 d: int = 192, n_layers: int = 2, n_heads: int = 2,
+                 d: int = 256, n_layers: int = 2, n_heads: int = 2,
                  max_len: int = 50, temperature: float = 0.07):
         super().__init__()
         self.d = d

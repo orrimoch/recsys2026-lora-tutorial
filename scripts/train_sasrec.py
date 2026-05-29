@@ -198,7 +198,7 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cache-dir", required=True)
     p.add_argument("--out", default="sasrec_v1")
-    p.add_argument("--d", type=int, default=192)
+    p.add_argument("--d", type=int, default=256)
     p.add_argument("--max-seq", type=int, default=50)
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=256)

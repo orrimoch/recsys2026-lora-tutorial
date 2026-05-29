@@ -108,6 +108,25 @@ def test_item_fusion_default_dropout_is_0_3():
     assert dropouts == [0.3], dropouts
 
 
+def test_sasrec_model_default_d_is_256_and_item_fusion_default_hidden_is_1536():
+    """Item-side widen: SasrecModel default d went 192 -> 256, and ItemFusion
+    default hidden went 1024 -> 1536. n_layers/n_heads/max_len unchanged."""
+    # SasrecModel default d.
+    m = SasrecModel(item_modality_dims=[16])
+    assert m.d == 256
+    # n_layers and n_heads must NOT have moved as part of this widen.
+    assert len(m.encoder.layers) == 2
+    assert m.encoder.layers[0].self_attn.num_heads == 2
+    assert m.max_len == 50
+    # ItemFusion default hidden: inspect the first Linear's out_features.
+    fusion = ItemFusion(modality_dims=[16])
+    first_linear = next(layer for layer in fusion.net if isinstance(layer, torch.nn.Linear))
+    assert first_linear.out_features == 1536
+    # And the fusion default d is 256.
+    last_linear = [layer for layer in fusion.net if isinstance(layer, torch.nn.Linear)][-1]
+    assert last_linear.out_features == 256
+
+
 from mcrs.retrieval_modules.sasrec_model import build_user_dialog
 
 
