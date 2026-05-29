@@ -2,9 +2,41 @@
 PyTorch model + the training loss. No data I/O (see scripts/train_sasrec.py)."""
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+def apply_item_feats_mode(feats, modality_dims, mode: str = "content",
+                          seed: int = 42):
+    """Transform the concatenated catalog item features for the content-fusion
+    ablation. `feats` is (N, sum(modality_dims)).
+
+    Modes (one ablation axis = the item representation source):
+      content  — unchanged; real metadata + audio. The production channel.
+      metadata — keep only the first modality block (Qwen3 text).
+      audio    — keep only the trailing modality block(s) (CLAP).
+      random   — replace every value with a seeded random vector of the SAME
+                 shape. Each item gets a unique fixed vector, so the fusion MLP
+                 can only memorize a per-item embedding — an ID-only proxy with
+                 no shared content structure. Isolates how much real content
+                 (vs memorized ids) buys cold-item recall.
+
+    Returns (feats, modality_dims), both adjusted to the mode.
+    """
+    if mode == "content":
+        return feats, list(modality_dims)
+    if mode == "metadata":
+        d0 = modality_dims[0]
+        return feats[:, :d0].copy(), [d0]
+    if mode == "audio":
+        d0 = modality_dims[0]
+        return feats[:, d0:].copy(), list(modality_dims[1:])
+    if mode == "random":
+        rng = np.random.RandomState(seed)
+        return rng.randn(*feats.shape).astype(np.float32), list(modality_dims)
+    raise ValueError(f"unknown item-feats mode: {mode!r}")
 
 
 def build_user_dialog(turns) -> str:

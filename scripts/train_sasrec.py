@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "music-crs-base
 from datasets import load_dataset, concatenate_datasets  # noqa: E402
 from sentence_transformers import SentenceTransformer  # noqa: E402
 from mcrs.retrieval_modules.sasrec_model import (  # noqa: E402
-    SasrecModel, build_user_dialog, next_item_loss)
+    SasrecModel, apply_item_feats_mode, build_user_dialog, next_item_loss)
 
 TRACK_EMB = "talkpl-ai/TalkPlayData-Challenge-Track-Embeddings"
 # v2 (post-review): dropped cf-bpr — it's structurally inert for the 62% new-
@@ -205,6 +205,12 @@ def main():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=42)
+    # Content-fusion ablation axis: which item representation source to train on.
+    # content = real metadata+audio (production); metadata/audio = single
+    # modality; random = seeded per-item vectors (an ID-only proxy). See
+    # apply_item_feats_mode in sasrec_model.py.
+    p.add_argument("--item-feats-mode", default="content",
+                   choices=["content", "metadata", "audio", "random"])
     args = p.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -219,9 +225,12 @@ def main():
     print(f"[sasrec] seed={args.seed}")
 
     track_ids, feats, modality_dims = load_item_feats(["all_tracks"])
+    feats, modality_dims = apply_item_feats_mode(
+        feats, modality_dims, mode=args.item_feats_mode, seed=args.seed)
     tid_to_idx = {t: i for i, t in enumerate(track_ids)}
     feats_t = torch.as_tensor(feats, device=dev)
-    print(f"[sasrec] item feats {feats.shape} modality_dims={modality_dims}")
+    print(f"[sasrec] item-feats-mode={args.item_feats_mode} -> "
+          f"item feats {feats.shape} modality_dims={modality_dims}")
 
     (tr_d, tr_p, tr_t), (val_d, val_p, val_t) = build_train_val(
         tid_to_idx, args.max_seq, args.val_frac)

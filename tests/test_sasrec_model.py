@@ -1,5 +1,50 @@
+import numpy as np
+import pytest
 import torch
-from mcrs.retrieval_modules.sasrec_model import build_session_examples, ItemFusion
+from mcrs.retrieval_modules.sasrec_model import (
+    build_session_examples, ItemFusion, apply_item_feats_mode)
+
+
+def test_feats_mode_content_is_identity():
+    feats = np.arange(12, dtype=np.float32).reshape(2, 6)
+    out, dims = apply_item_feats_mode(feats, [4, 2], mode="content")
+    assert np.array_equal(out, feats)
+    assert dims == [4, 2]
+
+
+def test_feats_mode_metadata_keeps_first_modality():
+    feats = np.arange(12, dtype=np.float32).reshape(2, 6)
+    out, dims = apply_item_feats_mode(feats, [4, 2], mode="metadata")
+    assert out.shape == (2, 4)
+    assert np.array_equal(out, feats[:, :4])
+    assert dims == [4]
+
+
+def test_feats_mode_audio_keeps_trailing_modality():
+    feats = np.arange(12, dtype=np.float32).reshape(2, 6)
+    out, dims = apply_item_feats_mode(feats, [4, 2], mode="audio")
+    assert out.shape == (2, 2)
+    assert np.array_equal(out, feats[:, 4:])
+    assert dims == [2]
+
+
+def test_feats_mode_random_is_id_proxy_same_shape_deterministic():
+    feats = np.zeros((5, 6), dtype=np.float32)
+    a, dims_a = apply_item_feats_mode(feats, [4, 2], mode="random", seed=42)
+    b, _ = apply_item_feats_mode(feats, [4, 2], mode="random", seed=42)
+    c, _ = apply_item_feats_mode(feats, [4, 2], mode="random", seed=7)
+    assert a.shape == feats.shape          # architecture identical to content
+    assert dims_a == [4, 2]                 # modality dims preserved
+    assert np.array_equal(a, b)             # deterministic given the seed
+    assert not np.array_equal(a, c)         # different seed -> different vectors
+    assert not np.allclose(a, 0.0)          # not the (zeroed) content
+    assert not np.array_equal(a[0], a[1])   # unique per item (a per-item id)
+
+
+def test_feats_mode_invalid_raises():
+    feats = np.zeros((2, 6), dtype=np.float32)
+    with pytest.raises(ValueError):
+        apply_item_feats_mode(feats, [4, 2], mode="bogus")
 
 
 def test_build_session_examples_includes_empty_prefix_first_turn():

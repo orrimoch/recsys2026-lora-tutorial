@@ -70,12 +70,17 @@ class RRF_MODEL:
             })
         print(f"[rrf] ready — k={self.k}, {len(self.subs)} sub-retriever(s)")
 
-    def batch_text_to_item_retrieval(
-        self, queries: list[str], topk: int, user_ids=None,
+    def batch_per_sub_rankings(
+        self, queries: list[str], user_ids=None,
         batch_context: Optional[list[dict]] = None,
-    ) -> list[list[str]]:
-        # user_ids and batch_context threaded through to any sub that uses them.
-        # Subs that ignore them (BM25, dense) still accept via try/except back-compat.
+    ) -> tuple[list[list[list[str]]], list[str]]:
+        """Run every sub-retriever and return its ranked lists WITHOUT fusing.
+
+        Returns (per_sub, labels) where per_sub[s][q] is sub s's ranked tid
+        list for query q (truncated to that sub's topk_internal). Callers can
+        re-run `fuse_per_sub` under different weights to sweep the fusion mix
+        without paying the (expensive) sub-retrieval cost more than once.
+        """
         per_sub: list[list[list[str]]] = []
         for sub in self.subs:
             print(f"[rrf] running sub: {sub['label']}")
@@ -95,18 +100,39 @@ class RRF_MODEL:
                         queries, topk=sub["topk"],
                     )
             per_sub.append(sub_results)
+        return per_sub, [sub["label"] for sub in self.subs]
 
+    @staticmethod
+    def fuse_per_sub(
+        per_sub: list[list[list[str]]], weights: list[float], k: int, topk: int,
+    ) -> list[list[str]]:
+        """Weighted RRF over pre-computed per-sub rankings.
+
+        per_sub[s][q] = sub s's ranked tid list for query q; weights aligned to
+        per_sub. score(tid) += weight_s / (k + rank). Pure function so the
+        fusion-weight sweep re-fuses cached rankings cheaply.
+        """
+        n_queries = len(per_sub[0]) if per_sub else 0
         results: list[list[str]] = []
-        for q_idx in range(len(queries)):
+        for q_idx in range(n_queries):
             fused: dict[str, float] = {}
-            for s_idx, sub in enumerate(self.subs):
-                w = sub["weight"]
-                ranks = per_sub[s_idx][q_idx]
-                for rank, tid in enumerate(ranks, start=1):
-                    fused[tid] = fused.get(tid, 0.0) + w / (self.k + rank)
+            for s_idx, w in enumerate(weights):
+                for rank, tid in enumerate(per_sub[s_idx][q_idx], start=1):
+                    fused[tid] = fused.get(tid, 0.0) + w / (k + rank)
             ordered = sorted(fused.items(), key=lambda kv: -kv[1])
             results.append([tid for tid, _ in ordered[:topk]])
         return results
+
+    def batch_text_to_item_retrieval(
+        self, queries: list[str], topk: int, user_ids=None,
+        batch_context: Optional[list[dict]] = None,
+    ) -> list[list[str]]:
+        # user_ids and batch_context threaded through to any sub that uses them.
+        # Subs that ignore them (BM25, dense) still accept via try/except back-compat.
+        per_sub, _ = self.batch_per_sub_rankings(
+            queries, user_ids=user_ids, batch_context=batch_context)
+        weights = [sub["weight"] for sub in self.subs]
+        return self.fuse_per_sub(per_sub, weights, self.k, topk)
 
     def text_to_item_retrieval(self, query: str, topk: int, user_id=None) -> list[str]:
         return self.batch_text_to_item_retrieval(
