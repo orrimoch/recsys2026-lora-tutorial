@@ -8,6 +8,7 @@ loads boosters + HF datasets) and set just the attributes that
 _compute_feature_matrix touches, then assert the matrix columns are populated.
 """
 import numpy as np
+import pytest
 
 from mcrs.rerankers.lgbm_rerank import LGBM_RERANKER
 
@@ -100,3 +101,49 @@ def test_legacy_11col_model_untouched_no_session_columns():
         extra_session_info={"played_tids": ["p1"]},
     )
     assert X.shape == (1, len(features))
+
+
+# ---------------------------------------------------------------------------
+# sasrec_rank_inv tests (TDD: written before implementation)
+# ---------------------------------------------------------------------------
+
+def test_sasrec_rank_inv_set_from_extra_dict():
+    """When 'sasrec_rank' is present in the per-candidate extra dict,
+    X[0, f_idx['sasrec_rank_inv']] must equal 1.0 / sasrec_rank."""
+    features = BASE_FEATURES + ["sasrec_rank_inv"]
+    r = _make_stub(features)
+    f_idx = {f: i for i, f in enumerate(features)}
+
+    X = r._compute_feature_matrix(
+        query="some query",
+        candidate_tids=["c_same"],
+        user_id=None,
+        goal_category=None,
+        goal_specificity=None,
+        user_profile_raw=None,
+        extra_features_per_candidate=[{"sasrec_rank": 4}],
+    )
+
+    assert X.shape == (1, len(features))
+    assert X[0, f_idx["sasrec_rank_inv"]] == pytest.approx(1.0 / 4)
+
+
+def test_sasrec_rank_inv_fallback_to_wrrf_rank_when_key_absent():
+    """When 'sasrec_rank' is absent from the extra dict, the value falls back
+    to 1.0 / max(1, rank), where rank is the 1-indexed wRRF position.
+    For the first (only) candidate rank == 1, so the result is 1.0."""
+    features = BASE_FEATURES + ["sasrec_rank_inv"]
+    r = _make_stub(features)
+    f_idx = {f: i for i, f in enumerate(features)}
+
+    X = r._compute_feature_matrix(
+        query="some query",
+        candidate_tids=["c_same"],
+        user_id=None,
+        goal_category=None,
+        goal_specificity=None,
+        user_profile_raw=None,
+        extra_features_per_candidate=[{}],  # no "sasrec_rank" key
+    )
+
+    assert X[0, f_idx["sasrec_rank_inv"]] == pytest.approx(1.0)  # 1/max(1,1) = 1.0

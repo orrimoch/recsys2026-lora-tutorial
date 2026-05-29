@@ -132,6 +132,26 @@ def build_retrieval_query(
         return f"{last_user} || goal: {goal_text}"
     return last_user
 
+def build_sasrec_extra_features(
+    per_sub: list,
+    labels: list,
+    batch_retrieval_items: list,
+    sentinel: int = 10000,
+) -> list | None:
+    """Per-candidate {'sasrec_rank': rank} aligned to batch_retrieval_items,
+    from the SASRec sub's per-query ranking. Returns None if no 'sasrec_seq'
+    sub is present (so callers can skip). rank is 1-indexed; candidates the
+    SASRec channel didn't surface get `sentinel`."""
+    if "sasrec_seq" not in labels:
+        return None
+    sidx = labels.index("sasrec_seq")
+    out = []
+    for qi, cand_list in enumerate(batch_retrieval_items):
+        rankmap = {tid: r + 1 for r, tid in enumerate(per_sub[sidx][qi])}
+        out.append([{"sasrec_rank": rankmap.get(tid, sentinel)} for tid in cand_list])
+    return out
+
+
 class CRS_BASELINE:
     """
     Conversational Recommender System (CRS) baseline that wires together an LLM module and an item retrieval module over a music catalog and user profiles.
@@ -577,6 +597,22 @@ class CRS_BASELINE:
             extra_session_info = [
                 {"played_tids": bc.get("history_tids", [])} for bc in batch_context
             ]
+            # Build per-candidate SASRec rank features for LGBM models that
+            # list "sasrec_rank_inv" in their feature set. This issues a second
+            # call to batch_per_sub_rankings (only available on RRF union
+            # retrievers) — negligible for Blind-A (80 queries) and gated so
+            # non-LGBM / non-union paths are completely unaffected.
+            extra_features_per_candidate = None
+            if ("sasrec_rank_inv" in getattr(self.reranker, "features", [])
+                    and hasattr(self.retrieval, "batch_per_sub_rankings")):
+                try:
+                    _per_sub, _labels = self.retrieval.batch_per_sub_rankings(
+                        retrieval_inputs, user_ids=user_ids, batch_context=batch_context)
+                    extra_features_per_candidate = build_sasrec_extra_features(
+                        _per_sub, _labels, batch_retrieval_items)
+                except Exception as e:
+                    print(f"[crs_baseline] sasrec extra-features skipped: {e!r}")
+                    extra_features_per_candidate = None
             try:
                 batch_retrieval_items = self.reranker.rerank(
                     retrieval_inputs, batch_retrieval_items, topk=20,
@@ -585,6 +621,7 @@ class CRS_BASELINE:
                     goal_specificities=goal_specificities,
                     user_profiles_raw=user_profiles_raw,
                     extra_session_info=extra_session_info,
+                    extra_features_per_candidate=extra_features_per_candidate,
                 )
             except TypeError:
                 # Back-compat: reranker predates the side-channel kwargs

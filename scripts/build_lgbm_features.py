@@ -69,6 +69,7 @@ from datasets import load_dataset, concatenate_datasets  # noqa: E402
 from mcrs.db_item import MusicCatalogDB  # noqa: E402
 from mcrs.retrieval_modules import load_retrieval_module  # noqa: E402
 from mcrs.retrieval_modules.cf_bpr import CF_BPR  # noqa: E402
+from mcrs.retrieval_modules.rrf import RRF_MODEL  # noqa: E402
 # session_match_features lives in the shared session_history module so that
 # training (this script) and inference (mcrs/rerankers/lgbm_rerank.py) use the
 # IDENTICAL implementation (no train/serve feature skew). Re-exported here so
@@ -126,37 +127,80 @@ class WRRFRunner:
     reranker at inference only needs (tid, wrrf_rank) per candidate — no
     per-sub ranks — so feature computation is cheap and deterministic."""
 
-    def __init__(self, cache_dir: str, corpus_types: list[str]):
+    def __init__(self, cache_dir: str, corpus_types: list[str],
+                 use_sasrec: bool = False,
+                 w_sasrec: float = 1.0,
+                 sasrec_model_dir: str = "sasrec_v1"):
         # wrrf_union_v1 is the 3-channel recall union (lexical + frozen-Qwen
         # semantic + same-artist session continuity); session_cf was dropped
         # after the G1 ablation. The same-artist channel needs
         # batch_context['history_tids'] to fire — see run().
-        self.wrrf = load_retrieval_module(
-            "wrrf_union_v1",
-            "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
-            ["all_tracks"],
-            corpus_types,
-            cache_dir,
-        )
+        self.use_sasrec = use_sasrec
+        if use_sasrec:
+            self.wrrf = load_retrieval_module(
+                "wrrf_union_v1",
+                "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
+                ["all_tracks"],
+                corpus_types,
+                cache_dir,
+                extra_config={
+                    "use_sasrec": True,
+                    "w_sasrec": w_sasrec,
+                    "sasrec_model_dir": sasrec_model_dir,
+                },
+            )
+        else:
+            self.wrrf = load_retrieval_module(
+                "wrrf_union_v1",
+                "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
+                ["all_tracks"],
+                corpus_types,
+                cache_dir,
+            )
 
     def run(self, queries: list[str], topk: int,
             batch_context=None, user_ids=None) -> list[list[dict]]:
         """Per-query list of {tid, wrrf_rank} for the top-K fused candidates.
         wrrf_rank = 1 for the top of wRRF output, K for the bottom.
 
+        When use_sasrec=True, each candidate dict also carries:
+          "sasrec_rank": 1-indexed position in the SASRec sub's ranking,
+                         or 10000 (SENTINEL) for candidates not in that sub.
+
         batch_context (per-query {history_tids: [...]}) + user_ids feed the
         session-aware union channels. RRF_MODEL accepts both; keep a try/except
         fallback to the no-kwargs call for safety against older retrievers."""
-        try:
-            fused_per_q = self.wrrf.batch_text_to_item_retrieval(
-                queries, topk=topk, user_ids=user_ids, batch_context=batch_context,
+        if self.use_sasrec:
+            per_sub, labels = self.wrrf.batch_per_sub_rankings(
+                queries, user_ids=user_ids, batch_context=batch_context,
             )
-        except TypeError:
-            fused_per_q = self.wrrf.batch_text_to_item_retrieval(queries, topk=topk)
-        return [
-            [{"tid": tid, "wrrf_rank": r + 1} for r, tid in enumerate(tids)]
-            for tids in fused_per_q
-        ]
+            weights = [s["weight"] for s in self.wrrf.subs]
+            fused_per_q = RRF_MODEL.fuse_per_sub(per_sub, weights, self.wrrf.k, topk)
+            sidx = labels.index("sasrec_seq")
+            result = []
+            for q, tids in enumerate(fused_per_q):
+                # Build tid -> 1-indexed rank map for the sasrec sub.
+                rankmap = {tid: (rank + 1) for rank, tid in enumerate(per_sub[sidx][q])}
+                result.append([
+                    {
+                        "tid": tid,
+                        "wrrf_rank": r + 1,
+                        "sasrec_rank": rankmap.get(tid, 10000),
+                    }
+                    for r, tid in enumerate(tids)
+                ])
+            return result
+        else:
+            try:
+                fused_per_q = self.wrrf.batch_text_to_item_retrieval(
+                    queries, topk=topk, user_ids=user_ids, batch_context=batch_context,
+                )
+            except TypeError:
+                fused_per_q = self.wrrf.batch_text_to_item_retrieval(queries, topk=topk)
+            return [
+                [{"tid": tid, "wrrf_rank": r + 1} for r, tid in enumerate(tids)]
+                for tids in fused_per_q
+            ]
 
 
 # ------------------------------------------------------------------ features
@@ -324,6 +368,9 @@ def extract_features(
         }
         # session-continuity features (29-31)
         row.update(session_match_features(m, played_meta))
+        # NEW sasrec channel feature (32) — only when the sasrec sub was active.
+        if "sasrec_rank" in c:
+            row["sasrec_rank_inv"] = 1.0 / max(1, c["sasrec_rank"])
         rows.append(row)
     return rows
 
@@ -335,6 +382,9 @@ def build(
     seed: int,
     out_path: str,
     cache_dir: str,
+    use_sasrec: bool = False,
+    w_sasrec: float = 1.0,
+    sasrec_model_dir: str = "sasrec_v1",
 ) -> None:
     print(f"[lgbm-features] loading train split")
     tr = load_dataset("talkpl-ai/TalkPlayData-Challenge-Dataset", split="train")
@@ -356,6 +406,9 @@ def build(
     scorer = WRRFRunner(
         cache_dir=cache_dir,
         corpus_types=["track_name", "artist_name", "album_name"],
+        use_sasrec=use_sasrec,
+        w_sasrec=w_sasrec,
+        sasrec_model_dir=sasrec_model_dir,
     )
 
     # Build (query, chat_history, gold_tid, session_meta) triples per music turn.
@@ -486,6 +539,12 @@ def main() -> int:
                    help="Output parquet path.")
     p.add_argument("--cache-dir", type=str, default=str(BASELINES_DIR / "../experiments/cache"),
                    help="Cache dir (shared with retrievers).")
+    p.add_argument("--use-sasrec", action="store_true",
+                   help="Include the SASRec channel and emit sasrec_rank_inv feature.")
+    p.add_argument("--w-sasrec", type=float, default=1.0,
+                   help="RRF weight for the SASRec sub (default 1.0).")
+    p.add_argument("--sasrec-model-dir", type=str, default="sasrec_v1",
+                   help="Model directory / HF repo for the SASRec weights (default 'sasrec_v1').")
     args = p.parse_args()
     # Resolve --out + --cache-dir to absolute paths so the mid-run chdir into
     # BASELINES_DIR (required by the mcrs factory's relative cache lookups)
@@ -497,7 +556,10 @@ def main() -> int:
     origin_cwd = os.getcwd()
     os.chdir(BASELINES_DIR)
     try:
-        build(args.n_sessions, args.topk, args.seed, args.out, args.cache_dir)
+        build(args.n_sessions, args.topk, args.seed, args.out, args.cache_dir,
+              use_sasrec=args.use_sasrec,
+              w_sasrec=args.w_sasrec,
+              sasrec_model_dir=args.sasrec_model_dir)
     finally:
         os.chdir(origin_cwd)
     return 0

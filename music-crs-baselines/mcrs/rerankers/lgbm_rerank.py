@@ -227,7 +227,7 @@ class LGBM_RERANKER:
         """Build (N, F) feature matrix for N candidates.
 
         `extra_features_per_candidate[i]` (optional): per-candidate dict with any of
-            bm25_rank / dense_meta_rank / dense_lyrics_rank / ce_score / ce_rank.
+            bm25_rank / dense_meta_rank / dense_lyrics_rank / ce_score / ce_rank / sasrec_rank.
             Used only when the trained model lists those features in metadata.
 
         `extra_session_info` (optional): per-turn dict with any of
@@ -270,7 +270,7 @@ class LGBM_RERANKER:
         extended_keys = {
             "release_year_sin", "release_year_cos", "tag_overlap_count",
             "last_turn_moved_toward_goal", "bm25_rank_inv", "dense_meta_rank_inv",
-            "dense_lyrics_rank_inv", "ce_score", "ce_rank_inv",
+            "dense_lyrics_rank_inv", "ce_score", "ce_rank_inv", "sasrec_rank_inv",
             "turn_number_feat", "prior_track_count", "query_drift_score",
             "pop_rank_pct", "is_warm_user",
             *_SESSION_MATCH_KEYS,
@@ -360,6 +360,9 @@ class LGBM_RERANKER:
                 if "ce_rank_inv" in f_idx:
                     X[rank - 1, f_idx["ce_rank_inv"]] = 1.0 / max(
                         1, cand_extra.get("ce_rank", rank))
+                if "sasrec_rank_inv" in f_idx:
+                    X[rank - 1, f_idx["sasrec_rank_inv"]] = 1.0 / max(
+                        1, cand_extra.get("sasrec_rank", rank))
                 if "turn_number_feat" in f_idx:
                     X[rank - 1, f_idx["turn_number_feat"]] = int(sess.get("turn_number", 0))
                 if "prior_track_count" in f_idx:
