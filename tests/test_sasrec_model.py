@@ -69,10 +69,43 @@ def test_next_item_loss_decreases_on_overfit_batch():
     for _ in range(40):
         opt.zero_grad()
         item_matrix = m.item_fusion(all_item_feats)
-        loss = next_item_loss(m, ctx, items, lengths, target, item_matrix)
+        # Pin label_smoothing=0 so the smoothing floor doesn't fight the
+        # overfit signal this test measures.
+        loss = next_item_loss(m, ctx, items, lengths, target, item_matrix,
+                              label_smoothing=0.0)
         loss.backward(); opt.step()
         losses.append(float(loss))
     assert losses[-1] < losses[0] - 0.5
+
+
+def test_next_item_loss_label_smoothing_changes_value():
+    """label_smoothing=0 vs 0.05 must produce meaningfully different losses on
+    the same forward pass — confirms the kwarg actually wires through."""
+    torch.manual_seed(0)
+    m = SasrecModel(item_modality_dims=[16], ctx_in_dim=12, d=8, n_layers=1,
+                    n_heads=2, max_len=5).eval()
+    all_item_feats = torch.randn(20, 16)
+    ctx = torch.randn(4, 12)
+    items = torch.randn(4, 3, 16)
+    lengths = torch.tensor([3, 3, 3, 3])
+    target = torch.tensor([1, 5, 9, 13])
+    item_matrix = m.item_fusion(all_item_feats)
+    loss_hard = float(next_item_loss(m, ctx, items, lengths, target, item_matrix,
+                                     label_smoothing=0.0))
+    loss_smooth = float(next_item_loss(m, ctx, items, lengths, target, item_matrix,
+                                       label_smoothing=0.05))
+    # Should not be equal and should be at least somewhat different (well
+    # above float-noise). The actual values depend on init, but smoothing
+    # adds the uniform-target floor so the two must differ.
+    assert abs(loss_hard - loss_smooth) > 1e-3, (loss_hard, loss_smooth)
+
+
+def test_item_fusion_default_dropout_is_0_3():
+    """Regularization bump: default ItemFusion dropout went 0.2 -> 0.3."""
+    fusion = ItemFusion(modality_dims=[16], d=8)
+    # The MLP has a single Dropout layer; pull its p.
+    dropouts = [m.p for m in fusion.net if isinstance(m, torch.nn.Dropout)]
+    assert dropouts == [0.3], dropouts
 
 
 from mcrs.retrieval_modules.sasrec_model import build_user_dialog

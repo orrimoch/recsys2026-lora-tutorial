@@ -42,7 +42,7 @@ class ItemFusion(nn.Module):
     """
 
     def __init__(self, modality_dims: list[int], d: int = 192,
-                 hidden: int = 1024, dropout: float = 0.2):
+                 hidden: int = 1024, dropout: float = 0.3):
         super().__init__()
         self.modality_dims = list(modality_dims)
         in_dim = sum(self.modality_dims)
@@ -124,9 +124,15 @@ class SasrecModel(nn.Module):
 
 
 def next_item_loss(model: SasrecModel, ctx_emb, item_feats, lengths, target_idx,
-                   item_matrix) -> torch.Tensor:
+                   item_matrix, label_smoothing: float = 0.05) -> torch.Tensor:
     """Full-catalog softmax cross-entropy for next-item prediction.
-    item_matrix (N, d) is model.item_fusion applied to all N catalog items."""
+    item_matrix (N, d) is model.item_fusion applied to all N catalog items.
+
+    label_smoothing default 0.05: with the full-catalog softmax (N ~ 60k) the
+    target-only one-hot is overconfident and was the dominant driver of the
+    val_loss flatlining while train_loss kept dropping. Tests that need to
+    measure pure cross-entropy convergence (the overfit-batch test) pass 0.
+    """
     state = model.encode(ctx_emb, item_feats, lengths)
     logits = model.score(state, item_matrix)
-    return F.cross_entropy(logits, target_idx)
+    return F.cross_entropy(logits, target_idx, label_smoothing=label_smoothing)

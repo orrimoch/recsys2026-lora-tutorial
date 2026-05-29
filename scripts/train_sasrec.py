@@ -263,7 +263,10 @@ def main():
                         d=args.d, max_len=args.max_seq).to(dev)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[sasrec] model: d={args.d} trainable_params={n_params:,}")
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # AdamW + weight_decay=1e-2: decouples L2 from the adaptive denominator
+    # (the well-known Adam pitfall) and was a direct response to train_loss
+    # diverging from val_loss after epoch 5 on the 10-epoch run.
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
 
     best_r100 = -1.0
     best_state = None
