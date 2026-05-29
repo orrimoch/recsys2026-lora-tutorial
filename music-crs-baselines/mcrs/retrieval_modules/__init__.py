@@ -31,7 +31,13 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
          "corpus_types": ["track_name", "artist_name", "album_name",
                           "release_date", "tag_list"],
          "topk_internal": 100, "weight": float(ec.get("w_bm25", 1.0))},
-        {"type": "dense_metadata_qwen3", "corpus_types": corpus_types,
+        # dense content channel. Qwen3-Embedding-0.6B is ASYMMETRIC: the query
+        # side needs the instruct prefix or recall collapses (nb74 Stage 7: raw
+        # dev recall@100 0.0894 -> instruct 0.1789, 2x). Default to the instruct
+        # variant; dense_instruct=False restores the raw variant for ablation.
+        {"type": ("dense_metadata_qwen3" if ec.get("dense_instruct") is False
+                  else "dense_metadata_qwen3_instruct"),
+         "corpus_types": corpus_types,
          "topk_internal": 100, "weight": float(ec.get("w_qwen", 0.7))},
         {"type": "same_artist", "topk_internal": 100,
          "weight": float(ec.get("w_artist", 1.0))},

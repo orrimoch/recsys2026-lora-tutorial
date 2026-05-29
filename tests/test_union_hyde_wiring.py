@@ -4,7 +4,9 @@ from mcrs.retrieval_modules import _wrrf_union_v1_specs
 def test_union_specs_default_has_three_channels():
     specs = _wrrf_union_v1_specs({})
     types = [s["type"] for s in specs]
-    assert types == ["bm25", "dense_metadata_qwen3", "same_artist"]
+    # dense defaults to the instruct variant (nb74 Stage 7 fix: raw Qwen3 query
+    # recall@100 0.0894 -> instruct 0.1789). 3 channels, dense in middle slot.
+    assert types == ["bm25", "dense_metadata_qwen3_instruct", "same_artist"]
 
 
 def test_union_specs_add_hyde_when_enabled():
