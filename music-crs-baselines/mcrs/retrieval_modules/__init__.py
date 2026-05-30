@@ -86,6 +86,15 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
             "type": "cf_bpr", "topk_internal": 100,
             "weight": float(ec.get("w_cfbpr", 0.25)),
         })
+    # Related-artist channel (Lever 3, roadmap 2026-05-30): cross-session artist
+    # co-occurrence reaches NEW artists (the ~96%-new-artist wall) that
+    # same_artist/sasrec structurally cannot. Stage 16 probe: ~29% of union-missed
+    # golds reachable at top-100 co-occ artists. Opt-in via use_related_artist.
+    if ec.get("use_related_artist"):
+        specs.append({
+            "type": "related_artist", "topk_internal": 100,
+            "weight": float(ec.get("w_related_artist", 1.0)),
+        })
     return specs
 
 
@@ -547,6 +556,9 @@ def load_retrieval_module(
     elif retrieval_type == "same_artist":
         from .same_artist import SameArtistRetriever
         return SameArtistRetriever(dataset_name, track_split_types, corpus_types, cache_dir)
+    elif retrieval_type == "related_artist":
+        from .related_artist import RelatedArtistRetriever
+        return RelatedArtistRetriever(dataset_name, track_split_types, corpus_types, cache_dir)
     elif retrieval_type == "session_cf":
         from .session_cf import SessionCFRetriever
         return SessionCFRetriever(dataset_name, track_split_types, corpus_types, cache_dir)

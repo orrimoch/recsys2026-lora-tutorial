@@ -58,6 +58,26 @@ def test_union_specs_cfbpr_default_weight():
     assert cf["weight"] == 0.25  # low: ~43% warm-user coverage
 
 
+# --- related-artist channel (Lever 3): reaches new artists via co-occurrence ---
+
+def test_union_specs_default_has_no_related_artist():
+    specs = _wrrf_union_v1_specs({})
+    assert all(s["type"] != "related_artist" for s in specs)
+
+
+def test_union_specs_add_related_artist_when_enabled():
+    specs = _wrrf_union_v1_specs({"use_related_artist": True, "w_related_artist": 0.6})
+    ra = next(s for s in specs if s["type"] == "related_artist")
+    assert ra["weight"] == 0.6
+    assert ra["topk_internal"] == 100
+
+
+def test_union_specs_related_artist_default_weight():
+    specs = _wrrf_union_v1_specs({"use_related_artist": True})
+    ra = next(s for s in specs if s["type"] == "related_artist")
+    assert ra["weight"] == 1.0
+
+
 # --- dense channel instruct fix (nb74 Stage 7: raw dense recall@100 0.0894 ->
 #     instruct 0.1789, 2x). Qwen3-Embedding is asymmetric; the query side needs
 #     the instruct prefix. Default to the fixed variant; keep ablatable. ---
