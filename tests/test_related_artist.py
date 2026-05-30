@@ -60,11 +60,12 @@ def test_respects_topk():
     assert out == ["b1"]
 
 
-def test_excludes_already_played_tracks():
-    """A co-occurring artist's track that was already played is skipped."""
+def test_played_artist_becomes_seen_and_is_excluded():
+    """Playing b1 (beta) makes beta a SEEN artist -> the channel excludes beta
+    entirely (it only surfaces NEW artists), leaving only gamma's g1. This is the
+    core behavior: never re-surface an artist already in the session."""
     r = _stub()
-    # pretend b1 was already played; only b2 then g1 should surface
-    ctx = [{"history_tids": ["p1", "b1"]}]
+    ctx = [{"history_tids": ["p1", "b1"]}]  # alpha + beta now both seen
     out = r.batch_text_to_item_retrieval(["q"], topk=10, batch_context=ctx)[0]
-    assert "b1" not in out
-    assert out[0] == "b2"
+    assert "b1" not in out and "b2" not in out, "beta is a seen artist -> excluded"
+    assert out == ["g1"], out
