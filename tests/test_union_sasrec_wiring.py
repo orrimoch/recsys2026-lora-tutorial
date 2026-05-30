@@ -14,6 +14,28 @@ def test_union_specs_add_sasrec_when_enabled():
     assert sas["extra_config"]["model_dir"] == "sasrec_v1"
 
 
+# --- lyrics content channel (A1, roadmap 2026-05-30): a 2nd content view
+#     (lyrics-qwen3 embeddings, precomputed) to attack the new-artist wall.
+#     Opt-in via use_lyrics so existing configs (incl. shipped 194) are unchanged. ---
+
+def test_union_specs_default_has_no_lyrics():
+    specs = _wrrf_union_v1_specs({})
+    assert all(s["type"] != "dense_lyrics_qwen3_instruct" for s in specs)
+
+
+def test_union_specs_add_lyrics_when_enabled():
+    specs = _wrrf_union_v1_specs({"use_lyrics": True, "w_lyrics": 0.5})
+    lyr = next(s for s in specs if s["type"] == "dense_lyrics_qwen3_instruct")
+    assert lyr["weight"] == 0.5
+    assert lyr["topk_internal"] == 100
+
+
+def test_union_specs_lyrics_default_weight():
+    specs = _wrrf_union_v1_specs({"use_lyrics": True})
+    lyr = next(s for s in specs if s["type"] == "dense_lyrics_qwen3_instruct")
+    assert lyr["weight"] == 0.4  # mirrors the metadata-dense default mass
+
+
 # --- dense channel instruct fix (nb74 Stage 7: raw dense recall@100 0.0894 ->
 #     instruct 0.1789, 2x). Qwen3-Embedding is asymmetric; the query side needs
 #     the instruct prefix. Default to the fixed variant; keep ablatable. ---

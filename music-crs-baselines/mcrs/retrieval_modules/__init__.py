@@ -42,6 +42,18 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
         {"type": "same_artist", "topk_internal": 100,
          "weight": float(ec.get("w_artist", 1.0))},
     ]
+    # Lyrics content channel (A1, roadmap 2026-05-30): a 2nd content view via the
+    # precomputed lyrics-qwen3 embeddings. Different signal than metadata-dense,
+    # so it can surface new-artist golds the metadata/lexical/session channels
+    # miss (the 98.8%-new-artist wall). Opt-in via use_lyrics so the shipped
+    # config 194 is unchanged. Default weight 0.4 mirrors the metadata-dense mass.
+    if ec.get("use_lyrics"):
+        specs.append({
+            "type": "dense_lyrics_qwen3_instruct",
+            "corpus_types": corpus_types,
+            "topk_internal": 100,
+            "weight": float(ec.get("w_lyrics", 0.4)),
+        })
     if ec.get("use_hyde"):
         specs.append({
             "type": "hyde_qwen3", "topk_internal": 100,
