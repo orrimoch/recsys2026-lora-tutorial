@@ -78,6 +78,9 @@ from mcrs.retrieval_modules.rrf import RRF_MODEL  # noqa: E402
 from mcrs.retrieval_modules.session_history import (  # noqa: E402,F401
     session_match_features,
 )
+from mcrs.retrieval_modules.clap_similarity import (  # noqa: E402
+    clap_session_similarity, load_clap_lookup,
+)
 
 
 def session_fold(session_id, num_folds):
@@ -297,6 +300,8 @@ def extract_features(
     query_tokens: set[str],
     pop_rank_pct: dict[str, float] | None = None,
     played_meta: list[dict] | None = None,
+    clap_lookup: dict | None = None,
+    played_tids: list | None = None,
 ) -> list[dict]:
     """One dict per candidate — becomes one row in the parquet output."""
     if played_meta is None:
@@ -395,6 +400,12 @@ def extract_features(
         # emitted when present so legacy builds are unchanged.
         if "n_channels_hit" in c:
             row["n_channels_hit"] = int(c["n_channels_hit"])
+        # CLAP audio-similarity feature: candidate's acoustic similarity to the
+        # session's played tracks. Only emitted when the clap lookup + played tids
+        # are supplied (i.e. the build opted into clap), so legacy builds unchanged.
+        if clap_lookup is not None and played_tids is not None:
+            row["clap_session_sim"] = clap_session_similarity(
+                tid, played_tids, clap_lookup)
         rows.append(row)
     return rows
 
@@ -411,6 +422,7 @@ def build(
     sasrec_model_dir: str = "sasrec_v1",
     oof_fold: int = None,
     oof_num_folds: int = None,
+    use_clap: bool = False,
 ) -> None:
     print(f"[lgbm-features] loading train split")
     tr = load_dataset("talkpl-ai/TalkPlayData-Challenge-Dataset", split="train")
@@ -440,6 +452,9 @@ def build(
     user_meta = load_user_meta()
     cfbpr_tid_to_idx, cfbpr_track_mat, cfbpr_user_embs = load_track_cfbpr(cache_dir)
     pop_rank_pct = build_pop_rank_pct_map(track_meta)
+    # CLAP audio lookup (Lever: clap_session_sim feature). Loaded only when
+    # requested so non-clap builds don't pay the embedding download.
+    clap_lookup = load_clap_lookup(cache_dir) if use_clap else None
     scorer = WRRFRunner(
         cache_dir=cache_dir,
         corpus_types=["track_name", "artist_name", "album_name"],
@@ -542,6 +557,8 @@ def build(
                 query_tokens=query_tokens_list[i + j],
                 pop_rank_pct=pop_rank_pct,
                 played_meta=played_meta,
+                clap_lookup=clap_lookup,
+                played_tids=prior_tids,
             )
             row_buf.extend(rows)
         t_feat += time.perf_counter() - _t0
@@ -589,6 +606,8 @@ def main() -> int:
                    help="OOF fold to SELECT for feature-building [0, oof-num-folds).")
     p.add_argument("--oof-num-folds", type=int, default=None,
                    help="Total OOF folds (set together with --oof-fold).")
+    p.add_argument("--use-clap", action="store_true",
+                   help="Emit clap_session_sim (CLAP audio similarity to played tracks).")
     args = p.parse_args()
     if (args.oof_fold is None) != (args.oof_num_folds is None):
         p.error("--oof-fold and --oof-num-folds must be set together")
@@ -609,7 +628,8 @@ def main() -> int:
               w_sasrec=args.w_sasrec,
               sasrec_model_dir=args.sasrec_model_dir,
               oof_fold=args.oof_fold,
-              oof_num_folds=args.oof_num_folds)
+              oof_num_folds=args.oof_num_folds,
+              use_clap=args.use_clap)
     finally:
         os.chdir(origin_cwd)
     return 0

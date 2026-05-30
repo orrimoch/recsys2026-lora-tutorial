@@ -268,3 +268,36 @@ def test_extract_features_omits_n_channels_hit_when_absent():
         pop_rank_pct=None,
     )
     assert "n_channels_hit" not in rows[0]
+
+
+# --- CLAP audio-similarity feature (clap_session_sim) train-side emit ---
+
+def test_extract_features_emits_clap_session_sim_when_lookup_given():
+    import numpy as np
+    from scripts.build_lgbm_features import extract_features
+    clap = {"t1": np.array([1.0, 0.0], dtype=np.float32),
+            "p1": np.array([1.0, 0.0], dtype=np.float32)}
+    rows = extract_features(
+        query="q", candidates=[{"tid": "t1", "wrrf_rank": 1}], gold_tid="t1",
+        session_info=_minimal_session_info(),
+        user_info={"age_group": "20s", "country_code": "US", "gender": "male"},
+        track_meta=_minimal_track_meta(),
+        cfbpr_tid_to_idx={}, cfbpr_track_mat=np.zeros((0, 128)), cfbpr_user_embs={},
+        query_tokens={"q"}, pop_rank_pct=None,
+        clap_lookup=clap, played_tids=["p1"],
+    )
+    assert abs(rows[0]["clap_session_sim"] - 1.0) < 1e-6
+
+
+def test_extract_features_omits_clap_when_no_lookup():
+    import numpy as np
+    from scripts.build_lgbm_features import extract_features
+    rows = extract_features(
+        query="q", candidates=[{"tid": "t1", "wrrf_rank": 1}], gold_tid="t1",
+        session_info=_minimal_session_info(),
+        user_info={"age_group": "20s", "country_code": "US", "gender": "male"},
+        track_meta=_minimal_track_meta(),
+        cfbpr_tid_to_idx={}, cfbpr_track_mat=np.zeros((0, 128)), cfbpr_user_embs={},
+        query_tokens={"q"}, pop_rank_pct=None,
+    )
+    assert "clap_session_sim" not in rows[0]

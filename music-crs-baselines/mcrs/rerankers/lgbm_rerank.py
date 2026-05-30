@@ -146,6 +146,13 @@ class LGBM_RERANKER:
         self._load_track_meta(item_db_name, track_split_types)
         self._build_pop_rank_pct()
         self._load_cfbpr(cache_dir)
+        # CLAP audio lookup — only when the model uses clap_session_sim (avoids
+        # the embedding download for models without the feature).
+        if "clap_session_sim" in self.features:
+            from ..retrieval_modules.clap_similarity import load_clap_lookup
+            self.clap_lookup = load_clap_lookup(cache_dir)
+        else:
+            self.clap_lookup = None
         # Lazy-load user metadata when first rerank() call arrives.
         self._user_meta: Optional[dict[str, dict]] = None
 
@@ -271,7 +278,7 @@ class LGBM_RERANKER:
             "release_year_sin", "release_year_cos", "tag_overlap_count",
             "last_turn_moved_toward_goal", "bm25_rank_inv", "dense_meta_rank_inv",
             "dense_lyrics_rank_inv", "ce_score", "ce_rank_inv", "sasrec_rank_inv",
-            "n_channels_hit",
+            "n_channels_hit", "clap_session_sim",
             "turn_number_feat", "prior_track_count", "query_drift_score",
             "pop_rank_pct", "is_warm_user",
             *_SESSION_MATCH_KEYS,
@@ -373,6 +380,12 @@ class LGBM_RERANKER:
                     # (a surfaced candidate was hit by >=1 channel).
                     X[rank - 1, f_idx["n_channels_hit"]] = float(
                         cand_extra.get("n_channels_hit", 1))
+                if "clap_session_sim" in f_idx and self.clap_lookup is not None:
+                    # CLAP audio similarity of this candidate to the session's
+                    # played tracks (shared fn -> train/serve parity).
+                    from ..retrieval_modules.clap_similarity import clap_session_similarity
+                    X[rank - 1, f_idx["clap_session_sim"]] = clap_session_similarity(
+                        tid, played_tids, self.clap_lookup)
                 if "turn_number_feat" in f_idx:
                     X[rank - 1, f_idx["turn_number_feat"]] = int(sess.get("turn_number", 0))
                 if "prior_track_count" in f_idx:
