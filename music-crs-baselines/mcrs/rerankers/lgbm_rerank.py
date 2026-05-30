@@ -271,6 +271,7 @@ class LGBM_RERANKER:
             "release_year_sin", "release_year_cos", "tag_overlap_count",
             "last_turn_moved_toward_goal", "bm25_rank_inv", "dense_meta_rank_inv",
             "dense_lyrics_rank_inv", "ce_score", "ce_rank_inv", "sasrec_rank_inv",
+            "n_channels_hit",
             "turn_number_feat", "prior_track_count", "query_drift_score",
             "pop_rank_pct", "is_warm_user",
             *_SESSION_MATCH_KEYS,
@@ -367,6 +368,11 @@ class LGBM_RERANKER:
                 if "sasrec_rank_inv" in f_idx:
                     X[rank - 1, f_idx["sasrec_rank_inv"]] = 1.0 / max(
                         1, cand_extra.get("sasrec_rank", rank))
+                if "n_channels_hit" in f_idx:
+                    # How many union channels surfaced this candidate. Default 1
+                    # (a surfaced candidate was hit by >=1 channel).
+                    X[rank - 1, f_idx["n_channels_hit"]] = float(
+                        cand_extra.get("n_channels_hit", 1))
                 if "turn_number_feat" in f_idx:
                     X[rank - 1, f_idx["turn_number_feat"]] = int(sess.get("turn_number", 0))
                 if "prior_track_count" in f_idx:

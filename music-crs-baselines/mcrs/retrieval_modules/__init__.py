@@ -74,6 +74,18 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
                 "max_len": int(ec.get("sasrec_max_len", 50)),
             },
         })
+    # cf-bpr user x item affinity channel (Lever 4, roadmap 2026-05-30): query-
+    # independent user-taste signal, ORTHOGONAL to the session (same_artist/sasrec)
+    # and content (bm25/dense) channels — can surface popular tracks by NEW artists
+    # the user's latent taste likes. Opt-in via use_cfbpr; low default weight (0.25)
+    # since only ~43% of users are warm (cold users -> empty list, RRF falls back
+    # to the other channels). cf_bpr ignores batch_context but uses user_ids, which
+    # RRF.batch_per_sub_rankings supplies via its try/except signature fallback.
+    if ec.get("use_cfbpr"):
+        specs.append({
+            "type": "cf_bpr", "topk_internal": 100,
+            "weight": float(ec.get("w_cfbpr", 0.25)),
+        })
     return specs
 
 

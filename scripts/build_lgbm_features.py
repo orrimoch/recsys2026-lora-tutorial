@@ -192,11 +192,19 @@ class WRRFRunner:
             for q, tids in enumerate(fused_per_q):
                 # Build tid -> 1-indexed rank map for the sasrec sub.
                 rankmap = {tid: (rank + 1) for rank, tid in enumerate(per_sub[sidx][q])}
+                # Cross-channel agreement (Lever 2): how many of the union's
+                # channels surfaced each tid. Computed from this query's per-sub
+                # lists (already in hand). Golds tend to be multiply-surfaced.
+                hit_count: dict[str, int] = {}
+                for s in range(len(per_sub)):
+                    for t in per_sub[s][q]:
+                        hit_count[t] = hit_count.get(t, 0) + 1
                 result.append([
                     {
                         "tid": tid,
                         "wrrf_rank": r + 1,
                         "sasrec_rank": rankmap.get(tid, 10000),
+                        "n_channels_hit": hit_count.get(tid, 1),
                     }
                     for r, tid in enumerate(tids)
                 ])
@@ -382,6 +390,11 @@ def extract_features(
         # NEW sasrec channel feature (32) — only when the sasrec sub was active.
         if "sasrec_rank" in c:
             row["sasrec_rank_inv"] = 1.0 / max(1, c["sasrec_rank"])
+        # Lever 2: how many union channels surfaced this candidate (cross-channel
+        # agreement). Carried on the candidate dict by the feature builder; only
+        # emitted when present so legacy builds are unchanged.
+        if "n_channels_hit" in c:
+            row["n_channels_hit"] = int(c["n_channels_hit"])
         rows.append(row)
     return rows
 

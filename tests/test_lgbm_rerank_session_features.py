@@ -177,3 +177,47 @@ def test_clean_model_without_cfbpr_score_does_not_crash():
     assert X.shape == (2, len(features))
     # the session-continuity columns still populate (sanity the matrix is real)
     assert X[0, f_idx["same_artist"]] == 1
+
+
+# ---------------------------------------------------------------------------
+# n_channels_hit (Lever 2): how many union channels surfaced this candidate.
+# Carried per-candidate in extra_features_per_candidate, guarded by f_idx.
+# (TDD: written before implementation.)
+# ---------------------------------------------------------------------------
+
+def test_n_channels_hit_set_from_extra_dict():
+    """When 'n_channels_hit'=3 is in the per-candidate extra dict, the matrix
+    column must equal 3."""
+    features = BASE_FEATURES + ["n_channels_hit"]
+    r = _make_stub(features)
+    f_idx = {f: i for i, f in enumerate(features)}
+
+    X = r._compute_feature_matrix(
+        query="some query",
+        candidate_tids=["c_same"],
+        user_id=None,
+        goal_category=None,
+        goal_specificity=None,
+        user_profile_raw=None,
+        extra_features_per_candidate=[{"n_channels_hit": 3}],
+    )
+    assert X.shape == (1, len(features))
+    assert X[0, f_idx["n_channels_hit"]] == pytest.approx(3.0)
+
+
+def test_n_channels_hit_defaults_to_one_when_absent():
+    """Absent key -> default 1 (a surfaced candidate was hit by >=1 channel)."""
+    features = BASE_FEATURES + ["n_channels_hit"]
+    r = _make_stub(features)
+    f_idx = {f: i for i, f in enumerate(features)}
+
+    X = r._compute_feature_matrix(
+        query="some query",
+        candidate_tids=["c_same"],
+        user_id=None,
+        goal_category=None,
+        goal_specificity=None,
+        user_profile_raw=None,
+        extra_features_per_candidate=[{}],
+    )
+    assert X[0, f_idx["n_channels_hit"]] == pytest.approx(1.0)

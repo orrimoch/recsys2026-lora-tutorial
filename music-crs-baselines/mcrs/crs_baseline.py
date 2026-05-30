@@ -138,17 +138,35 @@ def build_sasrec_extra_features(
     batch_retrieval_items: list,
     sentinel: int = 10000,
 ) -> list | None:
-    """Per-candidate {'sasrec_rank': rank} aligned to batch_retrieval_items,
-    from the SASRec sub's per-query ranking. Returns None if no 'sasrec_seq'
-    sub is present (so callers can skip). rank is 1-indexed; candidates the
-    SASRec channel didn't surface get `sentinel`."""
-    if "sasrec_seq" not in labels:
+    """Per-candidate side features aligned to batch_retrieval_items, computed
+    from the union's per-sub rankings:
+      'sasrec_rank'    : 1-indexed position in the SASRec sub (sentinel if absent),
+                         only when a 'sasrec_seq' sub is present.
+      'n_channels_hit' : how many union channels surfaced this candidate (>=1),
+                         always emitted (Lever 2 cross-channel agreement).
+    Returns None only if there are no per-sub rankings at all (nothing to add).
+    MUST mirror WRRFRunner.run in scripts/build_lgbm_features.py (train/serve
+    parity)."""
+    if not labels or not per_sub:
         return None
-    sidx = labels.index("sasrec_seq")
+    has_sasrec = "sasrec_seq" in labels
+    sidx = labels.index("sasrec_seq") if has_sasrec else None
     out = []
     for qi, cand_list in enumerate(batch_retrieval_items):
-        rankmap = {tid: r + 1 for r, tid in enumerate(per_sub[sidx][qi])}
-        out.append([{"sasrec_rank": rankmap.get(tid, sentinel)} for tid in cand_list])
+        rankmap = ({tid: r + 1 for r, tid in enumerate(per_sub[sidx][qi])}
+                   if has_sasrec else {})
+        # Cross-channel agreement: count channels that surfaced each tid.
+        hit_count: dict = {}
+        for s in range(len(per_sub)):
+            for t in per_sub[s][qi]:
+                hit_count[t] = hit_count.get(t, 0) + 1
+        row = []
+        for tid in cand_list:
+            d = {"n_channels_hit": hit_count.get(tid, 1)}
+            if has_sasrec:
+                d["sasrec_rank"] = rankmap.get(tid, sentinel)
+            row.append(d)
+        out.append(row)
     return out
 
 
@@ -603,7 +621,9 @@ class CRS_BASELINE:
             # retrievers) — negligible for Blind-A (80 queries) and gated so
             # non-LGBM / non-union paths are completely unaffected.
             extra_features_per_candidate = None
-            if ("sasrec_rank_inv" in getattr(self.reranker, "features", [])
+            _reranker_feats = getattr(self.reranker, "features", [])
+            if (("sasrec_rank_inv" in _reranker_feats
+                 or "n_channels_hit" in _reranker_feats)
                     and hasattr(self.retrieval, "batch_per_sub_rankings")):
                 try:
                     _per_sub, _labels = self.retrieval.batch_per_sub_rankings(

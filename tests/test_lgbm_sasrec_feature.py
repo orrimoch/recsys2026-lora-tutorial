@@ -223,3 +223,48 @@ def test_wrrfrunner_run_non_sasrec_path_no_sasrec_rank_key():
     cands = results[0]
     for c in cands:
         assert "sasrec_rank" not in c, f"sasrec_rank must be absent in non-sasrec path, got {c}"
+
+
+# ---------------------------------------------------------------------------
+# n_channels_hit (Lever 2): extract_features emits it when the candidate dict
+# carries it; omits it otherwise. (TDD: written before implementation.)
+# ---------------------------------------------------------------------------
+
+def test_extract_features_emits_n_channels_hit_when_present():
+    from scripts.build_lgbm_features import extract_features
+
+    candidates = [{"tid": "t1", "wrrf_rank": 1, "n_channels_hit": 3}]
+    rows = extract_features(
+        query="some query",
+        candidates=candidates,
+        gold_tid="t1",
+        session_info=_minimal_session_info(),
+        user_info={"age_group": "20s", "country_code": "US", "gender": "male"},
+        track_meta=_minimal_track_meta(),
+        cfbpr_tid_to_idx={},
+        cfbpr_track_mat=np.zeros((0, 128)),
+        cfbpr_user_embs={},
+        query_tokens={"some", "query"},
+        pop_rank_pct=None,
+    )
+    assert rows[0]["n_channels_hit"] == 3
+
+
+def test_extract_features_omits_n_channels_hit_when_absent():
+    from scripts.build_lgbm_features import extract_features
+
+    candidates = [{"tid": "t1", "wrrf_rank": 1}]
+    rows = extract_features(
+        query="some query",
+        candidates=candidates,
+        gold_tid="t1",
+        session_info=_minimal_session_info(),
+        user_info={"age_group": "20s", "country_code": "US", "gender": "male"},
+        track_meta=_minimal_track_meta(),
+        cfbpr_tid_to_idx={},
+        cfbpr_track_mat=np.zeros((0, 128)),
+        cfbpr_user_embs={},
+        query_tokens={"some", "query"},
+        pop_rank_pct=None,
+    )
+    assert "n_channels_hit" not in rows[0]
