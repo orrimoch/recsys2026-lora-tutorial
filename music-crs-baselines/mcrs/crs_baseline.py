@@ -479,6 +479,35 @@ class CRS_BASELINE:
         return [str(t["track_id"]) for t in prior_history
                 if t.get("role") in ("music", "assistant") and t.get("track_id")]
 
+    def _finalize_topk(self, items: list, pool: list, played_set: set,
+                       k: int = 20) -> list:
+        """Assemble the final top-k: dedupe (keep first), drop ids not in the
+        catalog (when known), EXCLUDE already-played tracks (bug #2), and
+        backfill from the pre-rerank pool.
+
+        Played-exclusion is safe by construction: the gold is ALWAYS a new
+        track, so a played track in the top-k is a guaranteed miss; dropping it
+        only promotes real candidates (non-decreasing for nDCG@k). Depends on
+        bug #1 being fixed so played_set (from history_tids) is non-empty.
+        """
+        valid = self._valid_catalog
+        played = played_set or set()
+        seen: set = set()
+        kept: list = []
+        for src in (items, pool):
+            for tid in src:
+                if len(kept) >= k:
+                    break
+                if tid in seen or tid in played:
+                    continue
+                if valid is not None and tid not in valid:
+                    continue
+                kept.append(tid)
+                seen.add(tid)
+            if len(kept) >= k:
+                break
+        return kept[:k]
+
     def chat(self, user_query: str, user_id: Optional[str] = None) -> dict[str, Any]:
         """Run a single CRS turn: retrieve items and generate a response.
         Args:
@@ -706,34 +735,21 @@ class CRS_BASELINE:
                     retrieval_inputs, batch_retrieval_items, topk=20,
                 )
 
-        # Stage 1c: A6 catalog-membership filter + A7 dedupe. Hard guard for
-        # any track_id that snuck in from a hallucinating model (W4-W6 trained
-        # responders are the threat surface; W2 retrievers are catalog-bounded
-        # by construction so this is a no-op here). Drops invalid IDs and
-        # backfills from the pre-rerank pool to keep len(items) ≥ 20.
-        if self._valid_catalog is not None:
-            filtered = []
-            for items, pool in zip(batch_retrieval_items, batch_retrieval_pool):
-                # Dedupe-keep-first → catalog-filter → backfill from pool.
-                seen: set = set()
-                kept: list = []
-                for tid in items:
-                    if tid in seen or tid not in self._valid_catalog:
-                        continue
-                    kept.append(tid)
-                    seen.add(tid)
-                # Backfill from the pre-rerank pool until len == 20 (or pool
-                # is exhausted). Pool ids are also filtered+deduped on insert.
-                if len(kept) < 20:
-                    for tid in pool:
-                        if len(kept) >= 20:
-                            break
-                        if tid in seen or tid not in self._valid_catalog:
-                            continue
-                        kept.append(tid)
-                        seen.add(tid)
-                filtered.append(kept[:20])
-            batch_retrieval_items = filtered
+        # Stage 1c: dedupe + catalog-membership guard + PLAYED-TRACK EXCLUSION
+        # (bug #2) + backfill. Played tracks are dropped because the gold is
+        # always a NEW track, so a played track in the top-20 is a guaranteed
+        # miss; excluding it only promotes real candidates (non-decreasing for
+        # nDCG). The catalog filter still guards hallucinated ids from W4-W6
+        # responders (retrievers are catalog-bounded). Applied unconditionally
+        # (the old code skipped the whole block when _valid_catalog was None);
+        # _finalize_topk handles a None catalog gracefully. played_set comes from
+        # batch_context["history_tids"] — non-empty only after the bug #1 fix.
+        filtered = []
+        for items, pool, bc in zip(
+                batch_retrieval_items, batch_retrieval_pool, batch_context):
+            played_set = set(bc.get("history_tids") or [])
+            filtered.append(self._finalize_topk(items, pool, played_set))
+        batch_retrieval_items = filtered
 
         # Build the "recommend_item(s)" string passed to the LM. When
         # top_n_for_prompt=1 this is identical to 021 champion (just
