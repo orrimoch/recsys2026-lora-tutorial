@@ -79,7 +79,7 @@ from mcrs.retrieval_modules.session_history import (  # noqa: E402,F401
     session_match_features,
 )
 from mcrs.retrieval_modules.clap_similarity import (  # noqa: E402
-    clap_session_similarity, load_clap_lookup,
+    clap_has_vector, clap_mean_vector, clap_session_similarity, load_clap_lookup,
 )
 
 
@@ -302,6 +302,7 @@ def extract_features(
     played_meta: list[dict] | None = None,
     clap_lookup: dict | None = None,
     played_tids: list | None = None,
+    clap_mean: "np.ndarray | None" = None,
 ) -> list[dict]:
     """One dict per candidate — becomes one row in the parquet output."""
     if played_meta is None:
@@ -405,7 +406,11 @@ def extract_features(
         # are supplied (i.e. the build opted into clap), so legacy builds unchanged.
         if clap_lookup is not None and played_tids is not None:
             row["clap_session_sim"] = clap_session_similarity(
-                tid, played_tids, clap_lookup)
+                tid, played_tids, clap_lookup, mean_vec=clap_mean)
+            # Companion indicator: 1 if the candidate had a real CLAP vector, 0
+            # if its similarity was mean-imputed. Lets the reranker discount
+            # imputed rows instead of overloading the 0.0 sentinel.
+            row["clap_has_vector"] = clap_has_vector(tid, clap_lookup)
         rows.append(row)
     return rows
 
@@ -454,7 +459,25 @@ def build(
     pop_rank_pct = build_pop_rank_pct_map(track_meta)
     # CLAP audio lookup (Lever: clap_session_sim feature). Loaded only when
     # requested so non-clap builds don't pay the embedding download.
+    #
+    # GPU RE-TEST RUNBOOK (step 1, not yet run — Stage 22's CLAP regression was a
+    # LEAK artifact, not a verdict that audio is useless). To evaluate CLAP (or
+    # any reranker feature) HONESTLY, the train+val parquets must be built OOF and
+    # scored on the held-out test split, NOT internal LGBM val (which shares the
+    # full-train SASRec pool and is anti-correlated with dev):
+    #   1. Train K OOF SASRec models, each holding one fold out (train_sasrec.py
+    #      --oof-fold k --oof-num-folds K).
+    #   2. Build K per-fold parquets here with --oof-fold k --oof-num-folds K
+    #      --sasrec-model-dir <fold-k model> --use-clap; concatenate -> leak-free
+    #      OOF train parquet. (clap_session_sim + clap_has_vector now mean-impute
+    #      missing vectors instead of the old 0.0 sentinel.)
+    #   3. Eval the retrained LGBM on the dev TEST split (nb74 cell 47), never the
+    #      internal val nDCG. Only then is a CLAP verdict trustworthy.
+    # See feedback_dont_chase_tiny_rerank_deltas + project_recall_levers_exhausted.
     clap_lookup = load_clap_lookup(cache_dir) if use_clap else None
+    # Catalog-mean CLAP vector for imputing candidates with no audio embedding
+    # (replaces the 0.0 sentinel). Computed once; None when clap is off.
+    clap_mean = clap_mean_vector(clap_lookup) if clap_lookup is not None else None
     scorer = WRRFRunner(
         cache_dir=cache_dir,
         corpus_types=["track_name", "artist_name", "album_name"],
@@ -490,6 +513,22 @@ def build(
                     except Exception:
                         content = str(content)
                 lines.append(f"{role}: {content}")
+            # GOAL-LESS query (matches the shipped config 194 raw mode -> correct
+            # train/serve parity AS-IS). NOTE: the nb74 cell-4 dev harness appends
+            # `\ngoal: <listener_goal>`, so dev currently measures a goal-FUL
+            # query while train+serve are goal-less (a small known mismatch).
+            #
+            # GOAL-EVERYWHERE RUNBOOK (step 2b, GPU — only if goal in the query
+            # beats the goal-less baseline; Stage 12 measured just +0.0072 recall
+            # and recall isn't the binding constraint, so prior is low). To ship
+            # goal, change ALL THREE together or you get train/serve skew:
+            #   (a) here: append `\ngoal: <listener_goal>` from
+            #       sess["conversation_goal"]["listener_goal"] (mirror cell 4);
+            #   (b) serve: set config query_preprocessing_mode: "raw_with_goal"
+            #       (already implemented in crs_baseline.build_retrieval_query);
+            #   (c) retrain lgbm_clean_full on the goal-ful parquets.
+            # (The goal's bigger payoff is likely the RESPONDER prompt, not the
+            # retrieval query — see the responder-goal follow-up.)
             retrieval_input = "\n".join(lines)
             queries.append(retrieval_input)
             metas.append({
@@ -559,6 +598,7 @@ def build(
                 played_meta=played_meta,
                 clap_lookup=clap_lookup,
                 played_tids=prior_tids,
+                clap_mean=clap_mean,
             )
             row_buf.extend(rows)
         t_feat += time.perf_counter() - _t0

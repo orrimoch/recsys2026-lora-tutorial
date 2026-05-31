@@ -32,14 +32,28 @@ def _l2(v: np.ndarray) -> np.ndarray:
 
 
 def clap_session_similarity(cand_tid: str, played_tids: list,
-                            clap_lookup: dict) -> float:
+                            clap_lookup: dict,
+                            mean_vec: Optional[np.ndarray] = None) -> float:
     """Mean cosine similarity of the candidate's CLAP vector to the session's
     played tracks' CLAP vectors. Vectors in clap_lookup are assumed L2-normalized
-    (load_clap_lookup normalizes), so cosine == dot. Returns 0.0 when the
-    candidate has no CLAP vector, there is no history, or no played track has a
-    CLAP vector."""
+    (load_clap_lookup normalizes), so cosine == dot. Returns 0.0 when there is no
+    history or no played track has a CLAP vector.
+
+    mean_vec: optional L2-normalized catalog-mean CLAP vector (see
+    clap_mean_vector). When supplied, a candidate that has NO CLAP vector is
+    IMPUTED to mean_vec instead of returning a hard 0.0 — so "missing" no longer
+    masquerades as "zero similarity" (the old 0.0 sentinel, which overloaded
+    cold-candidate / no-audio with a genuine orthogonal score). When mean_vec is
+    None the behaviour is unchanged (missing candidate -> 0.0), keeping legacy
+    builds bit-identical. Missing PLAYED tracks are always skipped (never
+    imputed) to avoid the degenerate mean-vs-mean == 1.0 artifact. Pair this with
+    clap_has_vector() so the reranker can tell imputed rows apart."""
     cv = clap_lookup.get(cand_tid)
-    if cv is None or not played_tids:
+    if cv is None:
+        if mean_vec is None:
+            return 0.0
+        cv = mean_vec
+    if not played_tids:
         return 0.0
     sims = []
     for t in played_tids:
@@ -49,6 +63,27 @@ def clap_session_similarity(cand_tid: str, played_tids: list,
     if not sims:
         return 0.0
     return float(np.mean(sims))
+
+
+def clap_has_vector(tid: str, clap_lookup: dict) -> int:
+    """1 if the track has a real CLAP vector, else 0. Companion feature to the
+    mean_vec imputation in clap_session_similarity() — lets the reranker
+    distinguish a genuine low similarity from an imputed (missing-vector) row."""
+    return 1 if clap_lookup.get(tid) is not None else 0
+
+
+def clap_mean_vector(clap_lookup: dict) -> Optional[np.ndarray]:
+    """L2-normalized catalog-mean CLAP vector, for imputing missing candidates.
+    Returns None for an empty lookup.
+
+    NOTE: this is the GLOBAL mean. An artist->category->global mean (per
+    feedback_embedding_imputation) would need track metadata plumbed in here and
+    is deferred; the global mean is the honest minimal fix for the 0.0-sentinel
+    artifact."""
+    if not clap_lookup:
+        return None
+    M = np.mean(np.stack(list(clap_lookup.values()), axis=0), axis=0)
+    return _l2(np.asarray(M, dtype=np.float32))
 
 
 def load_clap_lookup(cache_dir: str, split_types=("all_tracks",)) -> dict:

@@ -34,12 +34,20 @@ def chat_history_parser(conversations, music_crs, target_turn_number):
     df_history = df_conversation[df_conversation['turn_number'] < target_turn_number]
     chat_history = []
     for turn_data in df_history.to_dict(orient="records"):
-        turn_number = turn_data['turn_number']
         current_role = turn_data['role']
         current_content = turn_data['content']
         if turn_data['role'] == "music":
-            current_role = "assistant"
-            current_content = music_crs.item_db.id_to_metadata(turn_data['content'])
+            # Bug #1 fix: carry the raw track_id (mirrors run_inference_blindset)
+            # so the session channels + LGBM reranker can recover the actually
+            # played catalog ids at serve. content is expanded to metadata TEXT
+            # for the LM; the role marker becomes "assistant".
+            raw_track_id = turn_data['content']
+            chat_history.append({
+                "role": "assistant",
+                "content": music_crs.item_db.id_to_metadata(raw_track_id),
+                "track_id": raw_track_id,
+            })
+            continue
         chat_history.append({
             "role": current_role,
             "content": current_content
@@ -90,6 +98,7 @@ def main(args):
     response_max_new_tokens = int(config.get("response_max_new_tokens", 64))
     top_n_for_prompt = int(config.get("top_n_for_prompt", 1))
     query_preprocessing_mode = str(config.get("query_preprocessing_mode", "raw"))
+    responder_use_goal = bool(config.get("responder_use_goal", False))
     response_reranker_type = config.get("response_reranker_type", None)
     response_reranker_model_path = config.get("response_reranker_model_path", None)
     response_n_candidates = int(config.get("response_n_candidates", 3))
@@ -134,6 +143,7 @@ def main(args):
         response_max_new_tokens=response_max_new_tokens,
         top_n_for_prompt=top_n_for_prompt,
         query_preprocessing_mode=query_preprocessing_mode,
+        responder_use_goal=responder_use_goal,
         response_reranker_type=response_reranker_type,
         response_reranker_model_path=response_reranker_model_path,
         response_n_candidates=response_n_candidates,

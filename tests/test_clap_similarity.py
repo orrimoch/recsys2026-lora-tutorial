@@ -68,3 +68,46 @@ def test_played_missing_clap_skipped():
     # only p1 has a vector among the played; p_missing is ignored
     s = clap_session_similarity("c_same", ["p1", "p_missing"], lk)
     assert abs(s - 1.0) < 1e-6, s  # mean over the 1 valid played = cos(c_same,p1)=1
+
+
+# --- mean-imputation + has-vector indicator (step-3 prep; fixes the 0.0 sentinel) ---
+
+def test_mean_impute_none_preserves_zero():
+    """Backward compat: with no mean_vec, a missing candidate still returns 0.0
+    (identical to the original 0.0-sentinel behaviour)."""
+    lk = _lookup()
+    assert clap_session_similarity("unknown_tid", ["p1"], lk) == 0.0
+
+
+def test_mean_impute_candidate_missing_uses_mean_vec():
+    """With mean_vec supplied, a candidate that has no CLAP vector is imputed to
+    the catalog mean instead of returning a hard 0.0."""
+    lk = _lookup()
+    mean = _n([1.0, 1.0, 1.0])  # imputed candidate
+    # cos(mean, p1=(1,0,0)) = 1/sqrt(3); only p1 played
+    s = clap_session_similarity("unknown_tid", ["p1"], lk, mean_vec=mean)
+    assert abs(s - (1.0 / np.sqrt(3))) < 1e-6, s
+
+
+def test_mean_impute_played_missing_still_skipped():
+    """Missing PLAYED tracks are never imputed (even with mean_vec) — avoids the
+    degenerate mean-vs-mean == 1.0 artifact."""
+    lk = _lookup()
+    mean = _n([1.0, 1.0, 1.0])
+    s = clap_session_similarity("c_same", ["p1", "p_missing"], lk, mean_vec=mean)
+    assert abs(s - 1.0) < 1e-6, s  # only p1 counted
+
+
+def test_clap_has_vector_indicator():
+    from mcrs.retrieval_modules.clap_similarity import clap_has_vector
+    lk = _lookup()
+    assert clap_has_vector("p1", lk) == 1
+    assert clap_has_vector("unknown_tid", lk) == 0
+
+
+def test_clap_mean_vector_normalized_and_empty():
+    from mcrs.retrieval_modules.clap_similarity import clap_mean_vector
+    lk = _lookup()
+    m = clap_mean_vector(lk)
+    assert abs(float(np.linalg.norm(m)) - 1.0) < 1e-6
+    assert clap_mean_vector({}) is None

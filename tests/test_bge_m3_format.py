@@ -156,6 +156,31 @@ def test_format_query_handles_empty_history():
     assert "Play me something upbeat" in text
 
 
+# --- raw_with_goal mode (step-2 prep: full raw history + appended goal text,
+#     matching the nb74 cell-4 dev harness format so train/serve can be aligned) ---
+
+def test_build_retrieval_query_raw_with_goal_appends_goal():
+    from mcrs.crs_baseline import build_retrieval_query
+    sm = [{"role": "user", "content": "play jazz"},
+          {"role": "assistant", "content": "sure"}]
+    text = build_retrieval_query(
+        sm, mode="raw_with_goal", goal_text="wants to discover new artists")
+    # Full raw history is preserved (unlike last_user_with_goal which drops it).
+    assert "user: play jazz" in text
+    assert "assistant: sure" in text
+    # Goal appended on its own line, matching nb74 cell 4: `\ngoal: <text>`.
+    assert text.endswith("\ngoal: wants to discover new artists")
+
+
+def test_build_retrieval_query_raw_with_goal_no_goal_is_plain_raw():
+    from mcrs.crs_baseline import build_retrieval_query
+    sm = [{"role": "user", "content": "play jazz"}]
+    plain = build_retrieval_query(sm, mode="raw")
+    text = build_retrieval_query(sm, mode="raw_with_goal", goal_text=None)
+    # With no goal, raw_with_goal is byte-identical to raw.
+    assert text == plain
+
+
 # ---------------------------------------------------------------------------
 # Contract-pinning tests: exact equality against build_retrieval_query.
 # These prevent silent drift between fine-tune and inference query strings.

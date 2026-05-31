@@ -1,0 +1,53 @@
+# 195 — IDENTICAL to config 194 except top_n_for_prompt: 1 -> 3.
+#
+# Single-axis A/B (responder lever, step 5). 194 is the validated baseline
+# (composite 0.35, nDCG 0.29, LLM 2.7). The responder only describes
+# top_n_for_prompt of the 20 retrieved tracks; at 1 it explains a single track,
+# capping the LLM/Gemini axis (0.30 composite weight, currently 2.7/5). Raising
+# to 3 lets the LM cite/choose among the top 3 reranked candidates.
+#
+# RETRIEVAL + RERANKER ARE UNCHANGED from 194, so any composite delta isolates
+# the responder prompt width. Measure on the nb75 Gemini-judge harness BEFORE
+# spending a Blind-A submission. DO NOT change any other axis in this config.
+
+lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
+lora_path: null
+lora_max_rank: 32
+
+retrieval_type: "wrrf_union_v1"
+
+use_sasrec: true
+w_sasrec: 1.0
+sasrec_model_dir: "sasrec_v1"
+
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+retrieval_topk: 100
+reranker_type: "lgbm_rerank"
+reranker_model_path: "/content/drive/MyDrive/recsys2026_retrieval_v2_cache/lgbm/lgbm_clean_full"
+
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 320
+top_n_for_prompt: 3
+query_preprocessing_mode: "raw"
+
+use_vllm: false
+
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+use_cmqr: false

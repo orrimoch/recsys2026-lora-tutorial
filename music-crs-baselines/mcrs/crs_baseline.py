@@ -66,6 +66,11 @@ def build_retrieval_query(
       'last_user_with_goal': last_user + ' || goal: <listener_goal>' when
                            goal_text is provided. Adds light context useful
                            when the user query is short.
+      'raw_with_goal'    : 'raw' (full newline-joined history) plus a trailing
+                           '\\ngoal: <listener_goal>' line when goal_text is
+                           provided. Matches the nb74 cell-4 dev recall harness
+                           so the offline query can be aligned with serve. With
+                           no goal it is byte-identical to 'raw'.
       'bge_m3_structured': Structured 4-block format (plan §Task 4 step 3) used
                            for the BGE-M3-FT fine-tune + matching inference. Layout:
                              [USER]: age=<X> country=<Y> gender=<Z>
@@ -84,6 +89,12 @@ def build_retrieval_query(
         return "\n".join(
             f"{t.get('role','')}: {t.get('content','')}" for t in session_memory
         )
+    if mode == "raw_with_goal":
+        base = "\n".join(
+            f"{t.get('role','')}: {t.get('content','')}" for t in session_memory
+        )
+        gt = (goal_text or "").strip()
+        return f"{base}\ngoal: {gt}" if gt else base
     # Last user turn — find it from the END of session_memory.
     last_user = ""
     last_user_idx: Optional[int] = None
@@ -211,6 +222,12 @@ class CRS_BASELINE:
         response_max_new_tokens: int = 64,
         top_n_for_prompt: int = 1,
         query_preprocessing_mode: str = "raw",
+        # ---- Responder goal injection (opt-in, default OFF) --------------
+        # When True, the listener_goal text is appended to the responder's
+        # system prompt (see _get_system_prompt). Gives the local LLM the
+        # user's stated intent, which is otherwise dropped before generation.
+        # Default OFF so the shipped config 194 prompt is bit-identical.
+        responder_use_goal: bool = False,
         response_reranker_type: Optional[str] = None,
         response_reranker_model_path: Optional[str] = None,
         response_n_candidates: int = 3,
@@ -307,10 +324,13 @@ class CRS_BASELINE:
         # query — strip role prefixes + drop multi-turn assistant/music noise.
         # See build_retrieval_query() above for the modes.
         if query_preprocessing_mode not in (
-            "raw", "last_user", "last_user_with_goal", "bge_m3_structured",
+            "raw", "raw_with_goal", "last_user", "last_user_with_goal",
+            "bge_m3_structured",
         ):
             raise ValueError(f"unknown query_preprocessing_mode: {query_preprocessing_mode!r}")
         self.query_preprocessing_mode = query_preprocessing_mode
+        # Responder goal injection (see _get_system_prompt). Default off.
+        self.responder_use_goal = bool(responder_use_goal)
         # Response reranker (exp 026+): sample K responses and pick the best via
         # a reward model trained on train goal_progress_assessments.
         self.response_reranker_type = response_reranker_type
@@ -414,10 +434,16 @@ class CRS_BASELINE:
         """
         self.session_memory = chat_history
 
-    def _get_system_prompt(self, user_id: Optional[str] = None) -> str:
+    def _get_system_prompt(self, user_id: Optional[str] = None,
+                           goal_text: Optional[str] = None) -> str:
         """Build the system prompt, optionally personalized with a user profile.
         Args:
             user_id: Optional user identifier. When provided, includes a personalization segment derived from the user's profile.
+            goal_text: Optional listener_goal text. Appended as a session-goal
+                segment ONLY when responder_use_goal=True (config-gated, default
+                off). Gives the responder the user's stated intent — otherwise
+                dropped before the LLM. No-ops when the flag is off or goal_text
+                is empty, so the shipped prompt is bit-identical by default.
         Returns:
             The final system prompt string used for the LLM.
         """
@@ -425,7 +451,33 @@ class CRS_BASELINE:
         if user_id:
             user_profile_str = self.user_db.id_to_profile_str(user_id)
             system_prompt += self.role_prompt["personalization"] + '\n' + user_profile_str
+        if getattr(self, "responder_use_goal", False) and goal_text:
+            system_prompt += (
+                "\n\n[SESSION GOAL] The listener's stated goal for this session: "
+                f"{goal_text}"
+            )
         return system_prompt
+
+    def _played_tids_for(self, prior_history: list) -> list[str]:
+        """Raw played track_ids for the session-aware channels (same_artist,
+        session_cf) + the LGBM session-continuity features.
+
+        Bug #1 fix: this reuses the shared played_tids_from_context helper
+        (role in ("music","assistant") + a track_id fallback) so history_tids
+        cannot silently diverge from what those channels compute. The previous
+        inline filter checked role=="music", but both inference parsers rewrite
+        music turns to role=="assistant" (run_inference_devset.py /
+        run_inference_blindset.py) — so it always returned [] at serve, running
+        SASRec sequence + the LGBM session features history-blind in production.
+        """
+        from .retrieval_modules.session_history import played_tids_from_context
+        if self._valid_catalog is not None:
+            return played_tids_from_context(
+                {"chat_history": prior_history}, self._valid_catalog)
+        # No catalog to validate against (db lacks metadata_dict) — accept raw
+        # track_ids carried on music/assistant turns directly.
+        return [str(t["track_id"]) for t in prior_history
+                if t.get("role") in ("music", "assistant") and t.get("track_id")]
 
     def chat(self, user_query: str, user_id: Optional[str] = None) -> dict[str, Any]:
         """Run a single CRS turn: retrieve items and generate a response.
@@ -488,9 +540,13 @@ class CRS_BASELINE:
             session_memory = data['session_memory'].copy()
             session_memory.append({"role": "user", "content": user_query})
 
-            sys_prompts.append(self._get_system_prompt(user_id))
             cg = data.get('conversation_goal') or {}
             goal_text = (cg.get('listener_goal') or "").strip() or None
+            # Pass goal_text so the responder system prompt can carry the
+            # listener's stated intent (only when responder_use_goal=True; the
+            # method no-ops on the goal otherwise, so default behaviour is
+            # bit-identical).
+            sys_prompts.append(self._get_system_prompt(user_id, goal_text=goal_text))
             # bge_m3_structured needs user_profile too; pass it through so the
             # structured [USER] block renders age/country/gender. Other modes
             # ignore the kwarg.
@@ -564,11 +620,11 @@ class CRS_BASELINE:
         batch_context = []
         for data in batch_data:
             prior_history = data.get("session_memory", [])  # {role, content} dicts
-            # Source RAW played track_ids: prefer t['track_id'] (the inference
-            # parser carries it alongside the expanded-text content); fall back
-            # to content for turns that still hold a raw id (eval harness).
-            _played = [str(t.get("track_id") or t.get("content")) for t in prior_history
-                       if t.get("role") == "music" and (t.get("track_id") or t.get("content"))]
+            # Recover RAW played track_ids via the shared helper (bug #1 fix):
+            # the old inline filter checked role=="music", but the inference
+            # parsers rewrite music turns to role=="assistant" -> it returned []
+            # at serve, running SASRec + the LGBM session features history-blind.
+            _played = self._played_tids_for(prior_history)
             batch_context.append({
                 "chat_history": prior_history,
                 "current_user_query": data["user_query"],

@@ -149,10 +149,16 @@ class LGBM_RERANKER:
         # CLAP audio lookup — only when the model uses clap_session_sim (avoids
         # the embedding download for models without the feature).
         if "clap_session_sim" in self.features:
-            from ..retrieval_modules.clap_similarity import load_clap_lookup
+            from ..retrieval_modules.clap_similarity import (
+                clap_mean_vector, load_clap_lookup,
+            )
             self.clap_lookup = load_clap_lookup(cache_dir)
+            # Catalog-mean vector for imputing missing candidates (train/serve
+            # parity with build_lgbm_features). None when the lookup is empty.
+            self.clap_mean = clap_mean_vector(self.clap_lookup)
         else:
             self.clap_lookup = None
+            self.clap_mean = None
         # Lazy-load user metadata when first rerank() call arrives.
         self._user_meta: Optional[dict[str, dict]] = None
 
@@ -385,7 +391,12 @@ class LGBM_RERANKER:
                     # played tracks (shared fn -> train/serve parity).
                     from ..retrieval_modules.clap_similarity import clap_session_similarity
                     X[rank - 1, f_idx["clap_session_sim"]] = clap_session_similarity(
-                        tid, played_tids, self.clap_lookup)
+                        tid, played_tids, self.clap_lookup, mean_vec=self.clap_mean)
+                if "clap_has_vector" in f_idx and self.clap_lookup is not None:
+                    # Companion indicator (train/serve parity with the builder).
+                    from ..retrieval_modules.clap_similarity import clap_has_vector
+                    X[rank - 1, f_idx["clap_has_vector"]] = clap_has_vector(
+                        tid, self.clap_lookup)
                 if "turn_number_feat" in f_idx:
                     X[rank - 1, f_idx["turn_number_feat"]] = int(sess.get("turn_number", 0))
                 if "prior_track_count" in f_idx:
