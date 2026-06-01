@@ -1715,6 +1715,22 @@ def _train(args):
     micro_step = 0
     opt_step = 0
     best_val_loss = float("inf")
+    best_fc_ndcg = float("-inf")  # best-checkpoint selection on full-catalog nDCG@20
+
+    def _save_best(score):
+        # Save the adapter whenever full-catalog nDCG@20 improves, to output_dir/best.
+        # The deployed model is the BEST checkpoint, not the last epoch (which can
+        # overfit — this project's internal-val vs dev anti-correlation).
+        nonlocal best_fc_ndcg
+        if score is None or score <= best_fc_ndcg:
+            return
+        best_fc_ndcg = score
+        best_dir = output_dir / "best"
+        best_dir.mkdir(parents=True, exist_ok=True)
+        model.save_pretrained(str(best_dir))
+        tokenizer.save_pretrained(str(best_dir))
+        print(f"[train-bi-encoder] new BEST val_full_ndcg@20={score:.4f} -> {best_dir}",
+              file=sys.stderr)
     optimizer.zero_grad()
     # Deterministic generator for modality-dropout sampling (separate from
     # PyTorch's global RNG so dropout decisions don't perturb the data shuffle).
@@ -1849,6 +1865,7 @@ def _train(args):
                               f"(over {len(val_gold_tids)} val queries × "
                               f"{len(catalog_tids)} catalog tracks)",
                               file=sys.stderr)
+                        _save_best(fc_ndcg)
         # End-of-epoch checkpoint (warm-startable via --resume-from).
         if args.checkpoint_every_n_epochs > 0 \
                 and (epoch + 1) % args.checkpoint_every_n_epochs == 0:
@@ -1888,6 +1905,10 @@ def _train(args):
             writer.add_scalar("val/full_catalog_ndcg_at_20", final_fc, opt_step)
             print(f"[train-bi-encoder] FINAL val_full_ndcg@20={final_fc:.4f}",
                   file=sys.stderr)
+            _save_best(final_fc)
+    if best_fc_ndcg > float("-inf"):
+        print(f"[train-bi-encoder] best val_full_ndcg@20={best_fc_ndcg:.4f} "
+              f"saved at {output_dir / 'best'} (merge will prefer it)", file=sys.stderr)
     writer.close()
     # Save the adapter
     model.save_pretrained(str(output_dir))
@@ -1921,12 +1942,19 @@ def _merge_and_push(args):
     from transformers import AutoModel, AutoTokenizer
     from peft import PeftModel
 
+    # Prefer the BEST-on-full-catalog-nDCG checkpoint over the last epoch.
+    _best = Path(args.output_dir) / "best"
+    adapter_dir = str(_best) if _best.exists() else args.output_dir
+    print(f"[train-bi-encoder] merging from {adapter_dir} "
+          f"({'BEST checkpoint' if _best.exists() else 'last epoch — no best/ found'})",
+          file=sys.stderr)
+
     if args.use_multimodal:
         from mcrs.training.multimodal_bi_encoder import MultiModalBiEncoder
         print("[train-bi-encoder] MULTI-MODAL merge: loading saved model + merging LoRA",
               file=sys.stderr)
         mm_model = MultiModalBiEncoder.from_pretrained(
-            args.output_dir, backbone_override=args.base_model,
+            adapter_dir, backbone_override=args.base_model,
         )
         merged_dir = Path(args.output_dir) / "merged"
         # save_pretrained(merge_lora=True) folds LoRA into the backbone weights
@@ -1944,7 +1972,7 @@ def _merge_and_push(args):
 
     print("[train-bi-encoder] merging LoRA → base", file=sys.stderr)
     base = AutoModel.from_pretrained(args.base_model, torch_dtype=torch.bfloat16)
-    peft_model = PeftModel.from_pretrained(base, args.output_dir)
+    peft_model = PeftModel.from_pretrained(base, adapter_dir)
     merged = peft_model.merge_and_unload()
     merged_dir = Path(args.output_dir) / "merged"
     merged.save_pretrained(str(merged_dir))
