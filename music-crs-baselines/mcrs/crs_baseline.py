@@ -51,6 +51,7 @@ def build_retrieval_query(
     goal_text: Optional[str] = None,
     user_profile: Optional[dict] = None,
     max_history_turns: int = 6,
+    state: Optional[dict] = None,
 ) -> str:
     """Format the conversation history for the retriever.
 
@@ -128,12 +129,26 @@ def build_retrieval_query(
                 history_parts.append(f"A: {content}")
         history_block = " | ".join(history_parts)
         goal_block = (goal_text or "").strip()
-        return (
-            f"[USER]: age={age} country={country} gender={gender}\n"
-            f"[GOAL]: {goal_block}\n"
-            f"[HISTORY]: {history_block}\n"
-            f"[QUERY]: {last_user}"
-        )
+        blocks = [f"[USER]: age={age} country={country} gender={gender}"]
+        # [STATE] block (serve-safe StateTracker intent). Emitted ONLY when a
+        # state dict is passed (bge_m3_ft v2 path) so the v1 model's format is
+        # unchanged. Positionally stable: all 6 keys always rendered, 'unknown'
+        # when absent (same discipline as [USER]). The raw `thought` field is
+        # NEVER used (leakage: empty in Blind-A); user_state is LM-extracted at
+        # both train and serve, so no schema mismatch.
+        if state is not None:
+            st = state if isinstance(state, dict) else {}
+            _keys = ("mood", "intent", "energy", "sonic_pref", "era_pref", "familiarity")
+            state_block = " ".join(
+                f"{k}={(str(st.get(k)).strip() or 'unknown').replace('|', '/')}"
+                if st.get(k) not in (None, "") else f"{k}=unknown"
+                for k in _keys
+            )
+            blocks.append(f"[STATE]: {state_block}")
+        blocks.append(f"[GOAL]: {goal_block}")
+        blocks.append(f"[HISTORY]: {history_block}")
+        blocks.append(f"[QUERY]: {last_user}")
+        return "\n".join(blocks)
     if not last_user:
         # Fallback to raw if there's no user turn (shouldn't happen on inference).
         return "\n".join(

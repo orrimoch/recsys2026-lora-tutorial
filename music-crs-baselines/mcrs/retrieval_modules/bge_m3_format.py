@@ -86,6 +86,7 @@ def format_query_text(
     conversation_goal: Optional[dict] = None,
     max_history_turns: int = 6,
     mode: str = "raw",
+    state: Optional[dict] = None,
 ) -> str:
     """Build retriever query by delegating to production's `build_retrieval_query`.
 
@@ -137,4 +138,5 @@ def format_query_text(
         goal_text=goal_text,
         user_profile=user_profile,
         max_history_turns=max_history_turns,
+        state=state,
     )
