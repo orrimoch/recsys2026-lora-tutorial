@@ -294,13 +294,20 @@ def main():
     parser.add_argument("--pool-size", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--max-rows", type=int, default=0, help="Smoke cap; 0 = all")
-    parser.add_argument("--mining-strategy", type=str, default="percpos",
+    parser.add_argument("--mining-strategy", type=str, default="simans",
                         choices=["percpos", "simans"],
                         help="percpos: NV-Retriever filter then uniform sample "
                              "(skips queries with insufficient surviving negatives). "
                              "simans: Gaussian-weighted sample without filter "
                              "(no skip; targets moderate-difficulty negatives via "
                              "exp(-(s_i - s_pos + a)^2/b); see Zhou et al. EMNLP 2022).")
+    parser.add_argument("--exclude-global-golds", dest="exclude_global_golds",
+                        action="store_true", default=True,
+                        help="Exclude EVERY query's gold (not just the row's own) "
+                             "from every negative pool — prevents a true positive "
+                             "elsewhere being mined as a false negative. Default ON.")
+    parser.add_argument("--no-exclude-global-golds", dest="exclude_global_golds",
+                        action="store_false")
     parser.add_argument("--simans-a", type=float, default=0.1,
                         help="SimANS target offset: peak weight at s_pos - a. "
                              "Only used when --mining-strategy=simans.")
@@ -405,6 +412,15 @@ def main():
     if args.max_rows > 0:
         train_rows = train_rows[: args.max_rows]
     print(f"[hn-miner] {len(train_rows)} raw conversation→track pairs", file=sys.stderr)
+
+    # Global gold set: every track that is SOME query's gold. Excluded from every
+    # negative pool (clean negatives) so a true positive elsewhere is never mined
+    # as a false negative. None disables (v1 behaviour).
+    global_gold_ids = ({r["track_id"] for r in train_rows}
+                       if args.exclude_global_golds else None)
+    if global_gold_ids is not None:
+        print(f"[hn-miner] excluding {len(global_gold_ids)} global golds from negative pools",
+              file=sys.stderr)
 
     # Validate catalog uniqueness ONCE up-front. `mine_negatives_for_query`
     # raises on duplicates per query; doing it here turns N silent skips into
@@ -511,6 +527,7 @@ def main():
                     strategy=args.mining_strategy,
                     simans_a=args.simans_a,
                     simans_b=args.simans_b,
+                    global_gold_ids=global_gold_ids,
                 )
             except ValueError as e:
                 # Whole-batch failure (shape/validation). Falls back to per-row

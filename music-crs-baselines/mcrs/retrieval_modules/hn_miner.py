@@ -17,6 +17,7 @@ Two mining strategies are supported:
 from __future__ import annotations
 
 import random
+from typing import Optional
 
 import numpy as np
 
@@ -172,6 +173,7 @@ def batch_mine_negatives(
     simans_a: float = 0.1,
     simans_b: float = 0.05,
     use_gpu: bool = True,
+    global_gold_ids: Optional[set] = None,
 ) -> list:
     """Vectorized HN mining for a BATCH of B queries.
 
@@ -254,6 +256,10 @@ def batch_mine_negatives(
     top_idxs = top_idxs_t.cpu().numpy()
 
     tid_to_idx = {tid: i for i, tid in enumerate(track_ids)}
+    # Catalog indices that are SOME query's gold — excluded from every negative
+    # pool so a true positive elsewhere can't be mined as a false negative here.
+    global_gold_idxs = ({tid_to_idx[g] for g in global_gold_ids if g in tid_to_idx}
+                        if global_gold_ids else set())
 
     # ---- Per-row filter + sample (cheap; pool is now ~205, not 47K) -----
     results: list = []
@@ -280,7 +286,7 @@ def batch_mine_negatives(
         pool_scores_b: list[float] = []
         for k in range(top_idxs.shape[1]):
             idx = int(top_idxs[b, k])
-            if idx == gold_idx:
+            if idx == gold_idx or idx in global_gold_idxs:
                 continue
             pool.append(idx)
             pool_scores_b.append(float(top_scores[b, k]))
