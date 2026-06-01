@@ -91,6 +91,7 @@ def build_triples_for_row(
         user_profile=row.get("user_profile_raw"),
         conversation_goal=row.get("conversation_goal"),
         mode=query_mode,
+        state=row.get("user_state"),
     )
     # Filter neg track_ids once so `neg` and `neg_tids` stay index-aligned.
     kept_neg_tids = [tid for tid in neg_track_ids if tid in track_text_map]
@@ -260,6 +261,7 @@ def _iter_conversation_turns(
                         "user_profile_raw": user_profile,
                         "conversation_goal": conversation_goal,
                         "track_id": content,
+                        "turn_number": turn.get("turn_number"),
                     })
                 if pending_user_query:
                     chat_history.append({"role": "user", "content": pending_user_query})
@@ -308,6 +310,12 @@ def main():
                              "elsewhere being mined as a false negative. Default ON.")
     parser.add_argument("--no-exclude-global-golds", dest="exclude_global_golds",
                         action="store_false")
+    parser.add_argument("--state-cache-dir", type=str, default="",
+                        help="When set, load StateTracker user_state from "
+                             "{state_cache_dir}/state/{session}__{turn}.json (produced by "
+                             "scripts/precompute_train_user_state.py) and emit a [STATE] "
+                             "block in the bge_m3_structured query — serve-safe intent. "
+                             "Empty = no [STATE] (v1 format).")
     parser.add_argument("--simans-a", type=float, default=0.1,
                         help="SimANS target offset: peak weight at s_pos - a. "
                              "Only used when --mining-strategy=simans.")
@@ -422,6 +430,26 @@ def main():
         print(f"[hn-miner] excluding {len(global_gold_ids)} global golds from negative pools",
               file=sys.stderr)
 
+    # Load StateTracker user_state per turn (serve-safe [STATE] block). Attaches
+    # row["user_state"]; absent cache entries leave it None -> [STATE] all-unknown.
+    if args.state_cache_dir:
+        import json as _json
+        state_root = Path(args.state_cache_dir) / "state"
+        loaded = 0
+        for r in train_rows:
+            sid, tn = r.get("session_id"), r.get("turn_number")
+            if sid is None or tn is None:
+                continue
+            p = state_root / f"{sid}__{int(tn)}.json"
+            if p.exists():
+                try:
+                    r["user_state"] = _json.loads(p.read_text())
+                    loaded += 1
+                except Exception:
+                    pass
+        print(f"[hn-miner] loaded user_state for {loaded}/{len(train_rows)} turns "
+              f"from {state_root}", file=sys.stderr)
+
     # Validate catalog uniqueness ONCE up-front. `mine_negatives_for_query`
     # raises on duplicates per query; doing it here turns N silent skips into
     # one loud fail-fast at startup.
@@ -497,6 +525,7 @@ def main():
                     user_profile=r.get("user_profile_raw"),
                     conversation_goal=r.get("conversation_goal"),
                     mode=args.query_mode,
+                    state=r.get("user_state"),
                 )
                 for r in batch_rows
             ]
