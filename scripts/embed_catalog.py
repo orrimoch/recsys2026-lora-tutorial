@@ -63,6 +63,13 @@ def main():
         default=["track_name", "artist_name", "album_name", "tag_list", "release_date"],
         help="Catalog metadata fields to concatenate into doc text.",
     )
+    parser.add_argument(
+        "--doc-format", choices=["build_doc_text", "id_to_metadata"], default="build_doc_text",
+        help="id_to_metadata = the canonical fine-tuned-encoder format "
+             "(track_text.format_catalog_track_text): 'track_id: <id>, ct: vals, ...', "
+             "lowercased. USE THIS for FT models so the served catalog matches the "
+             "training positives (with --fields track_name artist_name album_name).",
+    )
     parser.add_argument("--catalog-dataset", default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata")
     parser.add_argument("--catalog-split", default="all_tracks")
     parser.add_argument("--batch-size", type=int, default=64)
@@ -80,11 +87,18 @@ def main():
     if args.max_tracks is not None:
         ds = ds.select(range(min(args.max_tracks, len(ds))))
 
+    if args.doc_format == "id_to_metadata":
+        sys.path.insert(0, str(BASELINES_DIR))
+        from mcrs.retrieval_modules.track_text import format_catalog_track_text
+        _render = lambda row: format_catalog_track_text(row["track_id"], {row["track_id"]: row}, args.fields)
+    else:
+        _render = lambda row: build_doc_text(row, args.fields)
+
     track_ids: list[str] = []
     doc_texts: list[str] = []
     for row in ds:
         track_ids.append(row["track_id"])
-        doc_texts.append(build_doc_text(row, args.fields))
+        doc_texts.append(_render(row))
     print(f"[embed_catalog] built {len(doc_texts)} doc texts", file=sys.stderr)
     print(f"[embed_catalog] sample doc[0]: {doc_texts[0][:200]}", file=sys.stderr)
 

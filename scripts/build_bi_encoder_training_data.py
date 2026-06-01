@@ -198,20 +198,11 @@ def _format_history_music_turn(
     behave under a missing key, except we return the bare ID instead of
     raising — the train builder shouldn't crash on one stale conv row.
     """
-    if track_id not in metadata_dict:
-        return track_id
-    md = metadata_dict[track_id]
-    parts = [f"track_id: {track_id}"]
-    for ct in corpus_types:
-        val = md.get(ct)
-        if val is None:
-            joined = ""
-        elif isinstance(val, list):
-            joined = ", ".join(str(v) for v in val)
-        else:
-            joined = str(val)
-        parts.append(f"{ct}: {joined.lower()}")
-    return ", ".join(parts)
+    # Canonical track-text (single source of truth) — see
+    # mcrs/retrieval_modules/track_text.py. Training positives + [HISTORY]
+    # expansion + the served catalog embedding all go through this one function.
+    from mcrs.retrieval_modules.track_text import format_catalog_track_text
+    return format_catalog_track_text(track_id, metadata_dict, corpus_types)
 
 
 def _iter_conversation_turns(

@@ -27,10 +27,9 @@ class MusicCatalogDB:
         self.metadata_dict = metadata_dict
 
     def id_to_metadata(self, track_id: str, use_semantic_id: bool = False):
-        metadata = self.metadata_dict[track_id]
-        track_id = metadata['track_id']
-        entity_str = f"track_id: {track_id}"
-        for corpus_type in self.corpus_types:
-            corpus_type_value = ", ".join(metadata[corpus_type]).lower()
-            entity_str += f", {corpus_type}: {corpus_type_value}"
-        return entity_str
+        # Canonical track-text (single source of truth) — see track_text.py.
+        # Keeps the served-history rendering byte-identical to the catalog
+        # embedding + the training positives, killing the train/serve format
+        # mismatch that capped bge_m3_ft.
+        from ..retrieval_modules.track_text import format_catalog_track_text
+        return format_catalog_track_text(track_id, self.metadata_dict, self.corpus_types)
