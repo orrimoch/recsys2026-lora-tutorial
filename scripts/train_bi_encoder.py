@@ -1381,11 +1381,21 @@ def _train(args):
                   f"{val_user_cf.shape[0]} val queries (user_cf={val_user_cf.shape[1]})",
                   file=sys.stderr)
         else:
-            from mcrs.retrieval_modules.bge_m3_format import format_track_text as _fmt
-            catalog_texts = [_fmt(
-                r.get("track_name", "unknown"), r.get("artist_name"),
-                r.get("album_name"), r.get("release_date"), r.get("tag_list"),
-            ) for r in tm]
+            # Parity fix: the text-only full-catalog val MUST render the catalog
+            # in the canonical id_to_metadata format — the same format as the
+            # training positives (_format_history_music_turn) and the served
+            # catalog (embed_catalog.py --doc-format id_to_metadata). Previously
+            # this used bge_m3_format.format_track_text (pipe-separated, 5-field,
+            # original-case), so the model was scored against a catalog format it
+            # never trained on: val_full_ndcg went flat/declining as the encoder
+            # specialized on the real format, and best-ckpt was biased toward the
+            # least-trained checkpoint. Mirrors the multimodal branch above.
+            from mcrs.retrieval_modules.track_text import (
+                format_catalog_track_text as _fmt,
+            )
+            _meta = {r["track_id"]: dict(r) for r in tm}
+            _corpus_types = ["track_name", "artist_name", "album_name"]
+            catalog_texts = [_fmt(tid, _meta, _corpus_types) for tid in catalog_tids]
         print(f"[train-bi-encoder] full-catalog val ENABLED: "
               f"{len(catalog_tids)} catalog tracks × {len(val_queries_text)} "
               f"val queries, every {args.val_full_catalog_every_n_steps} opt-steps "
