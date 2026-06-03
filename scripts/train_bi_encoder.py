@@ -1726,14 +1726,17 @@ def _train(args):
     opt_step = 0
     best_val_loss = float("inf")
     best_fc_ndcg = float("-inf")  # best-checkpoint selection on full-catalog nDCG@20
+    evals_since_improve = 0       # early-stopping counter (full-catalog nDCG@20)
+    stop_training = False         # set when --early-stop-patience is exceeded
 
     def _save_best(score):
         # Save the adapter whenever full-catalog nDCG@20 improves, to output_dir/best.
         # The deployed model is the BEST checkpoint, not the last epoch (which can
         # overfit — this project's internal-val vs dev anti-correlation).
+        # Returns True if this score improved on the running best (drives early stop).
         nonlocal best_fc_ndcg
         if score is None or score <= best_fc_ndcg:
-            return
+            return False
         best_fc_ndcg = score
         best_dir = output_dir / "best"
         best_dir.mkdir(parents=True, exist_ok=True)
@@ -1741,6 +1744,7 @@ def _train(args):
         tokenizer.save_pretrained(str(best_dir))
         print(f"[train-bi-encoder] new BEST val_full_ndcg@20={score:.4f} -> {best_dir}",
               file=sys.stderr)
+        return True
     optimizer.zero_grad()
     # Deterministic generator for modality-dropout sampling (separate from
     # PyTorch's global RNG so dropout decisions don't perturb the data shuffle).
@@ -1875,17 +1879,33 @@ def _train(args):
                               f"(over {len(val_gold_tids)} val queries × "
                               f"{len(catalog_tids)} catalog tracks)",
                               file=sys.stderr)
-                        _save_best(fc_ndcg)
-        # End-of-epoch checkpoint (warm-startable via --resume-from).
+                        improved = _save_best(fc_ndcg)
+                        if args.early_stop_patience > 0:
+                            if improved:
+                                evals_since_improve = 0
+                            else:
+                                evals_since_improve += 1
+                                if evals_since_improve >= args.early_stop_patience:
+                                    print(f"[train-bi-encoder] EARLY STOP at "
+                                          f"opt_step={opt_step}: full-catalog nDCG@20 "
+                                          f"not improved for {args.early_stop_patience} "
+                                          f"evals (best={best_fc_ndcg:.4f}). best/ holds "
+                                          f"the peak; proceeding to merge.", file=sys.stderr)
+                                    stop_training = True
+                                    break
+        # End-of-epoch checkpoint (warm-startable via --resume-from). Overwrites a
+        # single dir each time (does not accumulate per-epoch dirs).
         if args.checkpoint_every_n_epochs > 0 \
                 and (epoch + 1) % args.checkpoint_every_n_epochs == 0:
-            ckpt_dir = output_dir / f"checkpoint_epoch_{epoch + 1}"
+            ckpt_dir = output_dir / "checkpoint_latest"
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             model.save_pretrained(str(ckpt_dir))
             tokenizer.save_pretrained(str(ckpt_dir))
             print(f"[train-bi-encoder] checkpoint saved → {ckpt_dir} "
                   f"(use --resume-from {ckpt_dir} to continue from here)",
                   file=sys.stderr)
+        if stop_training:
+            break
     # Flush any partial accumulation at end of training.
     if micro_step % accum != 0:
         optimizer.step()
@@ -2070,6 +2090,11 @@ def main():
     p.add_argument("--lora-alpha", type=int, default=128,
                    help="LoRA alpha. Convention is 2*rank (so 128 for r=64).")
     p.add_argument("--logging-steps", type=int, default=50)
+    p.add_argument("--early-stop-patience", type=int, default=0,
+                   help="Stop after this many consecutive full-catalog val evals "
+                        "with no nDCG@20 improvement (0 = off). Needs "
+                        "--val-full-catalog-every-n-steps > 0. best/ keeps the peak "
+                        "and the merge still runs after the early break.")
     # ML-reviewer I-1: in-batch negatives for stronger contrastive signal.
     p.add_argument("--in-batch-negs", dest="in_batch_negs", action="store_true",
                    default=True,

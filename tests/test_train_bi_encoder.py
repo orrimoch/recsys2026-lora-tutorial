@@ -511,8 +511,20 @@ def test_train_loop_uses_resume_from_when_set():
     assert "resume_from" in src, "_train does not reference resume_from"
     assert "PeftModel.from_pretrained" in src, \
         "_train does not call PeftModel.from_pretrained for warm-start"
-    assert "checkpoint_epoch_" in src, \
-        "_train does not emit per-epoch checkpoints"
+    assert "checkpoint_latest" in src, \
+        "_train does not emit the overwriting checkpoint dir"
+
+
+def test_train_loop_supports_early_stopping():
+    """--early-stop-patience halts on full-catalog nDCG plateau, but the break
+    must still fall through to the merge (best/ holds the peak)."""
+    import inspect
+    from scripts import train_bi_encoder as mod
+
+    src = inspect.getsource(mod._train)
+    assert "early_stop_patience" in src, "_train does not honor early_stop_patience"
+    assert "evals_since_improve" in src, "_train missing the no-improve counter"
+    assert "stop_training" in src, "_train missing the early-stop break flag"
 
 
 def test_dataset_train_val_split_sizes_match_fraction():
