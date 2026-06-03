@@ -40,6 +40,7 @@ import argparse
 import hashlib
 import math
 import os
+import pickle
 import random
 import re
 import sys
@@ -68,6 +69,7 @@ from tqdm import tqdm  # noqa: E402
 from datasets import load_dataset, concatenate_datasets  # noqa: E402
 
 from mcrs.db_item import MusicCatalogDB  # noqa: E402
+from mcrs.crs_baseline import build_retrieval_query  # noqa: E402
 from mcrs.retrieval_modules import load_retrieval_module  # noqa: E402
 from mcrs.retrieval_modules.cf_bpr import CF_BPR  # noqa: E402
 from mcrs.retrieval_modules.rrf import RRF_MODEL  # noqa: E402
@@ -303,6 +305,7 @@ def extract_features(
     clap_lookup: dict | None = None,
     played_tids: list | None = None,
     clap_mean: "np.ndarray | None" = None,
+    with_bge: bool = False,
 ) -> list[dict]:
     """One dict per candidate — becomes one row in the parquet output."""
     if played_meta is None:
@@ -401,6 +404,14 @@ def extract_features(
         # emitted when present so legacy builds are unchanged.
         if "n_channels_hit" in c:
             row["n_channels_hit"] = int(c["n_channels_hit"])
+        # NEW bge-v2 bi-encoder features (33, 34) — only when the build opted into
+        # bge (--bge-model + --bge-cache-dir). Mirrors the ce_score/ce_rank_inv
+        # pair EXACTLY for train/serve parity: bge_cos passes through unchanged,
+        # bge_rank_inv = 1/max(1, rank). Omitted entirely when bge is off so
+        # existing parquets/models are byte-unchanged.
+        if with_bge:
+            row["bge_cos"] = float(c.get("bge_cos", 0.0))
+            row["bge_rank_inv"] = 1.0 / max(1, c.get("bge_rank", c["wrrf_rank"]))
         # CLAP audio-similarity feature: candidate's acoustic similarity to the
         # session's played tracks. Only emitted when the clap lookup + played tids
         # are supplied (i.e. the build opted into clap), so legacy builds unchanged.
@@ -428,7 +439,12 @@ def build(
     oof_fold: int = None,
     oof_num_folds: int = None,
     use_clap: bool = False,
+    bge_model: str = None,
+    bge_cache_dir: str = None,
 ) -> None:
+    # bge-v2 bi-encoder features are OFF unless BOTH flags are provided, so any
+    # existing run (no bge args) is byte-identical to before.
+    with_bge = bool(bge_model) and bool(bge_cache_dir)
     print(f"[lgbm-features] loading train split")
     tr = load_dataset("talkpl-ai/TalkPlayData-Challenge-Dataset", split="train")
     rng = random.Random(seed)
@@ -486,9 +502,36 @@ def build(
         sasrec_model_dir=sasrec_model_dir,
     )
 
+    # bge-v2 bi-encoder feature (bge_cos + bge_rank). Loaded once when enabled.
+    # The model was fine-tuned on bge_m3_structured queries, so we build a
+    # PARALLEL structured query per turn (the main `queries` are RAW) and encode
+    # against the bge catalog embeddings. cat_mat is L2-normalized so a dot
+    # product is a cosine. See nb78 C1 for the parity-locked reference.
+    bge_enc = None
+    bge_cat_mat = None
+    bge_cat_tid_to_idx: dict[str, int] = {}
+    if with_bge:
+        from sentence_transformers import SentenceTransformer  # noqa: E402
+        import torch  # noqa: E402
+        emb_path = os.path.join(bge_cache_dir, "track_embeddings.pkl")
+        print(f"[lgbm-features] bge: loading catalog pickle {emb_path}")
+        with open(emb_path, "rb") as f:
+            _obj = pickle.load(f)
+        bge_cat_tids = _obj["track_ids"]
+        bge_cat_mat = _obj["track_mat"].astype(np.float32)
+        # L2-normalize rows -> dot product is cosine (matches nb78 C1).
+        _norms = np.linalg.norm(bge_cat_mat, axis=1, keepdims=True)
+        _norms[_norms == 0] = 1.0
+        bge_cat_mat = bge_cat_mat / _norms
+        bge_cat_tid_to_idx = {t: i for i, t in enumerate(bge_cat_tids)}
+        _dev = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"[lgbm-features] bge: loading model {bge_model} on {_dev}")
+        bge_enc = SentenceTransformer(bge_model, device=_dev)
+
     # Build (query, chat_history, gold_tid, session_meta) triples per music turn.
     print(f"[lgbm-features] assembling queries")
     queries: list[str] = []
+    bge_queries: list[str] = []  # parallel bge_m3_structured queries (only when with_bge)
     metas: list[dict] = []
     golds: list[str] = []
     query_tokens_list: list[set[str]] = []
@@ -531,6 +574,23 @@ def build(
             # retrieval query — see the responder-goal follow-up.)
             retrieval_input = "\n".join(lines)
             queries.append(retrieval_input)
+            # Parallel bge_m3_structured query for the bge-v2 feature. Built here
+            # (aligned with `queries`) to match nb78 C0 EXACTLY: assistant-role
+            # remap, music-turn metadata expansion, listener_goal + user_profile,
+            # max_history_turns=6, state=None. Only when bge is enabled.
+            if with_bge:
+                sm = [
+                    {"role": ("assistant" if t["role"] == "music" else t["role"]),
+                     "content": (item_db.id_to_metadata(t["content"])
+                                 if t["role"] == "music" else t["content"])}
+                    for _, t in prior.iterrows()
+                ]
+                _goal = sess.get("conversation_goal") or {}
+                _gtx = (_goal.get("listener_goal") or "").strip()
+                _up = sess.get("user_profile") or {}
+                bge_queries.append(build_retrieval_query(
+                    sm, mode="bge_m3_structured", goal_text=_gtx,
+                    user_profile=_up, max_history_turns=6, state=None))
             metas.append({
                 "session_id": sess["session_id"],
                 "user_id": sess["user_id"],
@@ -542,6 +602,18 @@ def build(
             # Collect track_ids played BEFORE this turn (for session-continuity features).
             prior_music = df[(df["role"] == "music") & (df["turn_number"] < turn_n)]
             played_tids_list.append(list(prior_music["content"]))
+
+    # bge-v2: batch-encode all parallel structured queries once (q_mat aligned
+    # with `queries`). Per-query full-catalog cos + rank are computed inside the
+    # wRRF chunk loop (in blocks) to bound memory, then injected into candidate
+    # dicts before extract_features (same wiring as sasrec_rank).
+    bge_q_mat = None
+    if with_bge:
+        print(f"[lgbm-features] bge: encoding {len(bge_queries)} structured queries")
+        bge_q_mat = bge_enc.encode(
+            bge_queries, batch_size=64, normalize_embeddings=True,
+            convert_to_numpy=True, show_progress_bar=True,
+        ).astype(np.float32)
 
     print(f"[lgbm-features] built {len(queries)} queries; running wRRF topk={topk}")
     # Batch through wRRF in chunks. A larger CHUNK feeds more queries per union
@@ -575,6 +647,21 @@ def build(
             batch_context=chunk_context, user_ids=chunk_user_ids,
         )
         t_union += time.perf_counter() - _t0
+        # bge-v2: full-catalog sims for this chunk in one matmul (chunk_n x T).
+        # Inject bge_cos + bge_rank into each candidate dict BEFORE
+        # extract_features (mirrors how sasrec_rank rides on the candidate dict).
+        # tid not in the bge catalog -> cos 0.0, rank sentinel 10000.
+        if with_bge:
+            chunk_sims = bge_q_mat[i:i + chunk_n] @ bge_cat_mat.T  # (chunk_n, T)
+            for j, cand_list in enumerate(chunk_results):
+                sims_i = chunk_sims[j]
+                order = np.argsort(-sims_i)  # descending full-catalog ranking
+                tid_to_rank = {bge_cat_tids[idx]: r + 1
+                               for r, idx in enumerate(order)}
+                for c in cand_list:
+                    cti = bge_cat_tid_to_idx.get(c["tid"])
+                    c["bge_cos"] = float(sims_i[cti]) if cti is not None else 0.0
+                    c["bge_rank"] = tid_to_rank.get(c["tid"], 10000)
         _t0 = time.perf_counter()
         for j, cand_list in enumerate(chunk_results):
             sess_info = metas[i + j]
@@ -599,6 +686,7 @@ def build(
                 clap_lookup=clap_lookup,
                 played_tids=prior_tids,
                 clap_mean=clap_mean,
+                with_bge=with_bge,
             )
             row_buf.extend(rows)
         t_feat += time.perf_counter() - _t0
@@ -648,6 +736,15 @@ def main() -> int:
                    help="Total OOF folds (set together with --oof-fold).")
     p.add_argument("--use-clap", action="store_true",
                    help="Emit clap_session_sim (CLAP audio similarity to played tracks).")
+    # bge-v2 bi-encoder feature (bge_cos + bge_rank_inv). OFF unless BOTH set,
+    # so existing runs are byte-unchanged.
+    p.add_argument("--bge-model", type=str, default=None,
+                   help="HF repo / local path of the merged bge-v2 model "
+                        "(e.g. OrRim123/recsys2026-bge-m3-music-v2-merged). "
+                        "Enables bge_cos + bge_rank_inv when set together with --bge-cache-dir.")
+    p.add_argument("--bge-cache-dir", type=str, default=None,
+                   help="Dir containing the bge catalog pickle track_embeddings.pkl "
+                        "(the {cache}/retrieval_v2/dense_local/{safe}/{label}/ dir).")
     args = p.parse_args()
     if (args.oof_fold is None) != (args.oof_num_folds is None):
         p.error("--oof-fold and --oof-num-folds must be set together")
@@ -659,6 +756,12 @@ def main() -> int:
     # landed at music-crs-baselines/data/ instead of repo-root data/.
     args.out = os.path.abspath(args.out)
     args.cache_dir = os.path.abspath(args.cache_dir)
+    # bge requires BOTH flags; resolve the cache dir to absolute (survives the
+    # mid-run chdir into BASELINES_DIR, like --cache-dir above).
+    if (args.bge_model is None) != (args.bge_cache_dir is None):
+        p.error("--bge-model and --bge-cache-dir must be set together")
+    if args.bge_cache_dir is not None:
+        args.bge_cache_dir = os.path.abspath(args.bge_cache_dir)
 
     origin_cwd = os.getcwd()
     os.chdir(BASELINES_DIR)
@@ -669,7 +772,9 @@ def main() -> int:
               sasrec_model_dir=args.sasrec_model_dir,
               oof_fold=args.oof_fold,
               oof_num_folds=args.oof_num_folds,
-              use_clap=args.use_clap)
+              use_clap=args.use_clap,
+              bge_model=args.bge_model,
+              bge_cache_dir=args.bge_cache_dir)
     finally:
         os.chdir(origin_cwd)
     return 0

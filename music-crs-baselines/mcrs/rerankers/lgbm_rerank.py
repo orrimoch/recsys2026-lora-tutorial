@@ -284,6 +284,7 @@ class LGBM_RERANKER:
             "release_year_sin", "release_year_cos", "tag_overlap_count",
             "last_turn_moved_toward_goal", "bm25_rank_inv", "dense_meta_rank_inv",
             "dense_lyrics_rank_inv", "ce_score", "ce_rank_inv", "sasrec_rank_inv",
+            "bge_cos", "bge_rank_inv",
             "n_channels_hit", "clap_session_sim",
             "turn_number_feat", "prior_track_count", "query_drift_score",
             "pop_rank_pct", "is_warm_user",
@@ -381,6 +382,17 @@ class LGBM_RERANKER:
                 if "sasrec_rank_inv" in f_idx:
                     X[rank - 1, f_idx["sasrec_rank_inv"]] = 1.0 / max(
                         1, cand_extra.get("sasrec_rank", rank))
+                # bge-v2 bi-encoder features. Mirror ce_score/ce_rank_inv EXACTLY
+                # (train/serve parity with build_lgbm_features.extract_features):
+                # bge_cos passes through unchanged, bge_rank_inv = 1/max(1,rank).
+                # The caller passes bge_cos/bge_rank via extra_features_per_candidate;
+                # the reranker NEVER loads the bge model (live-serve wiring of the
+                # bge query encode + full-catalog rank is a separate follow-up).
+                if "bge_cos" in f_idx:
+                    X[rank - 1, f_idx["bge_cos"]] = float(cand_extra.get("bge_cos", 0.0))
+                if "bge_rank_inv" in f_idx:
+                    X[rank - 1, f_idx["bge_rank_inv"]] = 1.0 / max(
+                        1, cand_extra.get("bge_rank", rank))
                 if "n_channels_hit" in f_idx:
                     # How many union channels surfaced this candidate. Default 1
                     # (a surfaced candidate was hit by >=1 channel).
