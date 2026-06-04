@@ -58,6 +58,11 @@ through a real shared attribute (e.g. "like [earlier track]'s warm guitar, this 
 from qualities they rejected. Only do this when the connection is genuine — never invent a past
 preference, and skip it entirely if there is no relevant history.
 
+Cold start: if there is no prior history to build on, personalize from the user's current request and
+stated goal — their mood, activity, and the qualities they just named — and ground the pick in the
+track's real attributes. Do not fabricate past taste, and never fall back to a generic "here are some
+songs you might like" line.
+
 To score well you MUST do BOTH:
 - PERSONALIZATION: tie the pick to something THIS user actually said AND to their current vibe (intent,
   mood, activity, taste). Reference it concretely; never be generic, and never present guesses about the

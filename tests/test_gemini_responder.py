@@ -101,6 +101,13 @@ def test_build_prompt_has_continuity_directive():
     assert "earlier" in low and "liked" in low  # references prior liked tracks
 
 
+def test_build_prompt_has_cold_start_directive():
+    p = gr.build_prompt(context="user: play me something", tracks_str="X by Y", listener_goal="")
+    low = p.lower()
+    # cold-start path: lean on the current request + goal, don't fabricate history
+    assert "no prior history" in low and ("current request" in low or "stated goal" in low)
+
+
 def test_render_context_excludes_target_turn_assistant_reply(item_db_meta):
     convs = [
         {"turn_number": 1, "role": "user", "content": "hello"},
