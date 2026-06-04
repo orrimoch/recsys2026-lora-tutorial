@@ -114,10 +114,27 @@ def format_tracks(tids, item_db_meta, n=1):
     return "; ".join(out) if out else "(none)"
 
 
+# Few-shot style references. Diverse scenarios (refinement, discovery) that each
+# model the target pattern: answer the latest message, lead with ONE best-fit
+# track, tie it to what the user said, cite a concrete attribute, natural tone.
+# Labeled "do not reuse" so the model copies the STYLE, not these example tracks.
+FEW_SHOT_EXAMPLES = """=== EXAMPLES (style reference only — do not reuse these tracks) ===
+[user]: just finished a long run, want to cool down
+[recommended]: Weightless by Marconi Union
+[user]: nice but too ambient — something with a gentle beat and vocals
+[tracks]: Saturn by Sleeping at Last [ambient pop, strings, calm, vocals]
+[reply]: Then let's keep it calm but add a pulse — Saturn by Sleeping at Last is ambient pop, so you still get that mellow, string-laden wind-down but with real vocals and a gentle beat instead of pure atmosphere.
+
+[user]: I love early Daft Punk, anything similar but newer?
+[tracks]: Midnight City by M83 [synthpop, anthemic, 2010s, electronic]
+[reply]: If it's that euphoric, synth-driven build you love in early Daft Punk, try Midnight City by M83 — same anthemic electronic rush, just from the 2010s. Different act, same goosebumps."""
+
+
 def build_prompt(context, tracks_str, listener_goal):
-    """Assemble the responder prompt from the rubric instructions, the
-    conversation, the recommended tracks, and (optionally) the listener goal."""
-    parts = [RESPONDER_INSTRUCTIONS, "", "=== CONVERSATION ===", context]
+    """Assemble the responder prompt from the rubric instructions, few-shot style
+    examples, the conversation, the recommended tracks, and (optionally) the goal."""
+    parts = [RESPONDER_INSTRUCTIONS, "", FEW_SHOT_EXAMPLES,
+             "", "=== CONVERSATION ===", context]
     if listener_goal:
         parts += ["", f"Listener goal: {listener_goal}"]
     parts += ["", "=== RECOMMENDED TRACK(S) TO PRESENT ===", tracks_str,

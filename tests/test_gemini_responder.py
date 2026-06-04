@@ -124,6 +124,15 @@ def test_build_prompt_contains_context_tracks_and_goal():
     assert "discover new jazz artists" in p
 
 
+def test_build_prompt_includes_few_shot_examples():
+    p = gr.build_prompt(context="user: play jazz", tracks_str="Song A by Artist A",
+                        listener_goal="")
+    # few-shot style reference must be present, and labeled so the model treats
+    # the example tracks as illustrations (not tracks to reuse).
+    assert "EXAMPLES" in p
+    assert "do not reuse" in p.lower()
+
+
 def test_build_prompt_omits_goal_line_when_absent():
     p = gr.build_prompt(context="user: play jazz",
                         tracks_str="Song A by Artist A",
