@@ -133,11 +133,23 @@ def main():
                   f"=== RECOMMENDED TRACKS ===\n{recs}\n\n"
                   f"=== ASSISTANT REPLY TO JUDGE ===\n{p['predicted_response']}\n\n"
                   f"Return only the JSON.")
-        try:
-            resp = model.generate_content(prompt)
-            sc = parse_score(resp.text)
-        except Exception as e:
-            print(f"  row {i}: API error {e!r}"); sc = None
+        sc = None
+        for attempt in range(6):
+            try:
+                resp = model.generate_content(prompt)
+                sc = parse_score(resp.text)
+                break
+            except Exception as e:
+                es = str(e)
+                rate_limited = ("429" in es or "ResourceExhausted" in es
+                                or "quota" in es.lower() or "exhausted" in es.lower())
+                if rate_limited and attempt < 5:
+                    m = re.search(r"retry in ([\d.]+)s", es)
+                    wait = (float(m.group(1)) + 1.0) if m else min(60.0, 5.0 * (attempt + 1))
+                    print(f"  row {i}: rate-limited, waiting {wait:.0f}s (attempt {attempt+1}/6)")
+                    time.sleep(wait)
+                else:
+                    print(f"  row {i}: API error {e!r}"); break
         if sc:
             pp, ee = sc
             p_sum += pp; e_sum += ee; n_ok += 1
