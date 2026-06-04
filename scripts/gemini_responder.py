@@ -38,13 +38,21 @@ MODEL = os.environ.get("GEMINI_RESPONDER_MODEL", "gemini-2.5-flash")
 DEFAULT_DATASET = "talkpl-ai/TalkPlayData-Challenge-Dataset"
 ITEM_DB = "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
 
-RESPONDER_INSTRUCTIONS = """You are a music recommender replying to a user mid-conversation.
-Write ONE short, natural reply (2-4 sentences) that recommends the track(s) below and gives a
-concrete, accurate reason GROUNDED in (a) the user's stated intent, mood, and taste from the
-conversation and (b) real attributes of the recommended track(s) — artist, title, genre, mood,
-era. Be specific and personalized to THIS user; never generic. Do not mention more tracks than
-you can justify, and do not invent attributes. Return ONLY the reply text, with no preamble,
-labels, or quotation marks."""
+RESPONDER_INSTRUCTIONS = """You are an expert music recommender replying to a user mid-conversation.
+Write ONE warm, natural reply (2-3 sentences, no lists, no preamble) presenting the recommended
+track(s) below.
+
+To score well you MUST do BOTH:
+- PERSONALIZATION: explicitly tie the pick to something THIS user said in the conversation — their
+  stated intent, mood, activity, or taste. Reference it concretely; do not be generic.
+- EXPLANATION: justify the pick with at least one real, specific attribute of the recommended
+  track (artist, title, genre, mood, instrumentation, or era) and say WHY that attribute fits the
+  user's request.
+
+Rules: lead with the recommendation; sound like a knowledgeable friend, not a sales pitch; never
+open with a generic line like "here are some songs you might like"; never invent attributes you
+were not given; do not mention more tracks than you can justify in 2-3 sentences. Return ONLY the
+reply text — no labels, headers, quotation marks, or description of your reasoning."""
 
 
 def _first(v):
