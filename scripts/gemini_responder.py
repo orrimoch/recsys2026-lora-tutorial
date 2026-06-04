@@ -114,20 +114,25 @@ def format_tracks(tids, item_db_meta, n=1):
     return "; ".join(out) if out else "(none)"
 
 
-# Few-shot style references. Diverse scenarios (refinement, discovery) that each
-# model the target pattern: answer the latest message, lead with ONE best-fit
-# track, tie it to what the user said, cite a concrete attribute, natural tone.
-# Labeled "do not reuse" so the model copies the STYLE, not these example tracks.
+# Few-shot style references. REAL tracks + REAL user requests curated from the
+# TalkPlayData train set's high-GPA turns (the dataset gold is noisy/often
+# misaligned, so these were hand-verified for alignment and trimmed of generic
+# filler openers). Each models the target pattern: answer the latest message,
+# lead with ONE best-fit track, tie it to what the user said, cite a concrete
+# attribute, natural tone. Labeled "do not reuse" so the model copies STYLE,
+# not these example tracks.
 FEW_SHOT_EXAMPLES = """=== EXAMPLES (style reference only — do not reuse these tracks) ===
-[user]: just finished a long run, want to cool down
-[recommended]: Weightless by Marconi Union
-[user]: nice but too ambient — something with a gentle beat and vocals
-[tracks]: Saturn by Sleeping at Last [ambient pop, strings, calm, vocals]
-[reply]: Then let's keep it calm but add a pulse — Saturn by Sleeping at Last is ambient pop, so you still get that mellow, string-laden wind-down but with real vocals and a gentle beat instead of pure atmosphere.
+[user]: I love 'With A Little Help From My Friends' — that collaborative, Sgt. Pepper's-era feel. Could you suggest another Beatles track from around 1967, something that showcases their more psychedelic, artistic side?
+[tracks]: Strawberry Fields Forever - Remastered by The Beatles
+[reply]: For that 1967 psychedelic side, go straight to "Strawberry Fields Forever" — it's the Beatles at their most experimental and dreamlike, all layered, surreal textures, but still rooted in the melodic pop-rock you love from that era.
 
-[user]: I love early Daft Punk, anything similar but newer?
-[tracks]: Midnight City by M83 [synthpop, anthemic, 2010s, electronic]
-[reply]: If it's that euphoric, synth-driven build you love in early Daft Punk, try Midnight City by M83 — same anthemic electronic rush, just from the 2010s. Different act, same goosebumps."""
+[user]: This is exactly what I wanted — a beautiful, piano-focused jazz track. Got any more like it?
+[tracks]: Lucky To Be Me by Bill Evans
+[reply]: Then you'll love "Lucky To Be Me" by Bill Evans — it's classic piano-led jazz, sparse and introspective, the kind of delicate, melodic playing that rewards close listening.
+
+[user]: "Dog Days Are Over" is exactly the vivid, dramatic storytelling I was hoping for — that emotional intensity is perfect. More like this?
+[tracks]: Cosmic Love by Florence + The Machine
+[reply]: Stay with Florence + The Machine and try "Cosmic Love" — just as epic and dramatic, built on Florence's soaring vocals and a surging, cathartic swell that matches the emotional intensity you're after."""
 
 
 def build_prompt(context, tracks_str, listener_goal):
