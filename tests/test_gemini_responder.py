@@ -188,6 +188,49 @@ def test_generate_response_retries_then_succeeds_on_rate_limit():
     assert model.calls == 3
 
 
+def test_build_structured_prompt_asks_for_json_axes_and_reply():
+    p = gr.build_structured_prompt(context="user: play jazz",
+                                   tracks_str="Song A by Artist A [jazz]",
+                                   listener_goal="discover new jazz")
+    assert "user: play jazz" in p
+    assert "Song A by Artist A [jazz]" in p
+    assert "discover new jazz" in p
+    assert '"reply"' in p          # the field we extract
+    assert '"user_state"' in p     # the personalization axes block
+    assert "mood" in p
+
+
+def test_parse_structured_reply_extracts_reply_field():
+    raw = '{"user_state": {"mood": "chill"}, "fit": "x", "reply": "Try this mellow track."}'
+    assert gr.parse_structured_reply(raw) == "Try this mellow track."
+
+
+def test_parse_structured_reply_handles_code_fence_and_whitespace():
+    raw = '```json\n{"reply": "  Here you go.  "}\n```'
+    assert gr.parse_structured_reply(raw) == "Here you go."
+
+
+def test_parse_structured_reply_returns_none_on_garbage_or_missing_key():
+    assert gr.parse_structured_reply("not json at all") is None
+    assert gr.parse_structured_reply('{"no_reply_key": 1}') is None
+    assert gr.parse_structured_reply("") is None
+
+
+def test_generate_response_structured_success_extracts_reply():
+    model = FakeModel(['{"user_state": {"mood":"hype"}, "reply": "Crank this one."}'])
+    out = gr.generate_response(model, "prompt", fallback="ORIG",
+                               parse_fn=gr.parse_structured_reply)
+    assert out == "Crank this one."
+
+
+def test_generate_response_structured_parse_failure_falls_back():
+    # model ignored the JSON instruction -> we must NOT submit raw text; fall back.
+    model = FakeModel(["totally not json"])
+    out = gr.generate_response(model, "prompt", fallback="ORIG",
+                               parse_fn=gr.parse_structured_reply)
+    assert out == "ORIG"
+
+
 def test_generate_response_falls_back_when_resp_text_raises():
     # google.generativeai raises (not returns None) on a blocked/empty
     # candidate when you access resp.text. That is non-retryable -> fallback.

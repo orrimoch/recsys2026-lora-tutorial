@@ -119,6 +119,66 @@ def build_prompt(context, tracks_str, listener_goal):
     return "\n".join(parts)
 
 
+STRUCTURED_INSTRUCTIONS = """You are an expert music recommender. FIRST analyze the user, THEN reply.
+
+Return ONLY a JSON object with exactly these keys:
+{
+  "user_state": {"mood": "...", "intent": "...", "energy": "...", "sonic_pref": "...",
+                 "era_pref": "...", "familiarity": "..."},
+  "fit": "...",
+  "reply": "..."
+}
+
+- user_state: infer each axis from the conversation; use "unknown" for any axis the user did not signal.
+- fit: for each axis that matters, name the concrete attribute of the recommended track(s) that satisfies it.
+- reply: the final message to send the user. It MUST be 2-3 natural sentences (no lists, no preamble,
+  and it must NOT mention these JSON keys or your analysis); tie the pick to something THIS user said
+  (mood/intent/taste); cite at least one real attribute of the recommended track and why it fits; never
+  be generic; never invent attributes you were not given.
+
+Output ONLY the JSON object."""
+
+
+def build_structured_prompt(context, tracks_str, listener_goal):
+    """CoT-style prompt: the model fills personalization axes + a per-axis track
+    'fit' (hidden scaffolding) before writing the final `reply`. Only `reply` is
+    submitted (see parse_structured_reply)."""
+    parts = [STRUCTURED_INSTRUCTIONS, "", "=== CONVERSATION ===", context]
+    if listener_goal:
+        parts += ["", f"Listener goal: {listener_goal}"]
+    parts += ["", "=== RECOMMENDED TRACK(S) TO PRESENT ===", tracks_str, "", "JSON:"]
+    return "\n".join(parts)
+
+
+def parse_structured_reply(text):
+    """Extract the `reply` string from the model's JSON output. Returns None if
+    it can't be parsed or `reply` is missing/empty — the caller then falls back
+    (we never submit raw JSON as the response)."""
+    if not text:
+        return None
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if not m:
+        return None
+    blob = m.group(0)
+    try:
+        d = json.loads(blob)
+        reply = d.get("reply") if isinstance(d, dict) else None
+        if isinstance(reply, str) and reply.strip():
+            return reply.strip()
+        return None
+    except Exception:
+        # Tolerate trailing junk / minor malformation: grab the reply value directly.
+        rm = re.search(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', blob, re.DOTALL)
+        if not rm:
+            return None
+        try:
+            val = json.loads('"' + rm.group(1) + '"')
+        except Exception:
+            val = rm.group(1)
+        val = val.strip()
+        return val or None
+
+
 def build_output_row(pred_row, new_response):
     """Submission row: preserve identity + predicted_track_ids, replace
     predicted_response. Drops any extra fields so the output matches the
@@ -139,15 +199,20 @@ def _is_rate_limited(err_str):
 
 
 def generate_response(model, prompt, fallback, max_attempts=6,
-                      sleep_fn=time.sleep):
+                      sleep_fn=time.sleep, parse_fn=None):
     """Call Gemini with retry/backoff on rate limits. Returns the stripped
     reply text, or `fallback` (the row's original response) if every attempt
     fails — we never drop a row's response. A blocked/empty candidate (whose
-    `.text` accessor raises) is non-retryable and falls back."""
+    `.text` accessor raises) is non-retryable and falls back.
+
+    `parse_fn` (used by --structured) post-processes the raw model text into the
+    final reply; if it returns a falsy value (e.g. unparseable JSON) we fall back
+    rather than submit the raw text."""
     for attempt in range(max_attempts):
         try:
             resp = model.generate_content(prompt)
-            text = (resp.text or "").strip()
+            raw = resp.text or ""
+            text = parse_fn(raw) if parse_fn else raw.strip()
             return text if text else fallback
         except Exception as e:  # noqa: BLE001 — API raises a variety of types
             es = str(e)
@@ -186,6 +251,10 @@ def main():
     ap.add_argument("--top-n", type=int, default=1, help="how many reranked tracks the responder sees")
     ap.add_argument("--limit", type=int, default=0, help="cap rows (0 = all)")
     ap.add_argument("--sleep", type=float, default=0.2, help="seconds between API calls")
+    ap.add_argument("--structured-personality", action="store_true",
+                    help="structured_personality (CoT) mode: the model fills personalization axes "
+                         "(mood/intent/energy/sonic_pref/era_pref/familiarity) + a per-axis track "
+                         "'fit' before writing; only the JSON `reply` is submitted")
     args = ap.parse_args()
 
     if args.top_n < 1:
@@ -201,7 +270,9 @@ def main():
     preds = json.load(open(args.pred))
     if args.limit:
         preds = preds[: args.limit]
-    print(f"[responder] {len(preds)} rows from {args.pred} via {MODEL} (top_n={args.top_n})")
+    mode = "structured_personality" if args.structured_personality else "plain"
+    print(f"[responder] {len(preds)} rows from {args.pred} via {MODEL} "
+          f"(top_n={args.top_n}, mode={mode})")
 
     ds = load_dataset(args.dataset, split="test")
     sess_by_id = {s["session_id"]: s for s in ds}
@@ -221,8 +292,13 @@ def main():
                 ctx = render_context(sess["conversations"], item_db_meta, p["turn_number"])
                 tracks = format_tracks(p.get("predicted_track_ids"), item_db_meta, n=args.top_n)
                 goal = ((sess.get("conversation_goal") or {}).get("listener_goal") or "").strip()
-                prompt = build_prompt(ctx, tracks, goal)
-                new_resp = generate_response(model, prompt, fallback)
+                if args.structured_personality:
+                    prompt = build_structured_prompt(ctx, tracks, goal)
+                    new_resp = generate_response(model, prompt, fallback,
+                                                 parse_fn=parse_structured_reply)
+                else:
+                    prompt = build_prompt(ctx, tracks, goal)
+                    new_resp = generate_response(model, prompt, fallback)
         except Exception as e:  # noqa: BLE001 — never let one row kill the run
             print(f"  row {i} ({p.get('session_id')}): error, keeping original response: {e!r}")
             new_resp = fallback
