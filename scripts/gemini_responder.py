@@ -35,6 +35,10 @@ import time
 import pandas as pd
 
 MODEL = os.environ.get("GEMINI_RESPONDER_MODEL", "gemini-2.5-flash")
+# best-of-N judge: cheaper/faster model scores candidates (generate with the
+# strong responder model, judge with this one to keep cost down).
+JUDGE_MODEL = os.environ.get("GEMINI_JUDGE_MODEL", "gemini-2.5-flash")
+DEFAULT_TEMPS = (0.5, 0.8, 1.0)  # cycled across best-of-N candidates for diversity
 DEFAULT_DATASET = "talkpl-ai/TalkPlayData-Challenge-Dataset"
 ITEM_DB = "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
 
@@ -265,22 +269,15 @@ def _is_rate_limited(err_str):
             or "quota" in es or "exhausted" in es)
 
 
-def generate_response(model, prompt, fallback, max_attempts=6,
-                      sleep_fn=time.sleep, parse_fn=None):
-    """Call Gemini with retry/backoff on rate limits. Returns the stripped
-    reply text, or `fallback` (the row's original response) if every attempt
-    fails — we never drop a row's response. A blocked/empty candidate (whose
-    `.text` accessor raises) is non-retryable and falls back.
-
-    `parse_fn` (used by --structured) post-processes the raw model text into the
-    final reply; if it returns a falsy value (e.g. unparseable JSON) we fall back
-    rather than submit the raw text."""
+def _call_model(model, prompt, sleep_fn=time.sleep, max_attempts=6, gen_config=None):
+    """Raw Gemini call with retry/backoff on rate limits. Returns the raw text,
+    or None if every attempt fails (rate-limit exhausted, API error, or a
+    blocked/empty candidate whose `.text` accessor raises)."""
     for attempt in range(max_attempts):
         try:
-            resp = model.generate_content(prompt)
-            raw = resp.text or ""
-            text = parse_fn(raw) if parse_fn else raw.strip()
-            return text if text else fallback
+            kw = {"generation_config": gen_config} if gen_config else {}
+            resp = model.generate_content(prompt, **kw)
+            return resp.text or ""
         except Exception as e:  # noqa: BLE001 — API raises a variety of types
             es = str(e)
             if _is_rate_limited(es) and attempt < max_attempts - 1:
@@ -289,9 +286,90 @@ def generate_response(model, prompt, fallback, max_attempts=6,
                 print(f"  rate-limited, waiting {wait:.0f}s (attempt {attempt+1}/{max_attempts})")
                 sleep_fn(wait)
             else:
-                print(f"  API error, keeping original response: {e!r}")
-                return fallback
-    return fallback
+                print(f"  API error: {e!r}")
+                return None
+    return None
+
+
+def generate_response(model, prompt, fallback, max_attempts=6,
+                      sleep_fn=time.sleep, parse_fn=None):
+    """Single-shot reply. Returns the stripped reply text, or `fallback` (the
+    row's original response) if the call fails or yields empty/unparseable text
+    — we never drop a row's response.
+
+    `parse_fn` (used by --structured-personality) post-processes the raw text;
+    if it returns a falsy value we fall back rather than submit raw text."""
+    raw = _call_model(model, prompt, sleep_fn=sleep_fn, max_attempts=max_attempts)
+    if raw is None:
+        return fallback
+    text = parse_fn(raw) if parse_fn else raw.strip()
+    return text if text else fallback
+
+
+JUDGE_INSTRUCTIONS = """Score a music recommender's reply to a user on TWO axes, 0-5 each.
+PERSONALIZATION: does the reply reflect THIS user's stated intent, mood, and taste? 5 = clearly tailored to them; 0 = generic.
+EXPLANATION_QUALITY: does it give a concrete, accurate reason citing real attributes of the recommended track? 5 = specific and grounded; 0 = vague or hallucinated.
+Return ONLY a JSON object: {"personalization": <0-5>, "explanation_quality": <0-5>}"""
+
+
+def build_judge_prompt(context, tracks_str, reply):
+    """Prompt the judge model to score one candidate reply on the two axes."""
+    return (f"{JUDGE_INSTRUCTIONS}\n\n=== CONVERSATION ===\n{context}\n\n"
+            f"=== RECOMMENDED TRACKS ===\n{tracks_str}\n\n"
+            f"=== REPLY TO SCORE ===\n{reply}\n\nReturn only the JSON.")
+
+
+def parse_judge_score(text):
+    """Sum of personalization + explanation_quality from the judge JSON; None if
+    unparseable or an axis is missing (so unscored candidates rank last)."""
+    if not text:
+        return None
+    m = re.search(r"\{[^{}]*\}", text, re.DOTALL)
+    if not m:
+        return None
+    try:
+        d = json.loads(m.group(0))
+        return float(d["personalization"]) + float(d["explanation_quality"])
+    except Exception:
+        return None
+
+
+def pick_best(scored):
+    """`scored`: list of (reply, score|None). Return the reply with the highest
+    score; if no candidate was scored, return the first reply; [] -> None."""
+    if not scored:
+        return None
+    real = [(r, s) for r, s in scored if s is not None]
+    if real:
+        return max(real, key=lambda rs: rs[1])[0]
+    return scored[0][0]
+
+
+def generate_best_of_n(gen_model, judge_model, prompt, judge_context, tracks_str,
+                       fallback, n, temperatures, sleep_fn=time.sleep, parse_fn=None):
+    """Generate n candidate replies (varied temperature), score each with the
+    judge model on the rubric, and return the highest-scoring. Falls back to the
+    row's original response if no candidate is produced."""
+    cands = []
+    for i in range(max(1, n)):
+        t = temperatures[i % len(temperatures)]
+        raw = _call_model(gen_model, prompt, sleep_fn=sleep_fn,
+                          gen_config={"temperature": t})
+        if raw is None:
+            continue
+        reply = parse_fn(raw) if parse_fn else raw.strip()
+        if reply:
+            cands.append(reply)
+    if not cands:
+        return fallback
+    if len(cands) == 1:
+        return cands[0]
+    scored = []
+    for r in cands:
+        jraw = _call_model(judge_model, build_judge_prompt(judge_context, tracks_str, r),
+                          sleep_fn=sleep_fn)
+        scored.append((r, parse_judge_score(jraw)))
+    return pick_best(scored)
 
 
 def _load_item_meta():
@@ -322,10 +400,17 @@ def main():
                     help="structured_personality (CoT) mode: the model fills personalization axes "
                          "(mood/intent/energy/sonic_pref/era_pref/familiarity) + a per-axis track "
                          "'fit' before writing; only the JSON `reply` is submitted")
+    ap.add_argument("--best-of", type=int, default=1,
+                    help="best-of-N: generate N replies (varied temperature), score each with the "
+                         "judge model, submit the highest-scoring (1 = single shot, default)")
+    ap.add_argument("--judge-model", default=JUDGE_MODEL,
+                    help="model that scores best-of-N candidates (default: cheap flash)")
     args = ap.parse_args()
 
     if args.top_n < 1:
         sys.exit("ERROR: --top-n must be >= 1 (the responder needs at least one track to explain).")
+    if args.best_of < 1:
+        sys.exit("ERROR: --best-of must be >= 1.")
     key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not key:
         sys.exit("ERROR: set GEMINI_API_KEY (Colab secret) before running.")
@@ -333,13 +418,15 @@ def main():
     from datasets import load_dataset
     genai.configure(api_key=key)
     model = genai.GenerativeModel(MODEL)
+    judge_model = genai.GenerativeModel(args.judge_model) if args.best_of > 1 else None
 
     preds = json.load(open(args.pred))
     if args.limit:
         preds = preds[: args.limit]
     mode = "structured_personality" if args.structured_personality else "plain"
+    bo = f", best_of={args.best_of} (judge={args.judge_model})" if args.best_of > 1 else ""
     print(f"[responder] {len(preds)} rows from {args.pred} via {MODEL} "
-          f"(top_n={args.top_n}, mode={mode})")
+          f"(top_n={args.top_n}, mode={mode}{bo})")
 
     ds = load_dataset(args.dataset, split="test")
     sess_by_id = {s["session_id"]: s for s in ds}
@@ -361,11 +448,17 @@ def main():
                 goal = ((sess.get("conversation_goal") or {}).get("listener_goal") or "").strip()
                 if args.structured_personality:
                     prompt = build_structured_prompt(ctx, tracks, goal)
-                    new_resp = generate_response(model, prompt, fallback,
-                                                 parse_fn=parse_structured_reply)
+                    parse_fn = parse_structured_reply
                 else:
                     prompt = build_prompt(ctx, tracks, goal)
-                    new_resp = generate_response(model, prompt, fallback)
+                    parse_fn = None
+                if args.best_of > 1:
+                    new_resp = generate_best_of_n(model, judge_model, prompt, ctx, tracks,
+                                                  fallback, n=args.best_of,
+                                                  temperatures=list(DEFAULT_TEMPS),
+                                                  parse_fn=parse_fn)
+                else:
+                    new_resp = generate_response(model, prompt, fallback, parse_fn=parse_fn)
         except Exception as e:  # noqa: BLE001 — never let one row kill the run
             print(f"  row {i} ({p.get('session_id')}): error, keeping original response: {e!r}")
             new_resp = fallback

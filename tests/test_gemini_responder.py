@@ -61,7 +61,7 @@ class FakeModel:
         self.behaviors = list(behaviors)
         self.calls = 0
 
-    def generate_content(self, prompt):
+    def generate_content(self, prompt, **kwargs):  # accepts generation_config etc.
         b = self.behaviors[min(self.calls, len(self.behaviors) - 1)]
         self.calls += 1
         if isinstance(b, Exception):
@@ -286,6 +286,47 @@ def test_generate_response_structured_parse_failure_falls_back():
     model = FakeModel(["totally not json"])
     out = gr.generate_response(model, "prompt", fallback="ORIG",
                                parse_fn=gr.parse_structured_reply)
+    assert out == "ORIG"
+
+
+# --- best-of-N self-judged --------------------------------------------------
+
+def test_parse_judge_score_sums_axes_or_none():
+    assert gr.parse_judge_score('{"personalization": 4, "explanation_quality": 3}') == 7.0
+    assert gr.parse_judge_score('{"personalization": 4}') is None  # missing axis
+    assert gr.parse_judge_score("garbage") is None
+    assert gr.parse_judge_score("") is None
+
+
+def test_build_judge_prompt_contains_reply_and_rubric():
+    p = gr.build_judge_prompt("ctx", "Song A by Artist A", "my reply text")
+    assert "my reply text" in p
+    assert "personalization" in p.lower() and "explanation" in p.lower()
+
+
+def test_pick_best_prefers_highest_score_and_handles_all_none():
+    assert gr.pick_best([("a", 3.0), ("b", 7.0), ("c", 1.0)]) == "b"
+    assert gr.pick_best([("a", None), ("b", None)]) == "a"  # no scores -> first
+    assert gr.pick_best([]) is None
+
+
+def test_generate_best_of_n_picks_highest_scored_candidate():
+    gen = FakeModel(["weak reply", "strong reply"])
+    judge = FakeModel(['{"personalization": 2, "explanation_quality": 2}',
+                       '{"personalization": 5, "explanation_quality": 4}'])
+    out = gr.generate_best_of_n(gen, judge, "prompt", "ctx", "tracks",
+                                fallback="ORIG", n=2, temperatures=[0.5, 1.0],
+                                sleep_fn=lambda *_: None)
+    assert out == "strong reply"
+    assert gen.calls == 2 and judge.calls == 2
+
+
+def test_generate_best_of_n_falls_back_when_all_generation_fails():
+    gen = FakeModel([RuntimeError("boom")])
+    judge = FakeModel(['{"personalization": 5, "explanation_quality": 5}'])
+    out = gr.generate_best_of_n(gen, judge, "prompt", "ctx", "tracks",
+                                fallback="ORIG", n=3, temperatures=[0.5],
+                                sleep_fn=lambda *_: None)
     assert out == "ORIG"
 
 
