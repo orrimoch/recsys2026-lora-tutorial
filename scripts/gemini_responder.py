@@ -130,11 +130,18 @@ Return ONLY a JSON object with exactly these keys:
 }
 
 - user_state: infer each axis from the conversation; use "unknown" for any axis the user did not signal.
+  This is PRIVATE reasoning to guide the reply — it is never shown to the user.
 - fit: for each axis that matters, name the concrete attribute of the recommended track(s) that satisfies it.
-- reply: the final message to send the user. It MUST be 2-3 natural sentences (no lists, no preamble,
-  and it must NOT mention these JSON keys or your analysis); tie the pick to something THIS user said
-  (mood/intent/taste); cite at least one real attribute of the recommended track and why it fits; never
-  be generic; never invent attributes you were not given.
+- reply: the final message to send the user. It MUST:
+    * directly answer the user's MOST RECENT message and what they actually asked for — the reply has to
+      read as an on-point response to that request, not a description of your analysis;
+    * ground personalization ONLY in preferences the user explicitly stated in the conversation; do NOT
+      present inferred guesses about their mood/taste as if they were facts the user told you;
+    * cite ONLY attributes that appear in the RECOMMENDED TRACK(S) block; if an attribute is not listed
+      there, do not mention it and do not invent it;
+    * be 2-3 natural sentences, no lists, no preamble, and must NOT mention these JSON keys or your analysis;
+    * never be generic and never over-claim — if you are unsure of something, leave it out rather than
+      guess, so nothing in the reply sounds made up.
 
 Output ONLY the JSON object."""
 
