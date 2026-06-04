@@ -216,6 +216,28 @@ def test_parse_structured_reply_returns_none_on_garbage_or_missing_key():
     assert gr.parse_structured_reply("") is None
 
 
+def test_parse_structured_reply_recovers_from_trailing_junk_after_object():
+    # greedy {.*} over-grabs -> json.loads fails -> regex fallback recovers reply.
+    raw = '{"user_state": {"mood": "hi"}, "reply": "Spin this."} <-- note, not json'
+    assert gr.parse_structured_reply(raw) == "Spin this."
+
+
+def test_parse_structured_reply_does_not_leak_analysis():
+    # core safety property: only `reply` may surface, never user_state/fit.
+    raw = ('{"user_state": {"mood": "SECRET_MOOD"}, "fit": "SECRET_FIT", '
+           '"reply": "Enjoy this mellow pick."}')
+    out = gr.parse_structured_reply(raw)
+    assert out == "Enjoy this mellow pick."
+    assert "SECRET_MOOD" not in out and "SECRET_FIT" not in out
+
+
+def test_parse_structured_reply_prefers_outer_reply_when_malformed_and_nested():
+    # malformed (so the regex-fallback path runs) AND a nested decoy `reply`:
+    # must return the real top-level reply, not the nested one.
+    raw = '{"user_state": {"reply": "WRONG"}, "reply": "RIGHT", bad,}'
+    assert gr.parse_structured_reply(raw) == "RIGHT"
+
+
 def test_generate_response_structured_success_extracts_reply():
     model = FakeModel(['{"user_state": {"mood":"hype"}, "reply": "Crank this one."}'])
     out = gr.generate_response(model, "prompt", fallback="ORIG",

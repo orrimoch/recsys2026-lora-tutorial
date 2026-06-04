@@ -168,13 +168,16 @@ def parse_structured_reply(text):
         return None
     except Exception:
         # Tolerate trailing junk / minor malformation: grab the reply value directly.
-        rm = re.search(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', blob, re.DOTALL)
-        if not rm:
+        # Use the LAST match so a nested decoy `reply` (e.g. inside user_state)
+        # doesn't win over the real top-level one.
+        rms = re.findall(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', blob, re.DOTALL)
+        if not rms:
             return None
+        captured = rms[-1]
         try:
-            val = json.loads('"' + rm.group(1) + '"')
+            val = json.loads('"' + captured + '"')
         except Exception:
-            val = rm.group(1)
+            val = captured
         val = val.strip()
         return val or None
 
