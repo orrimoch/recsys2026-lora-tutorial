@@ -29,7 +29,7 @@ import time
 import pandas as pd
 from datasets import load_dataset
 
-MODEL = os.environ.get("GEMINI_JUDGE_MODEL", "gemini-1.5-flash")
+MODEL = os.environ.get("GEMINI_JUDGE_MODEL", "gemini-2.5-flash")  # 1.5-flash retired; 2.5-flash = stable+cheap
 DEV_DATASET = "talkpl-ai/TalkPlayData-Challenge-Dataset"
 ITEM_DB = "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
 
