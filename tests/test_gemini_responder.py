@@ -81,6 +81,26 @@ def test_render_context_expands_music_and_ends_at_target_user_turn(conversations
     assert "Now something with more energy" in ctx
 
 
+def test_render_context_enriches_prior_tracks_with_attributes(item_db_meta):
+    # A prior in-session rec must carry its attributes so the reply can connect
+    # the new pick to what the user liked via a shared trait (continuity).
+    convs = [
+        {"turn_number": 1, "role": "user", "content": "something chill"},
+        {"turn_number": 1, "role": "music", "content": "trk-A"},
+        {"turn_number": 1, "role": "assistant", "content": "a calm one for you"},
+        {"turn_number": 2, "role": "user", "content": "now a bit more upbeat"},
+    ]
+    ctx = gr.render_context(convs, item_db_meta, target_turn=2)
+    assert "Song A" in ctx and "Artist A" in ctx
+    assert "indie" in ctx and "mellow" in ctx  # attributes now surfaced
+
+
+def test_build_prompt_has_continuity_directive():
+    p = gr.build_prompt(context="user: more like that", tracks_str="X by Y", listener_goal="")
+    low = p.lower()
+    assert "earlier" in low and "liked" in low  # references prior liked tracks
+
+
 def test_render_context_excludes_target_turn_assistant_reply(item_db_meta):
     convs = [
         {"turn_number": 1, "role": "user", "content": "hello"},

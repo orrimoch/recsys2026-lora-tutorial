@@ -53,6 +53,11 @@ Mention a second track ONLY if it genuinely fits the same request; never pad the
 just because they were provided, and never connect a track on a shallow coincidence (e.g. a word in the
 title) — the link must be a real musical or taste fit.
 
+Continuity: if earlier in this conversation the user liked a track, briefly connect your pick to it
+through a real shared attribute (e.g. "like [earlier track]'s warm guitar, this one…"), and steer away
+from qualities they rejected. Only do this when the connection is genuine — never invent a past
+preference, and skip it entirely if there is no relevant history.
+
 To score well you MUST do BOTH:
 - PERSONALIZATION: tie the pick to something THIS user actually said AND to their current vibe (intent,
   mood, activity, taste). Reference it concretely; never be generic, and never present guesses about the
@@ -73,9 +78,23 @@ def _first(v):
     return v
 
 
+def _track_inline(meta):
+    """One-line 'Name by Artist — tag1, tag2' for a prior in-session rec, so the
+    model can connect a new pick to what the user already liked via shared traits."""
+    name = _first(meta.get("track_name"))
+    artist = _first(meta.get("artist_name"))
+    tags = meta.get("tags") or meta.get("tag_list") or []
+    tags = tags if isinstance(tags, list) else [str(tags)]
+    s = f"{name} by {artist}"
+    if tags:
+        s += f" — {', '.join(str(x) for x in tags[:4])}"
+    return s
+
+
 def render_context(conversations, item_db_meta, target_turn):
     """Render the user-visible conversation up to (and including) the target
-    user turn. Music turns are expanded to the recommended track's name; the
+    user turn. Music turns are expanded to the recommended track's name AND its
+    attributes (so the reply can build continuity from what the user liked); the
     target turn's own assistant/music reply is excluded (that is what we are
     generating)."""
     df = pd.DataFrame(conversations)
@@ -87,7 +106,7 @@ def render_context(conversations, item_db_meta, target_turn):
         if role == "music":
             role = "assistant"
             m = item_db_meta.get(str(content), {})
-            content = f"[recommended: {_first(m.get('track_name'))} by {_first(m.get('artist_name'))}]"
+            content = f"[recommended: {_track_inline(m)}]"
         lines.append(f"{role}: {content}")
     cur = df[(df["turn_number"] == target_turn) & (df["role"] == "user")]
     if len(cur):
