@@ -115,6 +115,24 @@ def test_build_prompt_has_cold_start_directive():
     assert "no prior history" in low and ("current request" in low or "stated goal" in low)
 
 
+def test_build_prompt_includes_musical_culture_when_present():
+    p = gr.build_prompt(context="user: play me something", tracks_str="A by B",
+                        listener_goal="", musical_culture="Western Alternative Rock")
+    assert "Preferred musical culture: Western Alternative Rock" in p
+
+
+def test_build_prompt_omits_musical_culture_field_when_absent():
+    p = gr.build_prompt(context="user: x", tracks_str="A by B", listener_goal="", musical_culture="")
+    assert "Preferred musical culture:" not in p
+
+
+def test_cold_start_directive_mentions_light_musical_taste_anchor():
+    p = gr.build_prompt(context="user: x", tracks_str="A by B", listener_goal="")
+    low = p.lower()
+    # the cold-start clause should point at the musical-taste anchor, used lightly
+    assert "musical taste" in low and "lightly" in low
+
+
 def test_render_context_excludes_target_turn_assistant_reply(item_db_meta):
     convs = [
         {"turn_number": 1, "role": "user", "content": "hello"},

@@ -70,8 +70,10 @@ preference, and skip it entirely if there is no relevant history.
 
 Cold start: if there is no prior history to build on, personalize from the user's current request and
 stated goal — their mood, activity, and the qualities they just named — and ground the pick in the
-track's real attributes. Do not fabricate past taste, and never fall back to a generic "here are some
-songs you might like" line.
+track's real attributes. When the request itself is thin, you may LIGHTLY lean on the user's stated
+musical taste (shown below as "Preferred musical culture", if available) as an anchor — but never let it
+override what they explicitly asked for, and don't force it when the request is already clear. Do not
+fabricate past taste, and never fall back to a generic "here are some songs you might like" line.
 
 To score well you MUST do BOTH:
 - PERSONALIZATION: tie the pick to something THIS user actually said AND to their current vibe (intent,
@@ -174,13 +176,16 @@ FEW_SHOT_EXAMPLES = """=== EXAMPLES (style reference only — do not reuse these
 [reply]: Stay with Florence + The Machine and try "Cosmic Love" — just as epic and dramatic, built on Florence's soaring vocals and a surging, cathartic swell that matches the emotional intensity you're after."""
 
 
-def build_prompt(context, tracks_str, listener_goal):
+def build_prompt(context, tracks_str, listener_goal, musical_culture=""):
     """Assemble the responder prompt from the rubric instructions, few-shot style
-    examples, the conversation, the recommended tracks, and (optionally) the goal."""
+    examples, the conversation, the recommended tracks, the goal, and (optionally)
+    the user's stated musical taste — a light anchor used mainly for cold/thin turns."""
     parts = [RESPONDER_INSTRUCTIONS, "", FEW_SHOT_EXAMPLES,
              "", "=== CONVERSATION ===", context]
     if listener_goal:
         parts += ["", f"Listener goal: {listener_goal}"]
+    if musical_culture:
+        parts += ["", f"Preferred musical culture: {musical_culture}"]
     parts += ["", "=== RECOMMENDED TRACK(S) TO PRESENT ===", tracks_str,
               "", "Reply:"]
     return "\n".join(parts)
@@ -213,13 +218,15 @@ Return ONLY a JSON object with exactly these keys:
 Output ONLY the JSON object."""
 
 
-def build_structured_prompt(context, tracks_str, listener_goal):
+def build_structured_prompt(context, tracks_str, listener_goal, musical_culture=""):
     """CoT-style prompt: the model fills personalization axes + a per-axis track
     'fit' (hidden scaffolding) before writing the final `reply`. Only `reply` is
     submitted (see parse_structured_reply)."""
     parts = [STRUCTURED_INSTRUCTIONS, "", "=== CONVERSATION ===", context]
     if listener_goal:
         parts += ["", f"Listener goal: {listener_goal}"]
+    if musical_culture:
+        parts += ["", f"Preferred musical culture: {musical_culture}"]
     parts += ["", "=== RECOMMENDED TRACK(S) TO PRESENT ===", tracks_str, "", "JSON:"]
     return "\n".join(parts)
 
@@ -452,11 +459,14 @@ def main():
                 ctx = render_context(sess["conversations"], item_db_meta, p["turn_number"])
                 tracks = format_tracks(p.get("predicted_track_ids"), item_db_meta, n=args.top_n)
                 goal = ((sess.get("conversation_goal") or {}).get("listener_goal") or "").strip()
+                # Light cold-start anchor: the user's stated musical taste (unused
+                # anywhere else in the pipeline). Leaned on mainly for thin turns.
+                culture = ((sess.get("user_profile") or {}).get("preferred_musical_culture") or "").strip()
                 if args.structured_personality:
-                    prompt = build_structured_prompt(ctx, tracks, goal)
+                    prompt = build_structured_prompt(ctx, tracks, goal, culture)
                     parse_fn = parse_structured_reply
                 else:
-                    prompt = build_prompt(ctx, tracks, goal)
+                    prompt = build_prompt(ctx, tracks, goal, culture)
                     parse_fn = None
                 if args.best_of > 1:
                     new_resp = generate_best_of_n(model, judge_model, prompt, ctx, tracks,
