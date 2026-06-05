@@ -101,6 +101,13 @@ def test_build_prompt_has_continuity_directive():
     assert "earlier" in low and "liked" in low  # references prior liked tracks
 
 
+def test_build_prompt_has_intent_mirroring_directive():
+    p = gr.build_prompt(context="user: x", tracks_str="A by B", listener_goal="")
+    low = p.lower()
+    # mirror/restate the user's stated intent (the gold-vs-ours personalization gap)
+    assert "mirror" in low and "restate" in low
+
+
 def test_build_prompt_has_cold_start_directive():
     p = gr.build_prompt(context="user: play me something", tracks_str="X by Y", listener_goal="")
     low = p.lower()
