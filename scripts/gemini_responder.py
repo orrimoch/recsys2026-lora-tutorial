@@ -476,6 +476,16 @@ def main():
     json.dump(out_rows, open(args.out, "w"), ensure_ascii=False)
     print(f"\n[responder] wrote {len(out_rows)} rows -> {args.out} "
           f"(generated={n_gen}, fallback={n_fallback})")
+    # Loud guard: if NOTHING was generated, every row silently kept its original
+    # response — most likely the API/SDK rejected the request (e.g. the best-of-N
+    # generation_config). Surface it so an all-fallback no-op isn't mistaken for a
+    # successful run.
+    if n_gen == 0:
+        print("\n*** WARNING: 0 rows generated — ALL fell back to the original "
+              "response. This output is a no-op (not the Gemini responder). "
+              "Check the API key / model / "
+              + ("generation_config (best-of-N) " if args.best_of > 1 else "")
+              + "before submitting. ***")
 
 
 if __name__ == "__main__":
