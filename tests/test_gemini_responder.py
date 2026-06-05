@@ -101,6 +101,13 @@ def test_build_prompt_has_continuity_directive():
     assert "earlier" in low and "liked" in low  # references prior liked tracks
 
 
+def test_build_prompt_explanation_bridges_without_echoing():
+    p = gr.build_prompt(context="user: x", tracks_str="A by B", listener_goal="")
+    low = p.lower()
+    assert "echo" in low                   # anti-parroting guard (avoid formulaic mirroring)
+    assert "concrete track detail" in low  # protect the grounded explanation (don't over-compress)
+
+
 def test_build_prompt_has_cold_start_directive():
     p = gr.build_prompt(context="user: play me something", tracks_str="X by Y", listener_goal="")
     low = p.lower()
