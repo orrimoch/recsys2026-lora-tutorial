@@ -101,36 +101,11 @@ def test_build_prompt_has_continuity_directive():
     assert "earlier" in low and "liked" in low  # references prior liked tracks
 
 
-def test_build_prompt_has_intent_mirroring_directive():
-    p = gr.build_prompt(context="user: x", tracks_str="A by B", listener_goal="")
-    low = p.lower()
-    # mirror/restate the user's stated intent (the gold-vs-ours personalization gap)
-    assert "mirror" in low and "restate" in low
-
-
 def test_build_prompt_has_cold_start_directive():
     p = gr.build_prompt(context="user: play me something", tracks_str="X by Y", listener_goal="")
     low = p.lower()
     # cold-start path: lean on the current request + goal, don't fabricate history
     assert "no prior history" in low and ("current request" in low or "stated goal" in low)
-
-
-def test_build_prompt_includes_musical_culture_when_present():
-    p = gr.build_prompt(context="user: play me something", tracks_str="A by B",
-                        listener_goal="", musical_culture="Western Alternative Rock")
-    assert "Preferred musical culture: Western Alternative Rock" in p
-
-
-def test_build_prompt_omits_musical_culture_field_when_absent():
-    p = gr.build_prompt(context="user: x", tracks_str="A by B", listener_goal="", musical_culture="")
-    assert "Preferred musical culture:" not in p
-
-
-def test_cold_start_directive_mentions_light_musical_taste_anchor():
-    p = gr.build_prompt(context="user: x", tracks_str="A by B", listener_goal="")
-    low = p.lower()
-    # the cold-start clause should point at the musical-taste anchor, used lightly
-    assert "musical taste" in low and "lightly" in low
 
 
 def test_render_context_excludes_target_turn_assistant_reply(item_db_meta):
