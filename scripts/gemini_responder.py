@@ -412,9 +412,45 @@ EXPLANATION_QUALITY — does it give a concrete, accurate reason citing real att
 Score the two axes INDEPENDENTLY. Return ONLY a JSON object: {"personalization": <1-5>, "explanation_quality": <1-5>}"""
 
 
-def build_judge_prompt(context, tracks_str, reply):
-    """Prompt the judge model to score one candidate reply on the two axes."""
-    return (f"{JUDGE_INSTRUCTIONS}\n\n=== CONVERSATION ===\n{context}\n\n"
+JUDGE_INSTRUCTIONS_FULL = """You score a music recommender's reply to a user on TWO INDEPENDENT axes, 1-5 each.
+Judge ONLY the written reply (text quality) — not whether the recommended track is the "right" pick.
+Every level is defined; pick the level whose description best fits — do not invent in-between values.
+
+PERSONALIZATION — does the reply reflect THIS user's stated intent, mood, and taste?
+  5 = explicitly references something the user ACTUALLY said AND ties the pick to their current mood/activity; unmistakably for this user.
+  4 = clearly tailored to the user's stated request, but does not connect to their broader mood/vibe.
+  3 = partly tailored: touches the request but is also somewhat generic, or leans on taste the user never stated.
+  2 = mostly generic with only a faint nod to the user.
+  1 = generic; could be sent to anyone; ignores what the user asked for.
+  Example 5: "Since you wanted something dramatic to wind down to, ..."   Example 1: "Here are some songs you might like."
+
+EXPLANATION_QUALITY — does it give a concrete, accurate reason citing real attributes of the recommended track?
+  5 = names a specific attribute (artist, genre, mood, instrumentation, era) AND links it directly to what the user asked.
+  4 = cites a concrete attribute, but the link to the request is implicit or only partial.
+  3 = gives a reason, but vague or only loosely tied to the track or the request.
+  2 = a near-empty reason ("you'll like it") with little specificity.
+  1 = no real reason, or vague / over-claimed / hallucinated attributes.
+  Example 5: "...its sparse piano and aching vocal match the melancholy you're after."   Example 1: "It's a great track, enjoy!"
+
+Score the two axes INDEPENDENTLY. Return ONLY a JSON object: {"personalization": <1-5>, "explanation_quality": <1-5>}"""
+
+# Which rubric build_judge_prompt uses by default: 'anchored' (1/3/5, default) or
+# 'full' (every level 1-5 defined). Override via env, the --judge-rubric flag, or
+# by setting gemini_responder.JUDGE_RUBRIC at runtime (e.g. from the nb81 lab).
+JUDGE_RUBRIC = os.environ.get("GEMINI_JUDGE_RUBRIC", "anchored")
+
+
+def active_judge_instructions(rubric=None):
+    """Return the judge rubric text for `rubric` (defaults to the module JUDGE_RUBRIC)."""
+    r = rubric or JUDGE_RUBRIC
+    return JUDGE_INSTRUCTIONS_FULL if r == "full" else JUDGE_INSTRUCTIONS
+
+
+def build_judge_prompt(context, tracks_str, reply, instructions=None):
+    """Prompt the judge model to score one candidate reply on the two axes.
+    `instructions` overrides the active rubric (else uses active_judge_instructions())."""
+    instr = instructions or active_judge_instructions()
+    return (f"{instr}\n\n=== CONVERSATION ===\n{context}\n\n"
             f"=== RECOMMENDED TRACKS ===\n{tracks_str}\n\n"
             f"=== REPLY TO SCORE ===\n{reply}\n\nReturn only the JSON.")
 
@@ -563,6 +599,7 @@ def _load_item_meta():
 
 
 def main():
+    global JUDGE_RUBRIC  # set from --judge-rubric below; declared first (used as a flag default)
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pred", required=True, help="existing prediction.json (keeps predicted_track_ids)")
     ap.add_argument("--out", required=True, help="output prediction.json with regenerated responses")
@@ -584,7 +621,12 @@ def main():
                     help="best-of-N selection: pointwise (0-5 score each, N calls), "
                          "pairwise (king-of-the-hill A-vs-B, N-1 calls), "
                          "round_robin (all pairs, C(N,2) calls). Default pointwise.")
+    ap.add_argument("--judge-rubric", default=JUDGE_RUBRIC, choices=["anchored", "full"],
+                    help="judge rubric: 'anchored' (1/3/5 anchors, default) or "
+                         "'full' (every level 1-5 defined, no grey area).")
     args = ap.parse_args()
+
+    JUDGE_RUBRIC = args.judge_rubric  # build_judge_prompt picks up the chosen rubric
 
     if args.top_n < 1:
         sys.exit("ERROR: --top-n must be >= 1 (the responder needs at least one track to explain).")

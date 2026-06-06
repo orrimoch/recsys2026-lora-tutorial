@@ -451,6 +451,30 @@ def test_judge_instructions_anchored_1_to_5_with_examples():
     assert '"personalization"' in j and '"explanation_quality"' in j
 
 
+def test_judge_instructions_full_defines_all_five_levels():
+    j = gr.JUDGE_INSTRUCTIONS_FULL
+    low = j.lower()
+    assert "personalization" in low and "explanation_quality" in low
+    # every level 1..5 is explicitly defined (no grey area)
+    for lvl in ("5 =", "4 =", "3 =", "2 =", "1 ="):
+        assert lvl in j, f"full rubric missing level anchor {lvl!r}"
+    # the 4/2 anchors are what distinguishes 'full' from the default 1/3/5 rubric
+    assert "4 =" not in gr.JUDGE_INSTRUCTIONS and "2 =" not in gr.JUDGE_INSTRUCTIONS
+    assert '"personalization"' in j and '"explanation_quality"' in j
+
+
+def test_active_judge_instructions_switches_by_rubric():
+    assert gr.active_judge_instructions("full") is gr.JUDGE_INSTRUCTIONS_FULL
+    assert gr.active_judge_instructions("anchored") is gr.JUDGE_INSTRUCTIONS
+    # default (no arg) falls back to the module default rubric
+    assert gr.active_judge_instructions() in (gr.JUDGE_INSTRUCTIONS, gr.JUDGE_INSTRUCTIONS_FULL)
+
+
+def test_build_judge_prompt_honors_instructions_override():
+    p = gr.build_judge_prompt("ctx", "Song A", "reply", instructions=gr.JUDGE_INSTRUCTIONS_FULL)
+    assert "4 =" in p  # the full-rubric anchor is present when overridden
+
+
 def test_build_judge_prompt_contains_reply_and_rubric():
     p = gr.build_judge_prompt("ctx", "Song A by Artist A", "my reply text")
     assert "my reply text" in p
