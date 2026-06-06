@@ -86,6 +86,20 @@ def clap_mean_vector(clap_lookup: dict) -> Optional[np.ndarray]:
     return _l2(np.asarray(M, dtype=np.float32))
 
 
+def clap_session_query(played_tids: list, clap_lookup: dict) -> Optional[np.ndarray]:
+    """Mean-pool the session's played tracks' CLAP vectors into ONE L2-normalized
+    query vector, for audio->audio "sounds-like-the-session" RECALL retrieval
+    (distinct from the rejected clap_session_sim reranker feature). Returns None
+    when no played track has a CLAP vector (e.g. a cold / first turn) — the caller
+    then contributes no candidates for that turn. Missing played tracks are
+    skipped (never imputed)."""
+    vecs = [clap_lookup[t] for t in (played_tids or []) if t in clap_lookup]
+    if not vecs:
+        return None
+    m = np.mean(np.stack(vecs, axis=0), axis=0)
+    return _l2(np.asarray(m, dtype=np.float32))
+
+
 def load_clap_lookup(cache_dir: str, split_types=("all_tracks",)) -> dict:
     """{track_id -> L2-normalized CLAP vector}. Cached to disk (mirrors cf_bpr).
     Shared in-process across callers via _SHARED_CLAP."""

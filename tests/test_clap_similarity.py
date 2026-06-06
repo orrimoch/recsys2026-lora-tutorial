@@ -111,3 +111,29 @@ def test_clap_mean_vector_normalized_and_empty():
     m = clap_mean_vector(lk)
     assert abs(float(np.linalg.norm(m)) - 1.0) < 1e-6
     assert clap_mean_vector({}) is None
+
+
+# --- clap_session_query: audio->session query for the RECALL-channel probe -----
+
+def test_clap_session_query_mean_pools_and_normalizes():
+    from mcrs.retrieval_modules.clap_similarity import clap_session_query
+    lk = _lookup()
+    q = clap_session_query(["p1", "p2"], lk)   # p1=[1,0,0], p2=[0,1,0]
+    assert q is not None
+    assert abs(float(np.linalg.norm(q)) - 1.0) < 1e-5   # L2-normalized
+    assert abs(float(q[0]) - float(q[1])) < 1e-5 and abs(float(q[2])) < 1e-6
+
+
+def test_clap_session_query_none_when_no_vectors():
+    from mcrs.retrieval_modules.clap_similarity import clap_session_query
+    lk = _lookup()
+    assert clap_session_query([], lk) is None               # cold / no history
+    assert clap_session_query(["unknown_tid"], lk) is None   # none have a vector
+
+
+def test_clap_session_query_skips_missing_played():
+    from mcrs.retrieval_modules.clap_similarity import clap_session_query
+    lk = _lookup()
+    q = clap_session_query(["p1", "missing"], lk)  # only p1 has a vector
+    assert q is not None
+    np.testing.assert_allclose(q, lk["p1"], atol=1e-5)  # == p1 (the only vector)
