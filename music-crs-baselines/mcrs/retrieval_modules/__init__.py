@@ -95,6 +95,16 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
             "type": "related_artist", "topk_internal": 100,
             "weight": float(ec.get("w_related_artist", 1.0)),
         })
+    # CLAP audio->session RECALL channel (2026-06-06): mean-pool the played tracks'
+    # CLAP audio -> nearest catalog tracks ("sounds like the session"). nb74 Stage 23
+    # probe = best new-artist wall rescue (269 union-missed new-artist golds, +0.035
+    # recall@100 ceiling). Opt-in via use_clap_recall; weight-swept like related_artist
+    # (a weak channel can inject RRF noise — gate on union recall@100 then nDCG).
+    if ec.get("use_clap_recall"):
+        specs.append({
+            "type": "clap_recall", "topk_internal": 100,
+            "weight": float(ec.get("w_clap_recall", 1.0)),
+        })
     return specs
 
 
@@ -559,6 +569,9 @@ def load_retrieval_module(
     elif retrieval_type == "related_artist":
         from .related_artist import RelatedArtistRetriever
         return RelatedArtistRetriever(dataset_name, track_split_types, corpus_types, cache_dir)
+    elif retrieval_type == "clap_recall":
+        from .clap_recall import ClapRecallRetriever
+        return ClapRecallRetriever(dataset_name, track_split_types, corpus_types, cache_dir)
     elif retrieval_type == "session_cf":
         from .session_cf import SessionCFRetriever
         return SessionCFRetriever(dataset_name, track_split_types, corpus_types, cache_dir)
