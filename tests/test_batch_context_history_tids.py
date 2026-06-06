@@ -23,3 +23,14 @@ def test_reranker_receives_extra_session_info():
     src = inspect.getsource(CRS_BASELINE.batch_chat)
     assert "extra_session_info" in src, "reranker must receive extra_session_info"
     assert '"played_tids"' in src, "extra_session_info entries must carry played_tids"
+
+
+def test_batch_context_includes_user_dialog_for_sasrec():
+    # SASRec was trained + dev-validated on user-turns-only dialog
+    # (build_user_dialog). At serve, batch_context must carry user_dialog so the
+    # weight-1.0 SASRec channel sees the clean dialog it was trained on, instead
+    # of falling back to the noisy full raw query (sasrec_seq.py:59 warns loudly).
+    src = inspect.getsource(CRS_BASELINE.batch_chat)
+    assert '"user_dialog"' in src, "batch_context must carry user_dialog for SASRec"
+    assert "build_user_dialog" in src, \
+        "user_dialog must be built via build_user_dialog (user-turns-only)"

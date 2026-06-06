@@ -6,6 +6,7 @@ from mcrs.db_item import MusicCatalogDB
 from mcrs.db_user import UserProfileDB
 from mcrs.lm_modules import load_lm_module
 from mcrs.retrieval_modules import load_retrieval_module
+from mcrs.retrieval_modules.sasrec_model import build_user_dialog
 from mcrs.rerankers import load_reranker_module
 from mcrs.response_rerankers import load_response_reranker_module
 
@@ -675,6 +676,11 @@ class CRS_BASELINE:
                 "user_profile": data.get("user_profile_raw"),
                 "conversation_goal": data.get("conversation_goal"),
                 "history_tids": _played,
+                # SASRec was trained + dev-validated on user-turns-only dialog
+                # (build_user_dialog). Pass it at serve too, else sasrec_seq falls
+                # back to the noisy full raw query it was trained to exclude
+                # (train/serve skew on a weight-1.0 channel).
+                "user_dialog": build_user_dialog(prior_history),
             })
 
         # Stage 1: Batch retrieval. Pull retrieval_topk (default 20; 40 when

@@ -126,6 +126,135 @@ def test_render_context_excludes_target_turn_assistant_reply(item_db_meta):
     assert "LEAKED_GOLD_REPLY" not in ctx
 
 
+def test_render_context_surfaces_prior_track_thought(item_db_meta):
+    # Each prior 'music' turn carries the recommender's 'thought' (why it picked
+    # that track). Surfacing it gives the responder real continuity reasoning to
+    # build on instead of inventing it. Prior turns only -> leak-safe.
+    convs = [
+        {"turn_number": 1, "role": "user", "content": "something chill"},
+        {"turn_number": 1, "role": "music", "content": "trk-A",
+         "thought": "warm mellow guitar matches the chill request"},
+        {"turn_number": 1, "role": "assistant", "content": "a calm one"},
+        {"turn_number": 2, "role": "user", "content": "now upbeat"},
+    ]
+    ctx = gr.render_context(convs, item_db_meta, target_turn=2)
+    assert "warm mellow guitar matches the chill request" in ctx
+    assert "Song A" in ctx  # still carries the track name + attributes
+
+
+def test_render_context_excludes_target_turn_thought(item_db_meta):
+    # The target turn's own 'thought' is reasoning about the gold we must
+    # generate — it must NOT leak into the context.
+    convs = [
+        {"turn_number": 1, "role": "user", "content": "hi"},
+        {"turn_number": 1, "role": "music", "content": "trk-A",
+         "thought": "LEAK_THOUGHT_FOR_THE_GOLD"},
+    ]
+    ctx = gr.render_context(convs, item_db_meta, target_turn=1)
+    assert "LEAK_THOUGHT_FOR_THE_GOLD" not in ctx
+
+
+def test_render_context_tolerates_missing_thought(item_db_meta):
+    # Music turns without a thought (or NaN after DataFrame coercion) must not
+    # crash or emit a literal 'nan'.
+    convs = [
+        {"turn_number": 1, "role": "user", "content": "chill"},
+        {"turn_number": 1, "role": "music", "content": "trk-A"},
+        {"turn_number": 2, "role": "user", "content": "more"},
+    ]
+    ctx = gr.render_context(convs, item_db_meta, target_turn=2)
+    assert "Song A" in ctx
+    assert "nan" not in ctx.lower()
+
+
+# --- era / popularity grounding on the recommended track block -------------
+
+def test_format_tracks_includes_era_decade():
+    # release_date -> a citable era attribute (the prompt only lets the model
+    # mention attributes present in the track block).
+    meta = {"trk-A": {"track_name": "Song A", "artist_name": "Artist A",
+                      "album_name": "Album A", "tags": ["indie"],
+                      "release_date": "1994-05-01"}}
+    s = gr.format_tracks(["trk-A"], meta, n=1)
+    assert "1990s" in s
+
+
+def test_format_tracks_tolerates_missing_or_bad_release_date():
+    meta = {
+        "trk-A": {"track_name": "A", "artist_name": "B", "tags": []},
+        "trk-B": {"track_name": "C", "artist_name": "D", "tags": [],
+                  "release_date": ""},
+    }
+    s = gr.format_tracks(["trk-A", "trk-B"], meta, n=2)
+    assert "A by B" in s and "C by D" in s  # no crash, no bogus era
+
+
+def test_decade_helper():
+    assert gr._decade("1994-05-01") == "1990s"
+    assert gr._decade("2007") == "2000s"
+    assert gr._decade(["1981-01-01"]) == "1980s"  # HF singleton-list field
+    assert gr._decade("") is None
+    assert gr._decade(None) is None
+    assert gr._decade("not-a-date") is None
+
+
+# --- user context (stated prefs only, no inferred demographics) ------------
+
+def test_render_user_context_includes_only_stated_prefs():
+    up = {"preferred_musical_culture": "Western Alternative Rock",
+          "preferred_language": "English",
+          "age": 20, "gender": "female", "country_name": "Brazil"}
+    s = gr.render_user_context(up)
+    assert "Western Alternative Rock" in s
+    assert "English" in s
+    # inferred demographics must NOT be injected (stereotyping guardrail)
+    assert "20" not in s and "female" not in s and "Brazil" not in s
+
+
+def test_render_user_context_empty_when_no_stated_prefs():
+    assert gr.render_user_context({}) == ""
+    assert gr.render_user_context(None) == ""
+    assert gr.render_user_context({"age": 30, "gender": "male"}) == ""
+
+
+def test_build_prompt_includes_user_context():
+    p = gr.build_prompt(context="user: x", tracks_str="A by B", listener_goal="",
+                        user_context="Preferred musical culture: Western Alternative Rock")
+    assert "Western Alternative Rock" in p
+
+
+def test_build_prompt_omits_user_context_line_when_absent():
+    p = gr.build_prompt(context="user: x", tracks_str="A by B", listener_goal="")
+    assert "musical culture" not in p.lower()
+
+
+# --- goal progress tally (prior picks only) --------------------------------
+
+def test_goal_progress_tally_counts_prior_only():
+    gpa = [
+        {"turn_number": 1, "goal_progress_assessment": None},
+        {"turn_number": 2, "goal_progress_assessment": "MOVES_TOWARD_GOAL"},
+        {"turn_number": 3, "goal_progress_assessment": "DOES_NOT_MOVE_TOWARD_GOAL"},
+        {"turn_number": 4, "goal_progress_assessment": "MOVES_TOWARD_GOAL"},
+    ]
+    # target turn 4: only turns 1-3 count -> 1 moved toward, 1 missed (turn1 null skipped)
+    s = gr.goal_progress_tally(gpa, target_turn=4)
+    assert "1 moved toward" in s and "1 missed" in s
+
+
+def test_goal_progress_tally_empty_when_no_prior_assessments():
+    gpa = [{"turn_number": 1, "goal_progress_assessment": None}]
+    assert gr.goal_progress_tally(gpa, target_turn=1) == ""
+    assert gr.goal_progress_tally([], target_turn=3) == ""
+    assert gr.goal_progress_tally(None, target_turn=3) == ""
+
+
+def test_build_prompt_includes_goal_progress():
+    p = gr.build_prompt(context="user: x", tracks_str="A by B", listener_goal="",
+                        goal_progress="Goal progress so far: 2 moved toward, 1 missed")
+    assert "2 moved toward" in p
+
+
 # --- format_tracks (top_n truncation) --------------------------------------
 
 def test_format_tracks_respects_top_n(item_db_meta):

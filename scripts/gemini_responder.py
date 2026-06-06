@@ -105,6 +105,19 @@ def _track_inline(meta):
     return s
 
 
+def _decade(release_date):
+    """Map a release_date (HF field: a 'YYYY-MM-DD' string, a 'YYYY', or a
+    singleton list of one) to a citable era label like '1990s'. Returns None for
+    missing/malformed dates so a bogus era is never emitted into the prompt."""
+    rd = _first(release_date)
+    if rd is None:
+        return None
+    s = str(rd).strip()
+    if len(s) < 4 or not s[:4].isdigit():
+        return None
+    return f"{(int(s[:4]) // 10) * 10}s"
+
+
 def render_context(conversations, item_db_meta, target_turn):
     """Render the user-visible conversation up to (and including) the target
     user turn. Music turns are expanded to the recommended track's name AND its
@@ -120,7 +133,16 @@ def render_context(conversations, item_db_meta, target_turn):
         if role == "music":
             role = "assistant"
             m = item_db_meta.get(str(content), {})
-            content = f"[recommended: {_track_inline(m)}]"
+            inline = _track_inline(m)
+            # Surface the recommender's prior-turn 'thought' (its reasoning for
+            # that pick) so the reply can build on real continuity rather than
+            # invent it. Prior turns only (hist is turn < target) -> leak-safe.
+            # Guard against NaN (pandas fills missing 'thought' cells) and blanks.
+            th = t.get("thought")
+            if isinstance(th, str) and th.strip():
+                content = f"[recommended: {inline} | why: {th.strip()}]"
+            else:
+                content = f"[recommended: {inline}]"
         lines.append(f"{role}: {content}")
     cur = df[(df["turn_number"] == target_turn) & (df["role"] == "user")]
     if len(cur):
@@ -148,8 +170,59 @@ def format_tracks(tids, item_db_meta, n=1):
             part += f" (album {album})"
         if tags:
             part += f" [{', '.join(str(x) for x in tags[:5])}]"
+        # Era: a concrete, citable attribute the rubric rewards. The prompt only
+        # lets the model mention attributes present in this block, so without it
+        # the era is simply unavailable. Omitted entirely when unknown.
+        era = _decade(m.get("release_date"))
+        if era:
+            part += f" — era {era}"
         out.append(part)
     return "; ".join(out) if out else "(none)"
+
+
+def render_user_context(user_profile):
+    """Compact 'User context' line from STATED preferences only
+    (preferred_musical_culture, preferred_language). Inferred demographics
+    (age/gender/country) are deliberately excluded: the judge scores
+    personalization on what the user actually signalled, and presenting
+    demographic guesses risks reading as stereotyping (could LOWER the score).
+    Returns '' when no stated preference is present."""
+    if not user_profile:
+        return ""
+    parts = []
+    culture = (user_profile.get("preferred_musical_culture") or "").strip()
+    lang = (user_profile.get("preferred_language") or "").strip()
+    if culture:
+        parts.append(f"Preferred musical culture: {culture}")
+    if lang:
+        parts.append(f"Preferred language: {lang}")
+    return " | ".join(parts)
+
+
+def goal_progress_tally(assessments, target_turn):
+    """One-line tally of PRIOR picks' goal progress from
+    goal_progress_assessments, so the reply can read the trajectory and keep
+    momentum. Only turns strictly before target_turn count — the target turn's
+    assessment is the label for the gold we're generating and MUST be excluded.
+    Returns '' when there is no prior signal."""
+    if not assessments:
+        return ""
+    moved = missed = 0
+    for a in assessments:
+        try:
+            tn = int(a.get("turn_number"))
+        except (TypeError, ValueError):
+            continue
+        if tn >= target_turn:
+            continue
+        v = a.get("goal_progress_assessment")
+        if v == "MOVES_TOWARD_GOAL":
+            moved += 1
+        elif v == "DOES_NOT_MOVE_TOWARD_GOAL":
+            missed += 1
+    if moved == 0 and missed == 0:
+        return ""
+    return f"Goal progress so far: {moved} moved toward, {missed} missed"
 
 
 # Few-shot style references. REAL tracks + REAL user requests curated from the
@@ -173,13 +246,18 @@ FEW_SHOT_EXAMPLES = """=== EXAMPLES (style reference only — do not reuse these
 [reply]: Stay with Florence + The Machine and try "Cosmic Love" — just as epic and dramatic, built on Florence's soaring vocals and a surging, cathartic swell that matches the emotional intensity you're after."""
 
 
-def build_prompt(context, tracks_str, listener_goal):
+def build_prompt(context, tracks_str, listener_goal, user_context="", goal_progress=""):
     """Assemble the responder prompt from the rubric instructions, few-shot style
-    examples, the conversation, the recommended tracks, and (optionally) the goal."""
+    examples, the conversation, optional stated user context + goal-progress
+    momentum, the recommended tracks, and (optionally) the goal."""
     parts = [RESPONDER_INSTRUCTIONS, "", FEW_SHOT_EXAMPLES,
              "", "=== CONVERSATION ===", context]
+    if user_context:
+        parts += ["", "=== USER CONTEXT (stated preferences) ===", user_context]
     if listener_goal:
         parts += ["", f"Listener goal: {listener_goal}"]
+    if goal_progress:
+        parts += ["", goal_progress]
     parts += ["", "=== RECOMMENDED TRACK(S) TO PRESENT ===", tracks_str,
               "", "Reply:"]
     return "\n".join(parts)
@@ -212,13 +290,17 @@ Return ONLY a JSON object with exactly these keys:
 Output ONLY the JSON object."""
 
 
-def build_structured_prompt(context, tracks_str, listener_goal):
+def build_structured_prompt(context, tracks_str, listener_goal, user_context="", goal_progress=""):
     """CoT-style prompt: the model fills personalization axes + a per-axis track
     'fit' (hidden scaffolding) before writing the final `reply`. Only `reply` is
     submitted (see parse_structured_reply)."""
     parts = [STRUCTURED_INSTRUCTIONS, "", "=== CONVERSATION ===", context]
+    if user_context:
+        parts += ["", "=== USER CONTEXT (stated preferences) ===", user_context]
     if listener_goal:
         parts += ["", f"Listener goal: {listener_goal}"]
+    if goal_progress:
+        parts += ["", goal_progress]
     parts += ["", "=== RECOMMENDED TRACK(S) TO PRESENT ===", tracks_str, "", "JSON:"]
     return "\n".join(parts)
 
@@ -389,6 +471,11 @@ def _load_item_meta():
             "artist_name": r.get("artist_name"),
             "album_name": r.get("album_name"),
             "tags": r.get("tag_list"),
+            # release_date -> era (citable). popularity carried for a future,
+            # separately-measured variant (kept out of the prompt text for now
+            # to avoid judge-penalized over-claims).
+            "release_date": r.get("release_date"),
+            "popularity": r.get("popularity"),
         }
     return meta
 
@@ -451,11 +538,17 @@ def main():
                 ctx = render_context(sess["conversations"], item_db_meta, p["turn_number"])
                 tracks = format_tracks(p.get("predicted_track_ids"), item_db_meta, n=args.top_n)
                 goal = ((sess.get("conversation_goal") or {}).get("listener_goal") or "").strip()
+                user_ctx = render_user_context(sess.get("user_profile"))
+                gprog = goal_progress_tally(sess.get("goal_progress_assessments"),
+                                            p["turn_number"])
                 if args.structured_personality:
-                    prompt = build_structured_prompt(ctx, tracks, goal)
+                    prompt = build_structured_prompt(ctx, tracks, goal,
+                                                     user_context=user_ctx,
+                                                     goal_progress=gprog)
                     parse_fn = parse_structured_reply
                 else:
-                    prompt = build_prompt(ctx, tracks, goal)
+                    prompt = build_prompt(ctx, tracks, goal,
+                                          user_context=user_ctx, goal_progress=gprog)
                     parse_fn = None
                 if args.best_of > 1:
                     new_resp = generate_best_of_n(model, judge_model, prompt, ctx, tracks,
