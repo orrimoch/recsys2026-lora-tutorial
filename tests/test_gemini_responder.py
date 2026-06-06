@@ -491,6 +491,32 @@ def test_build_judge_prompt_honors_instructions_override():
     assert "4 =" in p  # the full-rubric anchor is present when overridden
 
 
+def test_parse_judge_axes_returns_pair_or_none():
+    assert gr.parse_judge_axes('{"personalization": 4, "explanation_quality": 3}') == (4.0, 3.0)
+    assert gr.parse_judge_axes('{"personalization": 4}') is None  # missing axis
+    assert gr.parse_judge_axes("garbage") is None
+    assert gr.parse_judge_axes("") is None
+
+
+def test_pick_best_axes_sum_then_strongest_axis():
+    # higher total wins
+    assert gr.pick_best_axes([("a", (2, 2)), ("b", (5, 4))]) == "b"
+    # tie on total -> candidate with the STRONGER single axis wins
+    assert gr.pick_best_axes([("a", (5, 3)), ("b", (4, 4))]) == "a"   # sum 8 both; max 5 > 4
+    # unscored candidates ignored; all-None -> first; empty -> None
+    assert gr.pick_best_axes([("a", None), ("b", (3, 3))]) == "b"
+    assert gr.pick_best_axes([("a", None), ("b", None)]) == "a"
+    assert gr.pick_best_axes([]) is None
+
+
+def test_pick_best_axes_full_tie_breaks_randomly(monkeypatch):
+    # same total AND same strongest axis -> pick randomly among the tied
+    monkeypatch.setattr(gr.random, "choice", lambda seq: seq[-1])
+    assert gr.pick_best_axes([("a", (5, 3)), ("b", (3, 5))]) == "b"   # both (sum 8, max 5)
+    monkeypatch.setattr(gr.random, "choice", lambda seq: seq[0])
+    assert gr.pick_best_axes([("a", (5, 3)), ("b", (3, 5))]) == "a"
+
+
 def test_build_judge_prompt_contains_reply_and_rubric():
     p = gr.build_judge_prompt("ctx", "Song A by Artist A", "my reply text")
     assert "my reply text" in p

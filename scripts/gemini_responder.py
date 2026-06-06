@@ -417,19 +417,19 @@ Judge ONLY the written reply (text quality) — not whether the recommended trac
 Every level is defined; pick the level whose description best fits — do not invent in-between values.
 
 PERSONALIZATION — does the reply reflect THIS user's stated intent, mood, and taste?
-  5 = explicitly references something the user ACTUALLY said AND ties the pick to their current mood/activity; unmistakably for this user.
-  4 = clearly tailored to the user's stated request, but does not connect to their broader mood/vibe.
-  3 = partly tailored: touches the request but is also somewhat generic, or leans on taste the user never stated.
-  2 = mostly generic with only a faint nod to the user.
-  1 = generic; could be sent to anyone; ignores what the user asked for.
+  5 = EXCELLENT: explicitly references something the user ACTUALLY said AND ties the pick to their current mood/activity; unmistakably for this user.
+  4 = STRONG: clearly tailored to the user's stated request, but does not connect to their broader mood/vibe.
+  3 = PARTIAL: touches the request but is also somewhat generic, or leans on taste the user never stated.
+  2 = WEAK: mostly generic with only a faint nod to the user.
+  1 = GENERIC: could be sent to anyone; ignores what the user asked for.
   Example 5: "Since you wanted something dramatic to wind down to, ..."   Example 1: "Here are some songs you might like."
 
 EXPLANATION QUALITY — does it give a concrete, accurate reason citing real attributes of the recommended track?
-  5 = names a specific attribute (artist, genre, mood, instrumentation, era) AND links it directly to what the user asked.
-  4 = cites a concrete attribute, but the link to the request is implicit or only partial.
-  3 = gives a reason, but vague or only loosely tied to the track or the request.
-  2 = a near-empty reason ("you'll like it") with little specificity.
-  1 = no real reason, or vague / over-claimed / hallucinated attributes.
+  5 = EXCELLENT: names a specific attribute (artist, genre, mood, instrumentation, era) AND links it directly to what the user asked.
+  4 = STRONG: cites a concrete attribute, but the link to the request is implicit or only partial.
+  3 = VAGUE: gives a reason, but only loosely tied to the track or the request.
+  2 = THIN: a near-empty reason ("you'll like it") with little specificity.
+  1 = ABSENT: no real reason, or over-claimed / hallucinated attributes.
   Example 5: "...its sparse piano and aching vocal match the melancholy you're after."   Example 1: "It's a great track, enjoy!"
 
 Score the two axes INDEPENDENTLY. Return ONLY a JSON object: {"personalization": <1-5>, "explanation_quality": <1-5>}"""
@@ -472,6 +472,41 @@ def parse_judge_score(text):
         return float(d["personalization"]) + float(d["explanation_quality"])
     except Exception:
         return None
+
+
+def parse_judge_axes(text):
+    """(personalization, explanation_quality) as a float pair from the judge JSON;
+    None if unparseable or an axis is missing. Keeps the axes separate (vs
+    parse_judge_score which sums them) so selection can tie-break by axis."""
+    if not text:
+        return None
+    m = re.search(r"\{[^{}]*\}", text, re.DOTALL)
+    if not m:
+        return None
+    try:
+        d = json.loads(m.group(0))
+        return float(d["personalization"]), float(d["explanation_quality"])
+    except Exception:
+        return None
+
+
+def pick_best_axes(scored):
+    """`scored`: list of (reply, (pers, expl) | None). Selection order:
+      1. highest TOTAL (pers + expl),
+      2. tie-break: STRONGEST single axis (max of the two),
+      3. still tied: pick RANDOMLY among them.
+    Unscored (None) candidates are ignored; if none are scored, return the first
+    reply; [] -> None."""
+    if not scored:
+        return None
+    real = [(r, ax) for r, ax in scored if ax is not None]
+    if not real:
+        return scored[0][0]
+    def key(ax):
+        return (ax[0] + ax[1], max(ax))
+    best = max(key(ax) for _, ax in real)
+    top = [r for r, ax in real if key(ax) == best]
+    return random.choice(top)
 
 
 def pick_best(scored):
@@ -587,8 +622,9 @@ def generate_best_of_n(gen_model, judge_model, prompt, judge_context, tracks_str
         jraw = _call_model(judge_model,
                           build_judge_prompt(judge_context, tracks_str, r, listener_goal=goal),
                           sleep_fn=sleep_fn, gen_config={"temperature": 0.0})
-        scored.append((r, parse_judge_score(jraw)))
-    return pick_best(scored)
+        scored.append((r, parse_judge_axes(jraw)))
+    # tie-break: total -> strongest axis -> random (see pick_best_axes)
+    return pick_best_axes(scored)
 
 
 def _load_item_meta():
