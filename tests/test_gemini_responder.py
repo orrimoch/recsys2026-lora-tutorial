@@ -13,6 +13,7 @@ The dataset/API wiring in main() is integration-only.
 """
 from __future__ import annotations
 
+import re
 import sys
 import types
 from pathlib import Path
@@ -455,6 +456,65 @@ def test_generate_best_of_n_picks_highest_scored_candidate():
                                 sleep_fn=lambda *_: None)
     assert out == "strong reply"
     assert gen.calls == 2 and judge.calls == 2
+
+
+def test_parse_pairwise_verdict():
+    assert gr.parse_pairwise_verdict("A") == "A"
+    assert gr.parse_pairwise_verdict("B") == "B"
+    assert gr.parse_pairwise_verdict("Answer: A") == "A"
+    assert gr.parse_pairwise_verdict(" b ") == "B"
+    assert gr.parse_pairwise_verdict("neither is clear") is None
+    assert gr.parse_pairwise_verdict("") is None
+
+
+def test_build_pairwise_prompt_has_both_replies_and_axes():
+    p = gr.build_pairwise_prompt("ctx", "Song X", "REPLY_ALPHA", "REPLY_BETA")
+    assert "REPLY_ALPHA" in p and "REPLY_BETA" in p
+    low = p.lower()
+    assert "personalization" in low and "explanation" in low
+    assert " a " in f" {low} " or "'a'" in low  # asks for an A/B verdict
+
+
+class ContentJudge:
+    """Order-invariant fake judge: whichever slot's reply contains 'BEST' wins,
+    regardless of A/B position. Counts calls (to assert comparison counts)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def generate_content(self, prompt, **kw):
+        self.calls += 1
+        a = re.search(r"=== REPLY A ===\n(.*?)\n\n=== REPLY B ===", prompt, re.DOTALL)
+        b = re.search(r"=== REPLY B ===\n(.*?)\n\n", prompt, re.DOTALL)
+        atext = a.group(1) if a else ""
+        btext = b.group(1) if b else ""
+        letter = "A" if "BEST" in atext else ("B" if "BEST" in btext else "A")
+        return types.SimpleNamespace(text=letter)
+
+
+def test_select_pairwise_koth_picks_best_and_does_n_minus_1_compares():
+    judge = ContentJudge()
+    cands = ["c1", "c2", "c3 BEST", "c4", "c5", "c6"]
+    out = gr.select_pairwise_koth(judge, "ctx", "tracks", cands, sleep_fn=lambda *_: None)
+    assert out == "c3 BEST"
+    assert judge.calls == len(cands) - 1  # king-of-the-hill = N-1 comparisons
+
+
+def test_select_round_robin_picks_best_and_does_all_pairs():
+    judge = ContentJudge()
+    cands = ["c1", "c2 BEST", "c3", "c4"]
+    out = gr.select_round_robin(judge, "ctx", "tracks", cands, sleep_fn=lambda *_: None)
+    assert out == "c2 BEST"
+    assert judge.calls == 6  # C(4,2)
+
+
+def test_generate_best_of_n_pairwise_selects_best():
+    gen = FakeModel(["c1", "c2 BEST", "c3"])
+    judge = ContentJudge()
+    out = gr.generate_best_of_n(gen, judge, "prompt", "ctx", "tracks", fallback="ORIG",
+                                n=3, temperatures=[0.5, 0.8, 1.0], sleep_fn=lambda *_: None,
+                                select="pairwise")
+    assert out == "c2 BEST"
 
 
 def test_generate_best_of_n_falls_back_when_all_generation_fails():

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -432,11 +433,76 @@ def pick_best(scored):
     return scored[0][0]
 
 
+PAIRWISE_INSTRUCTIONS = """Compare two music-recommender replies to the SAME user and pick the better one on TWO axes:
+PERSONALIZATION: reflects THIS user's stated intent, mood, and taste (not generic).
+EXPLANATION_QUALITY: gives a concrete, accurate reason citing real attributes of the recommended track.
+Pick the single better reply overall. Answer with ONLY the letter A or B."""
+
+
+def build_pairwise_prompt(context, tracks_str, reply_a, reply_b):
+    """Prompt the judge to pick the better of two candidate replies (A vs B)."""
+    return (f"{PAIRWISE_INSTRUCTIONS}\n\n=== CONVERSATION ===\n{context}\n\n"
+            f"=== RECOMMENDED TRACKS ===\n{tracks_str}\n\n"
+            f"=== REPLY A ===\n{reply_a}\n\n=== REPLY B ===\n{reply_b}\n\n"
+            "Which reply is better? Answer ONLY 'A' or 'B'.")
+
+
+def parse_pairwise_verdict(text):
+    """Extract 'A' or 'B' from the judge output; None if neither is clearly given."""
+    if not text:
+        return None
+    m = re.search(r"\b([AB])\b", text.strip().upper())
+    return m.group(1) if m else None
+
+
+def _a_beats_b(judge_model, context, tracks_str, a, b, sleep_fn=time.sleep, swap=None):
+    """True if reply `a` is judged better than `b`. Order is randomized per call
+    (swap=None) to cancel the judge's A/B position bias; pass swap=False/True for
+    deterministic tests. Judge runs at temperature 0 for stable picks. An
+    unparseable/tie verdict keeps the incumbent (`a`)."""
+    if swap is None:
+        swap = random.random() < 0.5
+    left, right = (b, a) if swap else (a, b)
+    raw = _call_model(judge_model, build_pairwise_prompt(context, tracks_str, left, right),
+                      sleep_fn=sleep_fn, gen_config={"temperature": 0.0})
+    v = parse_pairwise_verdict(raw)
+    if v is None:
+        return True  # tie -> incumbent keeps its place
+    left_wins = (v == "A")
+    a_is_left = not swap
+    return left_wins == a_is_left
+
+
+def select_pairwise_koth(judge_model, context, tracks_str, cands, sleep_fn=time.sleep):
+    """King-of-the-hill: carry a champion through the list, N-1 pairwise compares."""
+    champ = cands[0]
+    for c in cands[1:]:
+        if not _a_beats_b(judge_model, context, tracks_str, champ, c, sleep_fn=sleep_fn):
+            champ = c
+    return champ
+
+
+def select_round_robin(judge_model, context, tracks_str, cands, sleep_fn=time.sleep):
+    """Every candidate vs every other (C(n,2) compares); return the most-wins reply.
+    Robust to noisy/non-transitive comparisons at higher cost."""
+    wins = [0] * len(cands)
+    for i in range(len(cands)):
+        for j in range(i + 1, len(cands)):
+            if _a_beats_b(judge_model, context, tracks_str, cands[i], cands[j], sleep_fn=sleep_fn):
+                wins[i] += 1
+            else:
+                wins[j] += 1
+    return cands[max(range(len(cands)), key=lambda k: wins[k])]
+
+
 def generate_best_of_n(gen_model, judge_model, prompt, judge_context, tracks_str,
-                       fallback, n, temperatures, sleep_fn=time.sleep, parse_fn=None):
-    """Generate n candidate replies (varied temperature), score each with the
-    judge model on the rubric, and return the highest-scoring. Falls back to the
-    row's original response if no candidate is produced."""
+                       fallback, n, temperatures, sleep_fn=time.sleep, parse_fn=None,
+                       select="pointwise"):
+    """Generate n candidate replies (varied temperature), then SELECT the best:
+      - 'pointwise'   : score each reply 0-5 x2 independently, take the argmax (N judge calls)
+      - 'pairwise'    : king-of-the-hill A-vs-B comparisons (N-1 judge calls, sharper)
+      - 'round_robin' : all pairs, most wins (C(N,2) judge calls, noise-robust)
+    Falls back to the row's original response if no candidate is produced."""
     cands = []
     for i in range(max(1, n)):
         t = temperatures[i % len(temperatures)]
@@ -451,10 +517,14 @@ def generate_best_of_n(gen_model, judge_model, prompt, judge_context, tracks_str
         return fallback
     if len(cands) == 1:
         return cands[0]
+    if select == "pairwise":
+        return select_pairwise_koth(judge_model, judge_context, tracks_str, cands, sleep_fn=sleep_fn)
+    if select == "round_robin":
+        return select_round_robin(judge_model, judge_context, tracks_str, cands, sleep_fn=sleep_fn)
     scored = []
     for r in cands:
         jraw = _call_model(judge_model, build_judge_prompt(judge_context, tracks_str, r),
-                          sleep_fn=sleep_fn)
+                          sleep_fn=sleep_fn, gen_config={"temperature": 0.0})
         scored.append((r, parse_judge_score(jraw)))
     return pick_best(scored)
 
@@ -497,6 +567,11 @@ def main():
                          "judge model, submit the highest-scoring (1 = single shot, default)")
     ap.add_argument("--judge-model", default=JUDGE_MODEL,
                     help="model that scores best-of-N candidates (default: cheap flash)")
+    ap.add_argument("--select", default="pointwise",
+                    choices=["pointwise", "pairwise", "round_robin"],
+                    help="best-of-N selection: pointwise (0-5 score each, N calls), "
+                         "pairwise (king-of-the-hill A-vs-B, N-1 calls), "
+                         "round_robin (all pairs, C(N,2) calls). Default pointwise.")
     args = ap.parse_args()
 
     if args.top_n < 1:
@@ -554,7 +629,7 @@ def main():
                     new_resp = generate_best_of_n(model, judge_model, prompt, ctx, tracks,
                                                   fallback, n=args.best_of,
                                                   temperatures=list(DEFAULT_TEMPS),
-                                                  parse_fn=parse_fn)
+                                                  parse_fn=parse_fn, select=args.select)
                 else:
                     new_resp = generate_response(model, prompt, fallback, parse_fn=parse_fn)
         except Exception as e:  # noqa: BLE001 — never let one row kill the run
