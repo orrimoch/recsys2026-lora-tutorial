@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import random
 import re
 import sys
 import time
@@ -72,13 +71,8 @@ To score well you MUST do BOTH:
 - PERSONALIZATION: tie the pick to something THIS user actually said AND to their current vibe (intent,
   mood, activity, taste). Reference it concretely; never be generic, and never present guesses about the
   user as facts.
-- EXPLANATION QUALITY: justify the pick with at least one real attribute of the recommended track (artist,
-  title, genre, mood, instrumentation, era) drawn ONLY from what you were given, and link that attribute
-  to the SPECIFIC thing the user asked for — not a generic "you'll like it".
-
-Connect through the explanation, not by echoing: do NOT repeat the user's words back to them, and never
-cut the concrete track detail to stay short — the specific reason the track fits their request is the
-most important part of the reply.
+- EXPLANATION: justify the pick with at least one real attribute of the recommended track (artist,
+  title, genre, mood, instrumentation, era) drawn ONLY from what you were given, and say WHY it fits.
 
 Rules: lead with the recommendation; never open with a generic line; keep it tight — every sentence earns
 its place; never invent or guess attributes you were not given; if unsure of something, leave it out so
@@ -106,19 +100,6 @@ def _track_inline(meta):
     return s
 
 
-def _decade(release_date):
-    """Map a release_date (HF field: a 'YYYY-MM-DD' string, a 'YYYY', or a
-    singleton list of one) to a citable era label like '1990s'. Returns None for
-    missing/malformed dates so a bogus era is never emitted into the prompt."""
-    rd = _first(release_date)
-    if rd is None:
-        return None
-    s = str(rd).strip()
-    if len(s) < 4 or not s[:4].isdigit():
-        return None
-    return f"{(int(s[:4]) // 10) * 10}s"
-
-
 def render_context(conversations, item_db_meta, target_turn):
     """Render the user-visible conversation up to (and including) the target
     user turn. Music turns are expanded to the recommended track's name AND its
@@ -134,16 +115,7 @@ def render_context(conversations, item_db_meta, target_turn):
         if role == "music":
             role = "assistant"
             m = item_db_meta.get(str(content), {})
-            inline = _track_inline(m)
-            # Surface the recommender's prior-turn 'thought' (its reasoning for
-            # that pick) so the reply can build on real continuity rather than
-            # invent it. Prior turns only (hist is turn < target) -> leak-safe.
-            # Guard against NaN (pandas fills missing 'thought' cells) and blanks.
-            th = t.get("thought")
-            if isinstance(th, str) and th.strip():
-                content = f"[recommended: {inline} | why: {th.strip()}]"
-            else:
-                content = f"[recommended: {inline}]"
+            content = f"[recommended: {_track_inline(m)}]"
         lines.append(f"{role}: {content}")
     cur = df[(df["turn_number"] == target_turn) & (df["role"] == "user")]
     if len(cur):
@@ -171,59 +143,8 @@ def format_tracks(tids, item_db_meta, n=1):
             part += f" (album {album})"
         if tags:
             part += f" [{', '.join(str(x) for x in tags[:5])}]"
-        # Era: a concrete, citable attribute the rubric rewards. The prompt only
-        # lets the model mention attributes present in this block, so without it
-        # the era is simply unavailable. Omitted entirely when unknown.
-        era = _decade(m.get("release_date"))
-        if era:
-            part += f" — era {era}"
         out.append(part)
     return "; ".join(out) if out else "(none)"
-
-
-def render_user_context(user_profile):
-    """Compact 'User context' line from STATED preferences only
-    (preferred_musical_culture, preferred_language). Inferred demographics
-    (age/gender/country) are deliberately excluded: the judge scores
-    personalization on what the user actually signalled, and presenting
-    demographic guesses risks reading as stereotyping (could LOWER the score).
-    Returns '' when no stated preference is present."""
-    if not user_profile:
-        return ""
-    parts = []
-    culture = (user_profile.get("preferred_musical_culture") or "").strip()
-    lang = (user_profile.get("preferred_language") or "").strip()
-    if culture:
-        parts.append(f"Preferred musical culture: {culture}")
-    if lang:
-        parts.append(f"Preferred language: {lang}")
-    return " | ".join(parts)
-
-
-def goal_progress_tally(assessments, target_turn):
-    """One-line tally of PRIOR picks' goal progress from
-    goal_progress_assessments, so the reply can read the trajectory and keep
-    momentum. Only turns strictly before target_turn count — the target turn's
-    assessment is the label for the gold we're generating and MUST be excluded.
-    Returns '' when there is no prior signal."""
-    if not assessments:
-        return ""
-    moved = missed = 0
-    for a in assessments:
-        try:
-            tn = int(a.get("turn_number"))
-        except (TypeError, ValueError):
-            continue
-        if tn >= target_turn:
-            continue
-        v = a.get("goal_progress_assessment")
-        if v == "MOVES_TOWARD_GOAL":
-            moved += 1
-        elif v == "DOES_NOT_MOVE_TOWARD_GOAL":
-            missed += 1
-    if moved == 0 and missed == 0:
-        return ""
-    return f"Goal progress so far: {moved} moved toward, {missed} missed"
 
 
 # Few-shot style references. REAL tracks + REAL user requests curated from the
@@ -247,18 +168,13 @@ FEW_SHOT_EXAMPLES = """=== EXAMPLES (style reference only — do not reuse these
 [reply]: Stay with Florence + The Machine and try "Cosmic Love" — just as epic and dramatic, built on Florence's soaring vocals and a surging, cathartic swell that matches the emotional intensity you're after."""
 
 
-def build_prompt(context, tracks_str, listener_goal, user_context="", goal_progress=""):
+def build_prompt(context, tracks_str, listener_goal):
     """Assemble the responder prompt from the rubric instructions, few-shot style
-    examples, the conversation, optional stated user context + goal-progress
-    momentum, the recommended tracks, and (optionally) the goal."""
+    examples, the conversation, the recommended tracks, and (optionally) the goal."""
     parts = [RESPONDER_INSTRUCTIONS, "", FEW_SHOT_EXAMPLES,
              "", "=== CONVERSATION ===", context]
-    if user_context:
-        parts += ["", "=== USER CONTEXT (stated preferences) ===", user_context]
     if listener_goal:
         parts += ["", f"Listener goal: {listener_goal}"]
-    if goal_progress:
-        parts += ["", goal_progress]
     parts += ["", "=== RECOMMENDED TRACK(S) TO PRESENT ===", tracks_str,
               "", "Reply:"]
     return "\n".join(parts)
@@ -291,17 +207,13 @@ Return ONLY a JSON object with exactly these keys:
 Output ONLY the JSON object."""
 
 
-def build_structured_prompt(context, tracks_str, listener_goal, user_context="", goal_progress=""):
+def build_structured_prompt(context, tracks_str, listener_goal):
     """CoT-style prompt: the model fills personalization axes + a per-axis track
     'fit' (hidden scaffolding) before writing the final `reply`. Only `reply` is
     submitted (see parse_structured_reply)."""
     parts = [STRUCTURED_INSTRUCTIONS, "", "=== CONVERSATION ===", context]
-    if user_context:
-        parts += ["", "=== USER CONTEXT (stated preferences) ===", user_context]
     if listener_goal:
         parts += ["", f"Listener goal: {listener_goal}"]
-    if goal_progress:
-        parts += ["", goal_progress]
     parts += ["", "=== RECOMMENDED TRACK(S) TO PRESENT ===", tracks_str, "", "JSON:"]
     return "\n".join(parts)
 
@@ -394,67 +306,15 @@ def generate_response(model, prompt, fallback, max_attempts=6,
     return text if text else fallback
 
 
-JUDGE_INSTRUCTIONS = """You score a music recommender's reply to a user on TWO INDEPENDENT axes, 1-5 each.
-Judge ONLY the written reply (text quality) — not whether the recommended track is the "right" pick.
-
-PERSONALIZATION — does the reply reflect THIS user's stated intent, mood, and taste?
-  5 = clearly tailored: references something the user ACTUALLY said and ties the pick to their current vibe.
-  3 = partly tailored but also generic, or leans on taste the user never stated.
-  1 = generic; could be sent to anyone; ignores what the user asked for.
-  Example 5: "Since you wanted something dramatic to wind down to, ..."   Example 1: "Here are some songs you might like."
-
-EXPLANATION QUALITY — does it give a concrete, accurate reason citing real attributes of the recommended track?
-  5 = names a specific attribute (artist, genre, mood, instrumentation, era) and links it to what the user asked.
-  3 = gives a reason, but vague or only loosely tied to the request.
-  1 = no real reason, or vague / over-claimed / hallucinated attributes.
-  Example 5: "...its sparse piano and aching vocal match the melancholy you're after."   Example 1: "It's a great track, enjoy!"
-
-Score the two axes INDEPENDENTLY. Return ONLY a JSON object: {"personalization": <1-5>, "explanation_quality": <1-5>}"""
+JUDGE_INSTRUCTIONS = """Score a music recommender's reply to a user on TWO axes, 0-5 each.
+PERSONALIZATION: does the reply reflect THIS user's stated intent, mood, and taste? 5 = clearly tailored to them; 0 = generic.
+EXPLANATION_QUALITY: does it give a concrete, accurate reason citing real attributes of the recommended track? 5 = specific and grounded; 0 = vague or hallucinated.
+Return ONLY a JSON object: {"personalization": <0-5>, "explanation_quality": <0-5>}"""
 
 
-JUDGE_INSTRUCTIONS_FULL = """You score a music recommender's reply to a user on TWO INDEPENDENT axes, 1-5 each.
-Judge ONLY the written reply (text quality) — not whether the recommended track is the "right" pick.
-Every level is defined; pick the level whose description best fits — do not invent in-between values.
-
-PERSONALIZATION — does the reply reflect THIS user's stated intent, mood, and taste?
-  5 = EXCELLENT: explicitly references something the user ACTUALLY said AND ties the pick to their current mood/activity; unmistakably for this user.
-  4 = STRONG: clearly tailored to the user's stated request, but does not connect to their broader mood/vibe.
-  3 = PARTIAL: touches the request but is also somewhat generic, or leans on taste the user never stated.
-  2 = WEAK: mostly generic with only a faint nod to the user.
-  1 = GENERIC: could be sent to anyone; ignores what the user asked for.
-  Example 5: "Since you wanted something dramatic to wind down to, ..."   Example 1: "Here are some songs you might like."
-
-EXPLANATION QUALITY — does it give a concrete, accurate reason citing real attributes of the recommended track?
-  5 = EXCELLENT: names a specific attribute (artist, genre, mood, instrumentation, era) AND links it directly to what the user asked.
-  4 = STRONG: cites a concrete attribute, but the link to the request is implicit or only partial.
-  3 = VAGUE: gives a reason, but only loosely tied to the track or the request.
-  2 = THIN: a near-empty reason ("you'll like it") with little specificity.
-  1 = ABSENT: no real reason, or over-claimed / hallucinated attributes.
-  Example 5: "...its sparse piano and aching vocal match the melancholy you're after."   Example 1: "It's a great track, enjoy!"
-
-Score the two axes INDEPENDENTLY. Return ONLY a JSON object: {"personalization": <1-5>, "explanation_quality": <1-5>}"""
-
-# Which rubric build_judge_prompt uses by default: 'anchored' (1/3/5, default) or
-# 'full' (every level 1-5 defined). Override via env, the --judge-rubric flag, or
-# by setting gemini_responder.JUDGE_RUBRIC at runtime (e.g. from the nb81 lab).
-JUDGE_RUBRIC = os.environ.get("GEMINI_JUDGE_RUBRIC", "anchored")
-
-
-def active_judge_instructions(rubric=None):
-    """Return the judge rubric text for `rubric` (defaults to the module JUDGE_RUBRIC)."""
-    r = rubric or JUDGE_RUBRIC
-    return JUDGE_INSTRUCTIONS_FULL if r == "full" else JUDGE_INSTRUCTIONS
-
-
-def build_judge_prompt(context, tracks_str, reply, instructions=None, listener_goal=""):
-    """Prompt the judge model to score one candidate reply on the two axes.
-    `instructions` overrides the active rubric (else uses active_judge_instructions()).
-    `listener_goal` (the user's stated intent the responder also saw) is included so
-    the judge can fairly assess PERSONALIZATION against the same goal — user PROFILE
-    is intentionally NOT passed (the blind judge is text/conversation-based)."""
-    instr = instructions or active_judge_instructions()
-    goal_line = f"\n\nListener goal: {listener_goal}" if listener_goal else ""
-    return (f"{instr}\n\n=== CONVERSATION ===\n{context}{goal_line}\n\n"
+def build_judge_prompt(context, tracks_str, reply):
+    """Prompt the judge model to score one candidate reply on the two axes."""
+    return (f"{JUDGE_INSTRUCTIONS}\n\n=== CONVERSATION ===\n{context}\n\n"
             f"=== RECOMMENDED TRACKS ===\n{tracks_str}\n\n"
             f"=== REPLY TO SCORE ===\n{reply}\n\nReturn only the JSON.")
 
@@ -474,41 +334,6 @@ def parse_judge_score(text):
         return None
 
 
-def parse_judge_axes(text):
-    """(personalization, explanation_quality) as a float pair from the judge JSON;
-    None if unparseable or an axis is missing. Keeps the axes separate (vs
-    parse_judge_score which sums them) so selection can tie-break by axis."""
-    if not text:
-        return None
-    m = re.search(r"\{[^{}]*\}", text, re.DOTALL)
-    if not m:
-        return None
-    try:
-        d = json.loads(m.group(0))
-        return float(d["personalization"]), float(d["explanation_quality"])
-    except Exception:
-        return None
-
-
-def pick_best_axes(scored):
-    """`scored`: list of (reply, (pers, expl) | None). Selection order:
-      1. highest TOTAL (pers + expl),
-      2. tie-break: STRONGEST single axis (max of the two),
-      3. still tied: pick RANDOMLY among them.
-    Unscored (None) candidates are ignored; if none are scored, return the first
-    reply; [] -> None."""
-    if not scored:
-        return None
-    real = [(r, ax) for r, ax in scored if ax is not None]
-    if not real:
-        return scored[0][0]
-    def key(ax):
-        return (ax[0] + ax[1], max(ax))
-    best = max(key(ax) for _, ax in real)
-    top = [r for r, ax in real if key(ax) == best]
-    return random.choice(top)
-
-
 def pick_best(scored):
     """`scored`: list of (reply, score|None). Return the reply with the highest
     score; if no candidate was scored, return the first reply; [] -> None."""
@@ -520,83 +345,11 @@ def pick_best(scored):
     return scored[0][0]
 
 
-PAIRWISE_INSTRUCTIONS = """Compare two music-recommender replies to the SAME user and pick the better one on TWO axes:
-PERSONALIZATION: reflects THIS user's stated intent, mood, and taste (not generic).
-EXPLANATION QUALITY: gives a concrete, accurate reason citing real attributes of the recommended track.
-Pick the single better reply overall. Answer with ONLY the letter A or B."""
-
-
-def build_pairwise_prompt(context, tracks_str, reply_a, reply_b, listener_goal=""):
-    """Prompt the judge to pick the better of two candidate replies (A vs B).
-    `listener_goal` (stated user intent) is included so the comparison weighs
-    PERSONALIZATION against the same goal the responder saw."""
-    goal_line = f"\n\nListener goal: {listener_goal}" if listener_goal else ""
-    return (f"{PAIRWISE_INSTRUCTIONS}\n\n=== CONVERSATION ===\n{context}{goal_line}\n\n"
-            f"=== RECOMMENDED TRACKS ===\n{tracks_str}\n\n"
-            f"=== REPLY A ===\n{reply_a}\n\n=== REPLY B ===\n{reply_b}\n\n"
-            "Which reply is better? Answer ONLY 'A' or 'B'.")
-
-
-def parse_pairwise_verdict(text):
-    """Extract 'A' or 'B' from the judge output; None if neither is clearly given."""
-    if not text:
-        return None
-    m = re.search(r"\b([AB])\b", text.strip().upper())
-    return m.group(1) if m else None
-
-
-def _a_beats_b(judge_model, context, tracks_str, a, b, sleep_fn=time.sleep, swap=None,
-               listener_goal=""):
-    """True if reply `a` is judged better than `b`. Order is randomized per call
-    (swap=None) to cancel the judge's A/B position bias; pass swap=False/True for
-    deterministic tests. Judge runs at temperature 0 for stable picks. An
-    unparseable/tie verdict keeps the incumbent (`a`)."""
-    if swap is None:
-        swap = random.random() < 0.5
-    left, right = (b, a) if swap else (a, b)
-    raw = _call_model(judge_model,
-                      build_pairwise_prompt(context, tracks_str, left, right, listener_goal=listener_goal),
-                      sleep_fn=sleep_fn, gen_config={"temperature": 0.0})
-    v = parse_pairwise_verdict(raw)
-    if v is None:
-        return True  # tie -> incumbent keeps its place
-    left_wins = (v == "A")
-    a_is_left = not swap
-    return left_wins == a_is_left
-
-
-def select_pairwise_koth(judge_model, context, tracks_str, cands, sleep_fn=time.sleep, listener_goal=""):
-    """King-of-the-hill: carry a champion through the list, N-1 pairwise compares."""
-    champ = cands[0]
-    for c in cands[1:]:
-        if not _a_beats_b(judge_model, context, tracks_str, champ, c, sleep_fn=sleep_fn,
-                          listener_goal=listener_goal):
-            champ = c
-    return champ
-
-
-def select_round_robin(judge_model, context, tracks_str, cands, sleep_fn=time.sleep, listener_goal=""):
-    """Every candidate vs every other (C(n,2) compares); return the most-wins reply.
-    Robust to noisy/non-transitive comparisons at higher cost."""
-    wins = [0] * len(cands)
-    for i in range(len(cands)):
-        for j in range(i + 1, len(cands)):
-            if _a_beats_b(judge_model, context, tracks_str, cands[i], cands[j], sleep_fn=sleep_fn,
-                          listener_goal=listener_goal):
-                wins[i] += 1
-            else:
-                wins[j] += 1
-    return cands[max(range(len(cands)), key=lambda k: wins[k])]
-
-
 def generate_best_of_n(gen_model, judge_model, prompt, judge_context, tracks_str,
-                       fallback, n, temperatures, sleep_fn=time.sleep, parse_fn=None,
-                       select="pointwise", goal=""):
-    """Generate n candidate replies (varied temperature), then SELECT the best:
-      - 'pointwise'   : score each reply 0-5 x2 independently, take the argmax (N judge calls)
-      - 'pairwise'    : king-of-the-hill A-vs-B comparisons (N-1 judge calls, sharper)
-      - 'round_robin' : all pairs, most wins (C(N,2) judge calls, noise-robust)
-    Falls back to the row's original response if no candidate is produced."""
+                       fallback, n, temperatures, sleep_fn=time.sleep, parse_fn=None):
+    """Generate n candidate replies (varied temperature), score each with the
+    judge model on the rubric, and return the highest-scoring. Falls back to the
+    row's original response if no candidate is produced."""
     cands = []
     for i in range(max(1, n)):
         t = temperatures[i % len(temperatures)]
@@ -611,20 +364,12 @@ def generate_best_of_n(gen_model, judge_model, prompt, judge_context, tracks_str
         return fallback
     if len(cands) == 1:
         return cands[0]
-    if select == "pairwise":
-        return select_pairwise_koth(judge_model, judge_context, tracks_str, cands,
-                                    sleep_fn=sleep_fn, listener_goal=goal)
-    if select == "round_robin":
-        return select_round_robin(judge_model, judge_context, tracks_str, cands,
-                                  sleep_fn=sleep_fn, listener_goal=goal)
     scored = []
     for r in cands:
-        jraw = _call_model(judge_model,
-                          build_judge_prompt(judge_context, tracks_str, r, listener_goal=goal),
-                          sleep_fn=sleep_fn, gen_config={"temperature": 0.0})
-        scored.append((r, parse_judge_axes(jraw)))
-    # tie-break: total -> strongest axis -> random (see pick_best_axes)
-    return pick_best_axes(scored)
+        jraw = _call_model(judge_model, build_judge_prompt(judge_context, tracks_str, r),
+                          sleep_fn=sleep_fn)
+        scored.append((r, parse_judge_score(jraw)))
+    return pick_best(scored)
 
 
 def _load_item_meta():
@@ -639,17 +384,11 @@ def _load_item_meta():
             "artist_name": r.get("artist_name"),
             "album_name": r.get("album_name"),
             "tags": r.get("tag_list"),
-            # release_date -> era (citable). popularity carried for a future,
-            # separately-measured variant (kept out of the prompt text for now
-            # to avoid judge-penalized over-claims).
-            "release_date": r.get("release_date"),
-            "popularity": r.get("popularity"),
         }
     return meta
 
 
 def main():
-    global JUDGE_RUBRIC  # set from --judge-rubric below; declared first (used as a flag default)
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pred", required=True, help="existing prediction.json (keeps predicted_track_ids)")
     ap.add_argument("--out", required=True, help="output prediction.json with regenerated responses")
@@ -666,17 +405,7 @@ def main():
                          "judge model, submit the highest-scoring (1 = single shot, default)")
     ap.add_argument("--judge-model", default=JUDGE_MODEL,
                     help="model that scores best-of-N candidates (default: cheap flash)")
-    ap.add_argument("--select", default="pointwise",
-                    choices=["pointwise", "pairwise", "round_robin"],
-                    help="best-of-N selection: pointwise (0-5 score each, N calls), "
-                         "pairwise (king-of-the-hill A-vs-B, N-1 calls), "
-                         "round_robin (all pairs, C(N,2) calls). Default pointwise.")
-    ap.add_argument("--judge-rubric", default=JUDGE_RUBRIC, choices=["anchored", "full"],
-                    help="judge rubric: 'anchored' (1/3/5 anchors, default) or "
-                         "'full' (every level 1-5 defined, no grey area).")
     args = ap.parse_args()
-
-    JUDGE_RUBRIC = args.judge_rubric  # build_judge_prompt picks up the chosen rubric
 
     if args.top_n < 1:
         sys.exit("ERROR: --top-n must be >= 1 (the responder needs at least one track to explain).")
@@ -717,24 +446,17 @@ def main():
                 ctx = render_context(sess["conversations"], item_db_meta, p["turn_number"])
                 tracks = format_tracks(p.get("predicted_track_ids"), item_db_meta, n=args.top_n)
                 goal = ((sess.get("conversation_goal") or {}).get("listener_goal") or "").strip()
-                user_ctx = render_user_context(sess.get("user_profile"))
-                gprog = goal_progress_tally(sess.get("goal_progress_assessments"),
-                                            p["turn_number"])
                 if args.structured_personality:
-                    prompt = build_structured_prompt(ctx, tracks, goal,
-                                                     user_context=user_ctx,
-                                                     goal_progress=gprog)
+                    prompt = build_structured_prompt(ctx, tracks, goal)
                     parse_fn = parse_structured_reply
                 else:
-                    prompt = build_prompt(ctx, tracks, goal,
-                                          user_context=user_ctx, goal_progress=gprog)
+                    prompt = build_prompt(ctx, tracks, goal)
                     parse_fn = None
                 if args.best_of > 1:
                     new_resp = generate_best_of_n(model, judge_model, prompt, ctx, tracks,
                                                   fallback, n=args.best_of,
                                                   temperatures=list(DEFAULT_TEMPS),
-                                                  parse_fn=parse_fn, select=args.select,
-                                                  goal=goal)
+                                                  parse_fn=parse_fn)
                 else:
                     new_resp = generate_response(model, prompt, fallback, parse_fn=parse_fn)
         except Exception as e:  # noqa: BLE001 — never let one row kill the run
