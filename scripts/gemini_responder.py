@@ -394,10 +394,22 @@ def generate_response(model, prompt, fallback, max_attempts=6,
     return text if text else fallback
 
 
-JUDGE_INSTRUCTIONS = """Score a music recommender's reply to a user on TWO axes, 0-5 each.
-PERSONALIZATION: does the reply reflect THIS user's stated intent, mood, and taste? 5 = clearly tailored to them; 0 = generic.
-EXPLANATION_QUALITY: does it give a concrete, accurate reason citing real attributes of the recommended track? 5 = specific and grounded; 0 = vague or hallucinated.
-Return ONLY a JSON object: {"personalization": <0-5>, "explanation_quality": <0-5>}"""
+JUDGE_INSTRUCTIONS = """You score a music recommender's reply to a user on TWO INDEPENDENT axes, 1-5 each.
+Judge ONLY the written reply (text quality) — not whether the recommended track is the "right" pick.
+
+PERSONALIZATION — does the reply reflect THIS user's stated intent, mood, and taste?
+  5 = clearly tailored: references something the user ACTUALLY said and ties the pick to their current vibe.
+  3 = partly tailored but also generic, or leans on taste the user never stated.
+  1 = generic; could be sent to anyone; ignores what the user asked for.
+  Example 5: "Since you wanted something dramatic to wind down to, ..."   Example 1: "Here are some songs you might like."
+
+EXPLANATION_QUALITY — does it give a concrete, accurate reason citing real attributes of the recommended track?
+  5 = names a specific attribute (artist, genre, mood, instrumentation, era) and links it to what the user asked.
+  3 = gives a reason, but vague or only loosely tied to the request.
+  1 = no real reason, or vague / over-claimed / hallucinated attributes.
+  Example 5: "...its sparse piano and aching vocal match the melancholy you're after."   Example 1: "It's a great track, enjoy!"
+
+Score the two axes INDEPENDENTLY. Return ONLY a JSON object: {"personalization": <1-5>, "explanation_quality": <1-5>}"""
 
 
 def build_judge_prompt(context, tracks_str, reply):

@@ -435,6 +435,22 @@ def test_parse_judge_score_sums_axes_or_none():
     assert gr.parse_judge_score("") is None
 
 
+def test_judge_instructions_anchored_1_to_5_with_examples():
+    j = gr.JUDGE_INSTRUCTIONS
+    low = j.lower()
+    # both named axes (exact JSON keys the parser expects)
+    assert "personalization" in low and "explanation_quality" in low
+    # 1-5 scale, both ends anchored
+    assert "1-5" in j
+    assert "5 =" in j and "1 =" in j
+    # concrete anchors / examples of success vs failure
+    assert "example" in low
+    # scored independently (matches the official 'two independent dimensions')
+    assert "independent" in low
+    # still asks for the JSON object the parser needs
+    assert '"personalization"' in j and '"explanation_quality"' in j
+
+
 def test_build_judge_prompt_contains_reply_and_rubric():
     p = gr.build_judge_prompt("ctx", "Song A by Artist A", "my reply text")
     assert "my reply text" in p
