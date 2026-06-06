@@ -3,12 +3,14 @@
 For each music turn in each (sampled) train session:
   1. Build retrieval_input = newline-joined chat history up to the user turn.
   2. Run wRRF retrieval -> top-N candidate tids (N=100 by default).
-  3. For each candidate, compute a 14-feature vector:
-       Numeric:
+  3. For each candidate, compute the feature vector. The CANONICAL, up-to-date
+     feature list is the row dict emitted by extract_features() below — this
+     docstring only sketches the main numeric ones. (Historical note:
+     dense_meta_cos / dense_lyrics_cos were listed here but NEVER emitted; the
+     real query-doc cosine feature is bge_cos, gated behind --bge-model.)
+       Numeric (selected):
          - wrrf_score         : fusion score from RRF
          - bm25_score         : standalone BM25 score (proxy for name-match)
-         - dense_meta_cos     : cosine vs metadata-qwen3 track embedding
-         - dense_lyrics_cos   : cosine vs lyrics-qwen3 track embedding
          - cfbpr_score        : user.track dot product (0 for cold users)
          - pop_log            : log1p(track popularity)
          - recency_years      : years from 2026 to release_date (0 if unknown)
@@ -369,11 +371,15 @@ def extract_features(
             "tag_overlap_count": tag_overlap,
             # NEW session-state feature (18)
             "last_turn_moved_toward_goal": last_goal_move,
-            # NEW retrieval-rank features (19-21) — populated by caller; default to wrrf_rank.
-            "bm25_rank_inv": 1.0 / max(1, c.get("bm25_rank", c["wrrf_rank"])),
-            "dense_meta_rank_inv": 1.0 / max(1, c.get("dense_meta_rank", c["wrrf_rank"])),
-            "dense_lyrics_rank_inv": 1.0 / max(1, c.get("dense_lyrics_rank", c["wrrf_rank"])),
-            # NEW reranker-output features (22, 23) — caller supplies; default 0.
+            # NOTE: bm25_rank_inv / dense_meta_rank_inv / dense_lyrics_rank_inv
+            # were REMOVED — WRRFRunner never populated their per-channel ranks,
+            # so each collapsed to 1/wrrf_rank (three collinear duplicates of the
+            # dominant feature, wasting tree capacity). Do NOT re-add them by
+            # wiring real per-channel ranks: that is the documented-dead
+            # RRF-reweight lever (+recall, -dev) and sasrec_rank carries an
+            # in-sample leak. Requires a clean_full retrain to take effect; the
+            # f_idx-gated serve mirror (lgbm_rerank.py) auto-disables them then.
+            # NEW reranker-output features — caller supplies; default 0.
             "ce_score": float(c.get("ce_score", 0.0)),
             "ce_rank_inv": 1.0 / max(1, c.get("ce_rank", c["wrrf_rank"])),
             # NEW session-position features (24, 25)

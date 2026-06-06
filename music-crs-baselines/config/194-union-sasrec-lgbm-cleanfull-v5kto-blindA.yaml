@@ -47,7 +47,12 @@ reranker_model_path: "/content/drive/MyDrive/recsys2026_retrieval_v2_cache/lgbm/
 response_prompt_name: "response_generation_cot_user_state"
 response_max_new_tokens: 320
 top_n_for_prompt: 1
-query_preprocessing_mode: "raw"
+# raw_with_goal: append the user-stated listener_goal to the retrieval query so
+# SERVE matches the goal-ful query the dev recall harness (nb74 cell-4) already
+# measures (serve was 'raw' = goal-less = a serve/measurement parity gap).
+# VALIDATE on nb74 before submitting: the LGBM was trained goal-less, so confirm
+# the goal-ful candidate pool does not shift membership enough to regress nDCG.
+query_preprocessing_mode: "raw_with_goal"
 
 use_vllm: false
 

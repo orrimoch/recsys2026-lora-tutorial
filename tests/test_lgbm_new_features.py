@@ -1,6 +1,23 @@
 from scripts.build_lgbm_features import session_match_features
 
 
+def test_extract_features_omits_degenerate_rank_inv_columns():
+    # bm25_rank_inv / dense_meta_rank_inv / dense_lyrics_rank_inv were silent
+    # duplicates of 1/wrrf_rank: WRRFRunner never populated the per-channel
+    # ranks, so each collapsed to 1/wrrf_rank and fed the LGBM ranker three
+    # collinear copies of its dominant feature. They must no longer be emitted.
+    # (The serve mirror in lgbm_rerank.py stays f_idx-gated, so it auto-disables
+    # them once the model is retrained without these columns.)
+    import inspect
+    from scripts import build_lgbm_features as blf
+    src = inspect.getsource(blf.extract_features)
+    # Check the emit form ("name":) so an explanatory comment that mentions the
+    # names in prose doesn't trip the guard — only an actual emitted key fails.
+    for dead in ("bm25_rank_inv", "dense_meta_rank_inv", "dense_lyrics_rank_inv"):
+        assert f'"{dead}":' not in src, (
+            f"{dead} is a degenerate 1/wrrf_rank duplicate — must not be emitted")
+
+
 def test_same_artist_and_album_flags_and_counts():
     played_meta = [{"artist_name": "A", "album_name": "X"},
                    {"artist_name": "A", "album_name": "Y"}]
