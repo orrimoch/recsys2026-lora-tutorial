@@ -451,6 +451,22 @@ def test_judge_instructions_anchored_1_to_5_with_examples():
     assert '"personalization"' in j and '"explanation_quality"' in j
 
 
+def test_build_judge_prompt_includes_listener_goal_when_present():
+    # The judge should see the same stated intent the responder used, so it can
+    # fairly score Personalization. (User profile is intentionally NOT included.)
+    p = gr.build_judge_prompt("ctx", "Song A", "reply", listener_goal="discover mellow jazz")
+    assert "discover mellow jazz" in p
+    # omitted cleanly when there is no goal
+    p2 = gr.build_judge_prompt("ctx", "Song A", "reply")
+    assert "Listener goal:" not in p2
+
+
+def test_build_pairwise_prompt_includes_listener_goal_when_present():
+    p = gr.build_pairwise_prompt("ctx", "Song A", "A", "B", listener_goal="upbeat workout")
+    assert "upbeat workout" in p
+    assert "Listener goal:" not in gr.build_pairwise_prompt("ctx", "Song A", "A", "B")
+
+
 def test_judge_instructions_full_defines_all_five_levels():
     j = gr.JUDGE_INSTRUCTIONS_FULL
     low = j.lower()

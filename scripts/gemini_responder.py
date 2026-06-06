@@ -72,7 +72,7 @@ To score well you MUST do BOTH:
 - PERSONALIZATION: tie the pick to something THIS user actually said AND to their current vibe (intent,
   mood, activity, taste). Reference it concretely; never be generic, and never present guesses about the
   user as facts.
-- EXPLANATION: justify the pick with at least one real attribute of the recommended track (artist,
+- EXPLANATION QUALITY: justify the pick with at least one real attribute of the recommended track (artist,
   title, genre, mood, instrumentation, era) drawn ONLY from what you were given, and link that attribute
   to the SPECIFIC thing the user asked for — not a generic "you'll like it".
 
@@ -403,7 +403,7 @@ PERSONALIZATION — does the reply reflect THIS user's stated intent, mood, and 
   1 = generic; could be sent to anyone; ignores what the user asked for.
   Example 5: "Since you wanted something dramatic to wind down to, ..."   Example 1: "Here are some songs you might like."
 
-EXPLANATION_QUALITY — does it give a concrete, accurate reason citing real attributes of the recommended track?
+EXPLANATION QUALITY — does it give a concrete, accurate reason citing real attributes of the recommended track?
   5 = names a specific attribute (artist, genre, mood, instrumentation, era) and links it to what the user asked.
   3 = gives a reason, but vague or only loosely tied to the request.
   1 = no real reason, or vague / over-claimed / hallucinated attributes.
@@ -424,7 +424,7 @@ PERSONALIZATION — does the reply reflect THIS user's stated intent, mood, and 
   1 = generic; could be sent to anyone; ignores what the user asked for.
   Example 5: "Since you wanted something dramatic to wind down to, ..."   Example 1: "Here are some songs you might like."
 
-EXPLANATION_QUALITY — does it give a concrete, accurate reason citing real attributes of the recommended track?
+EXPLANATION QUALITY — does it give a concrete, accurate reason citing real attributes of the recommended track?
   5 = names a specific attribute (artist, genre, mood, instrumentation, era) AND links it directly to what the user asked.
   4 = cites a concrete attribute, but the link to the request is implicit or only partial.
   3 = gives a reason, but vague or only loosely tied to the track or the request.
@@ -446,11 +446,15 @@ def active_judge_instructions(rubric=None):
     return JUDGE_INSTRUCTIONS_FULL if r == "full" else JUDGE_INSTRUCTIONS
 
 
-def build_judge_prompt(context, tracks_str, reply, instructions=None):
+def build_judge_prompt(context, tracks_str, reply, instructions=None, listener_goal=""):
     """Prompt the judge model to score one candidate reply on the two axes.
-    `instructions` overrides the active rubric (else uses active_judge_instructions())."""
+    `instructions` overrides the active rubric (else uses active_judge_instructions()).
+    `listener_goal` (the user's stated intent the responder also saw) is included so
+    the judge can fairly assess PERSONALIZATION against the same goal — user PROFILE
+    is intentionally NOT passed (the blind judge is text/conversation-based)."""
     instr = instructions or active_judge_instructions()
-    return (f"{instr}\n\n=== CONVERSATION ===\n{context}\n\n"
+    goal_line = f"\n\nListener goal: {listener_goal}" if listener_goal else ""
+    return (f"{instr}\n\n=== CONVERSATION ===\n{context}{goal_line}\n\n"
             f"=== RECOMMENDED TRACKS ===\n{tracks_str}\n\n"
             f"=== REPLY TO SCORE ===\n{reply}\n\nReturn only the JSON.")
 
@@ -483,13 +487,16 @@ def pick_best(scored):
 
 PAIRWISE_INSTRUCTIONS = """Compare two music-recommender replies to the SAME user and pick the better one on TWO axes:
 PERSONALIZATION: reflects THIS user's stated intent, mood, and taste (not generic).
-EXPLANATION_QUALITY: gives a concrete, accurate reason citing real attributes of the recommended track.
+EXPLANATION QUALITY: gives a concrete, accurate reason citing real attributes of the recommended track.
 Pick the single better reply overall. Answer with ONLY the letter A or B."""
 
 
-def build_pairwise_prompt(context, tracks_str, reply_a, reply_b):
-    """Prompt the judge to pick the better of two candidate replies (A vs B)."""
-    return (f"{PAIRWISE_INSTRUCTIONS}\n\n=== CONVERSATION ===\n{context}\n\n"
+def build_pairwise_prompt(context, tracks_str, reply_a, reply_b, listener_goal=""):
+    """Prompt the judge to pick the better of two candidate replies (A vs B).
+    `listener_goal` (stated user intent) is included so the comparison weighs
+    PERSONALIZATION against the same goal the responder saw."""
+    goal_line = f"\n\nListener goal: {listener_goal}" if listener_goal else ""
+    return (f"{PAIRWISE_INSTRUCTIONS}\n\n=== CONVERSATION ===\n{context}{goal_line}\n\n"
             f"=== RECOMMENDED TRACKS ===\n{tracks_str}\n\n"
             f"=== REPLY A ===\n{reply_a}\n\n=== REPLY B ===\n{reply_b}\n\n"
             "Which reply is better? Answer ONLY 'A' or 'B'.")
@@ -503,7 +510,8 @@ def parse_pairwise_verdict(text):
     return m.group(1) if m else None
 
 
-def _a_beats_b(judge_model, context, tracks_str, a, b, sleep_fn=time.sleep, swap=None):
+def _a_beats_b(judge_model, context, tracks_str, a, b, sleep_fn=time.sleep, swap=None,
+               listener_goal=""):
     """True if reply `a` is judged better than `b`. Order is randomized per call
     (swap=None) to cancel the judge's A/B position bias; pass swap=False/True for
     deterministic tests. Judge runs at temperature 0 for stable picks. An
@@ -511,7 +519,8 @@ def _a_beats_b(judge_model, context, tracks_str, a, b, sleep_fn=time.sleep, swap
     if swap is None:
         swap = random.random() < 0.5
     left, right = (b, a) if swap else (a, b)
-    raw = _call_model(judge_model, build_pairwise_prompt(context, tracks_str, left, right),
+    raw = _call_model(judge_model,
+                      build_pairwise_prompt(context, tracks_str, left, right, listener_goal=listener_goal),
                       sleep_fn=sleep_fn, gen_config={"temperature": 0.0})
     v = parse_pairwise_verdict(raw)
     if v is None:
@@ -521,22 +530,24 @@ def _a_beats_b(judge_model, context, tracks_str, a, b, sleep_fn=time.sleep, swap
     return left_wins == a_is_left
 
 
-def select_pairwise_koth(judge_model, context, tracks_str, cands, sleep_fn=time.sleep):
+def select_pairwise_koth(judge_model, context, tracks_str, cands, sleep_fn=time.sleep, listener_goal=""):
     """King-of-the-hill: carry a champion through the list, N-1 pairwise compares."""
     champ = cands[0]
     for c in cands[1:]:
-        if not _a_beats_b(judge_model, context, tracks_str, champ, c, sleep_fn=sleep_fn):
+        if not _a_beats_b(judge_model, context, tracks_str, champ, c, sleep_fn=sleep_fn,
+                          listener_goal=listener_goal):
             champ = c
     return champ
 
 
-def select_round_robin(judge_model, context, tracks_str, cands, sleep_fn=time.sleep):
+def select_round_robin(judge_model, context, tracks_str, cands, sleep_fn=time.sleep, listener_goal=""):
     """Every candidate vs every other (C(n,2) compares); return the most-wins reply.
     Robust to noisy/non-transitive comparisons at higher cost."""
     wins = [0] * len(cands)
     for i in range(len(cands)):
         for j in range(i + 1, len(cands)):
-            if _a_beats_b(judge_model, context, tracks_str, cands[i], cands[j], sleep_fn=sleep_fn):
+            if _a_beats_b(judge_model, context, tracks_str, cands[i], cands[j], sleep_fn=sleep_fn,
+                          listener_goal=listener_goal):
                 wins[i] += 1
             else:
                 wins[j] += 1
@@ -545,7 +556,7 @@ def select_round_robin(judge_model, context, tracks_str, cands, sleep_fn=time.sl
 
 def generate_best_of_n(gen_model, judge_model, prompt, judge_context, tracks_str,
                        fallback, n, temperatures, sleep_fn=time.sleep, parse_fn=None,
-                       select="pointwise"):
+                       select="pointwise", goal=""):
     """Generate n candidate replies (varied temperature), then SELECT the best:
       - 'pointwise'   : score each reply 0-5 x2 independently, take the argmax (N judge calls)
       - 'pairwise'    : king-of-the-hill A-vs-B comparisons (N-1 judge calls, sharper)
@@ -566,12 +577,15 @@ def generate_best_of_n(gen_model, judge_model, prompt, judge_context, tracks_str
     if len(cands) == 1:
         return cands[0]
     if select == "pairwise":
-        return select_pairwise_koth(judge_model, judge_context, tracks_str, cands, sleep_fn=sleep_fn)
+        return select_pairwise_koth(judge_model, judge_context, tracks_str, cands,
+                                    sleep_fn=sleep_fn, listener_goal=goal)
     if select == "round_robin":
-        return select_round_robin(judge_model, judge_context, tracks_str, cands, sleep_fn=sleep_fn)
+        return select_round_robin(judge_model, judge_context, tracks_str, cands,
+                                  sleep_fn=sleep_fn, listener_goal=goal)
     scored = []
     for r in cands:
-        jraw = _call_model(judge_model, build_judge_prompt(judge_context, tracks_str, r),
+        jraw = _call_model(judge_model,
+                          build_judge_prompt(judge_context, tracks_str, r, listener_goal=goal),
                           sleep_fn=sleep_fn, gen_config={"temperature": 0.0})
         scored.append((r, parse_judge_score(jraw)))
     return pick_best(scored)
@@ -683,7 +697,8 @@ def main():
                     new_resp = generate_best_of_n(model, judge_model, prompt, ctx, tracks,
                                                   fallback, n=args.best_of,
                                                   temperatures=list(DEFAULT_TEMPS),
-                                                  parse_fn=parse_fn, select=args.select)
+                                                  parse_fn=parse_fn, select=args.select,
+                                                  goal=goal)
                 else:
                     new_resp = generate_response(model, prompt, fallback, parse_fn=parse_fn)
         except Exception as e:  # noqa: BLE001 — never let one row kill the run
