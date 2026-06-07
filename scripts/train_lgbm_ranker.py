@@ -64,6 +64,17 @@ def split_by_holdout(df: pd.DataFrame, holdout_ids):
     return df[~mask], hold
 
 
+def drop_all_negative_groups(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop (session_id, turn_number) groups with no positive (label.sum()==0).
+
+    With recall@100 ~0.5, roughly half the surfaced groups have zero gold rows;
+    under lambdarank they contribute zero gradient anyway, so removing them is
+    leak-free hygiene (faster/leaner, ~no model change). Preserves row order
+    within the kept groups so build_groups stays aligned."""
+    pos = df.groupby(["session_id", "turn_number"])["label"].transform("sum")
+    return df[pos > 0].reset_index(drop=True)
+
+
 def build_groups(df: pd.DataFrame) -> list[int]:
     """Group sizes by (session_id, turn_number) — preserves DataFrame row order.
 
@@ -98,6 +109,7 @@ def write_metadata_json(
     categorical_levels: dict[str, list[str]],
     best_iteration: int,
     best_val_ndcg20: float,
+    n_bag: int = 1,
 ) -> None:
     """Layout matches LGBM_RERANKER.__init__."""
     meta = {
@@ -106,6 +118,7 @@ def write_metadata_json(
         "categorical_levels": categorical_levels,
         "best_iteration": int(best_iteration),
         "best_val_ndcg20": float(best_val_ndcg20),
+        "n_bag": int(n_bag),
     }
     (Path(out_dir) / "metadata.json").write_text(json.dumps(meta, indent=2))
 
@@ -125,6 +138,16 @@ def main():
     p.add_argument("--output-dir", required=True)
     p.add_argument("--n-estimators", type=int, default=1000)
     p.add_argument("--early-stopping", type=int, default=50)
+    # Tier-2 #4.3 knobs.
+    p.add_argument("--num-leaves", type=int, default=31)
+    p.add_argument("--min-data-in-leaf", type=int, default=100)
+    p.add_argument("--learning-rate", type=float, default=0.05)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--n-bag", type=int, default=1,
+                   help="Multi-seed bagging: train N boosters (seeds seed..seed+N-1) "
+                        "and average their scores at serve. 1 = single model (default).")
+    p.add_argument("--drop-all-negative", action="store_true",
+                   help="Drop train groups with no positive (leak-free hygiene).")
     args = p.parse_args()
     if not args.val_features and not args.holdout_ids:
         p.error("provide --holdout-ids (preferred, leak-free) or --val-features")
@@ -144,6 +167,10 @@ def main():
               f"holdout={val_df['session_id'].nunique()} sessions")
     else:
         val_df = pd.read_parquet(args.val_features)
+    if args.drop_all_negative:
+        before = len(train_df)
+        train_df = drop_all_negative_groups(train_df)
+        print(f"[lgbm] dropped all-negative train groups: {before} -> {len(train_df)} rows")
     # Sort rows so build_groups returns aligned sizes.
     train_df = train_df.sort_values(["session_id", "turn_number"]).reset_index(drop=True)
     val_df = val_df.sort_values(["session_id", "turn_number"]).reset_index(drop=True)
@@ -174,9 +201,12 @@ def main():
         "objective": "lambdarank",
         "metric": "ndcg",
         "ndcg_eval_at": [20],
-        "learning_rate": 0.05,
-        "num_leaves": 31,
-        "min_data_in_leaf": 100,
+        # Tier-2 #4.3: align the lambdarank pair-truncation with the nDCG@20 metric
+        # (LightGBM defaults to 30, which optimizes pairs beyond the cutoff we score).
+        "lambdarank_truncation_level": 20,
+        "learning_rate": args.learning_rate,
+        "num_leaves": args.num_leaves,
+        "min_data_in_leaf": args.min_data_in_leaf,
         "feature_fraction": 0.8,
         "bagging_fraction": 0.8,
         "bagging_freq": 5,
@@ -184,16 +214,28 @@ def main():
         "verbosity": -1,
     }
 
-    model = lgb.train(
-        params, train_ds, num_boost_round=args.n_estimators,
-        valid_sets=[val_ds], valid_names=["val"],
-        callbacks=[lgb.early_stopping(args.early_stopping), lgb.log_evaluation(50)],
-    )
-
-    booster_path = out_dir / "booster.txt"
-    model.save_model(str(booster_path))
-    best_iter = int(model.best_iteration or 0)
-    best_score = float(model.best_score.get("val", {}).get("ndcg@20", 0.0))
+    # Tier-2 #4.3 multi-seed bagging: train n_bag boosters with different seeds and
+    # average their scores at serve (variance reduction; adds no feature -> cannot
+    # worsen the in-sample leak). n_bag=1 -> a single booster.txt (backward compat).
+    n_bag = max(1, int(args.n_bag))
+    best_iter, best_score = 0, 0.0
+    for b in range(n_bag):
+        seed = args.seed + b
+        bag_params = {**params, "seed": seed, "bagging_seed": seed,
+                      "feature_fraction_seed": seed}
+        model = lgb.train(
+            bag_params, train_ds, num_boost_round=args.n_estimators,
+            valid_sets=[val_ds], valid_names=["val"],
+            callbacks=[lgb.early_stopping(args.early_stopping), lgb.log_evaluation(50)],
+        )
+        fname = "booster.txt" if n_bag == 1 else f"booster_{b}.txt"
+        model.save_model(str(out_dir / fname))
+        best_iter = int(model.best_iteration or 0)
+        best_score = float(model.best_score.get("val", {}).get("ndcg@20", 0.0))
+        if n_bag > 1:
+            print(f"[lgbm] bag {b+1}/{n_bag} (seed={seed}) "
+                  f"best_iter={best_iter} val_ndcg@20={best_score:.4f}")
+    booster_path = out_dir / ("booster.txt" if n_bag == 1 else "booster_0.txt")
 
     write_metadata_json(
         out_dir=str(out_dir),
@@ -202,6 +244,7 @@ def main():
         categorical_levels={c: train_levels[c] for c in cat_in_feats},
         best_iteration=best_iter,
         best_val_ndcg20=best_score,
+        n_bag=n_bag,
     )
 
     importance = sorted(

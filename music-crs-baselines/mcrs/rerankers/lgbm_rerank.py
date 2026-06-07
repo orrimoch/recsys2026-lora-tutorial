@@ -131,15 +131,24 @@ class LGBM_RERANKER:
             )
         import lightgbm as lgb
         self.model_path = model_path
-        self.booster = lgb.Booster(model_file=os.path.join(model_path, "booster.txt"))
         with open(os.path.join(model_path, "metadata.json")) as f:
             meta = json.load(f)
+        # Tier-2 #4.3 multi-seed bagging: load N boosters when the model was bagged
+        # (metadata n_bag>1 -> booster_0.txt..booster_{N-1}.txt); else the single
+        # booster.txt. Predictions are averaged in _predict. Backward compatible.
+        n_bag = int(meta.get("n_bag", 1))
+        if n_bag > 1:
+            self.boosters = [lgb.Booster(model_file=os.path.join(model_path, f"booster_{b}.txt"))
+                             for b in range(n_bag)]
+        else:
+            self.boosters = [lgb.Booster(model_file=os.path.join(model_path, "booster.txt"))]
+        self.booster = self.boosters[0]  # back-compat alias
         self.features: list[str] = meta["features"]
         self.categorical_features: list[str] = meta["categorical_features"]
         self.cat_levels: dict[str, list[str]] = meta["categorical_levels"]
         # Build category -> int code maps for fast encoding at inference.
         self.cat_index = {c: {v: i for i, v in enumerate(self.cat_levels[c])} for c in self.categorical_features}
-        print(f"[lgbm-rerank] loaded {os.path.join(model_path, 'booster.txt')} "
+        print(f"[lgbm-rerank] loaded {len(self.boosters)} booster(s) from {model_path} "
               f"(best_iter={meta.get('best_iteration')}, "
               f"val_ndcg20={meta.get('best_val_ndcg20'):.4f})")
         # Track metadata lookup + cf-bpr tables (lightweight, reused).
@@ -432,6 +441,13 @@ class LGBM_RERANKER:
 
         return X
 
+    def _predict(self, X) -> np.ndarray:
+        """Score X with the booster(s). For a bagged model (n_bag>1) average the
+        per-booster scores (variance reduction). Single booster -> its scores."""
+        if len(self.boosters) == 1:
+            return self.boosters[0].predict(X)
+        return np.mean([b.predict(X) for b in self.boosters], axis=0)
+
     def rerank(
         self,
         queries: list[str],
@@ -472,7 +488,7 @@ class LGBM_RERANKER:
                 extra_session_info=(extra_session_info[i]
                                     if extra_session_info else None),
             )
-            scores = self.booster.predict(X)
+            scores = self._predict(X)
             order = np.argsort(-scores)[:topk]
             out.append([tids[j] for j in order])
         return out
