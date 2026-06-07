@@ -73,3 +73,17 @@ def test_recall_by_turn_respects_k_cutoff():
     ranked = [["a"] * 100 + ["g"]]  # gold at index 100, beyond k=100
     rep = recall_by_turn(ranked, ["g"], [1], k=100)
     assert rep["per_turn"][1]["recall"] == 0.0
+
+
+def test_format_by_turn_handles_recall_report():
+    from mcrs.eval_ndcg import format_by_turn
+    rep = recall_by_turn([["g"], ["x"]], ["g", "g"], [1, 2], k=100)
+    out = format_by_turn(rep, "probe")
+    assert "recall@100" in out and "probe" in out
+    assert "turn  1" in out and "turn  2" in out  # no KeyError on the recall key
+
+
+def test_format_by_turn_handles_ndcg_report():
+    from mcrs.eval_ndcg import format_by_turn
+    rep = ndcg_by_turn([["g"]], ["g"], [1], k=20)
+    assert "nDCG@20" in format_by_turn(rep)

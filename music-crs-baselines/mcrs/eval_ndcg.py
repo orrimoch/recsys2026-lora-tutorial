@@ -101,7 +101,7 @@ def format_by_turn(report: dict, label: str = "") -> str:
     # Detect the metric key from a per-turn entry; fall back to 'ndcg'.
     any_entry = next(iter(report["per_turn"].values()), {})
     metric = "recall" if "recall" in any_entry else "ndcg"
-    tag = f"{metric}{'@100' if metric == 'recall' else '@20'}"
+    tag = "recall@100" if metric == "recall" else "nDCG@20"
     lines = []
     t1 = report.get("turn1")
     head = f"{label + ' ' if label else ''}{tag} overall(flat)={report['overall']:.4f}  "
