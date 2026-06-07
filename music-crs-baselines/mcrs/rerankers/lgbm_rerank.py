@@ -285,6 +285,7 @@ class LGBM_RERANKER:
             "last_turn_moved_toward_goal", "bm25_rank_inv", "dense_meta_rank_inv",
             "dense_lyrics_rank_inv", "ce_score", "ce_rank_inv", "sasrec_rank_inv",
             "bge_cos", "bge_rank_inv",
+            "qwen_meta_cos", "bm25_score",
             "n_channels_hit", "clap_session_sim",
             "turn_number_feat", "prior_track_count", "query_drift_score",
             "pop_rank_pct", "is_warm_user",
@@ -388,6 +389,14 @@ class LGBM_RERANKER:
                 # The caller passes bge_cos/bge_rank via extra_features_per_candidate;
                 # the reranker NEVER loads the bge model (live-serve wiring of the
                 # bge query encode + full-catalog rank is a separate follow-up).
+                # Tier-2 #4.1 leak-free relevance features. Passthrough (the
+                # RelevanceScorer injects identical values at train + serve).
+                if "qwen_meta_cos" in f_idx:
+                    X[rank - 1, f_idx["qwen_meta_cos"]] = float(
+                        cand_extra.get("qwen_meta_cos", 0.0))
+                if "bm25_score" in f_idx:
+                    X[rank - 1, f_idx["bm25_score"]] = float(
+                        cand_extra.get("bm25_score", 0.0))
                 if "bge_cos" in f_idx:
                     X[rank - 1, f_idx["bge_cos"]] = float(cand_extra.get("bge_cos", 0.0))
                 if "bge_rank_inv" in f_idx:

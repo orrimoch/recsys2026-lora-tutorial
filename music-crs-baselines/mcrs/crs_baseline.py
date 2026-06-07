@@ -346,6 +346,8 @@ class CRS_BASELINE:
             model_path=reranker_model_path,
             multimodal_artifacts=reranker_multimodal_artifacts,
         )
+        # Tier-2 #4.1: lazily built when the reranker lists qwen_meta_cos/bm25_score.
+        self._relevance_scorer = None
         # When reranker is present, pull a larger candidate pool from retrieval
         # (retrieval_topk) and shrink to 20 via rerank. Otherwise retrieval
         # returns exactly 20. Submission format fixed at 20 tids.
@@ -780,6 +782,26 @@ class CRS_BASELINE:
                 except Exception as e:
                     print(f"[crs_baseline] sasrec extra-features skipped: {e!r}")
                     extra_features_per_candidate = None
+            # Tier-2 #4.1: inject qwen_meta_cos + bm25_score for models that list
+            # them, via the shared RelevanceScorer (same computation as the train
+            # feature builder -> parity). Merged into the per-candidate dicts.
+            if any(f in _reranker_feats for f in ("qwen_meta_cos", "bm25_score")):
+                try:
+                    if self._relevance_scorer is None:
+                        from mcrs.rerankers.relevance_scorer import RelevanceScorer
+                        self._relevance_scorer = RelevanceScorer(
+                            self.item_db_name, self.track_split_types,
+                            self.corpus_types, self.cache_dir)
+                    _rel = self._relevance_scorer.feats_for_batch(
+                        retrieval_inputs, batch_retrieval_items)
+                    if extra_features_per_candidate is None:
+                        extra_features_per_candidate = [
+                            [{} for _ in items] for items in batch_retrieval_items]
+                    for _qi, _per_cand in enumerate(_rel):
+                        for _ci, _f in enumerate(_per_cand):
+                            extra_features_per_candidate[_qi][_ci].update(_f)
+                except Exception as e:
+                    print(f"[crs_baseline] relevance extra-features skipped: {e!r}")
             try:
                 batch_retrieval_items = self.reranker.rerank(
                     retrieval_inputs, batch_retrieval_items, topk=20,

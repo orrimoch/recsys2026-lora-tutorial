@@ -309,6 +309,7 @@ def extract_features(
     played_tids: list | None = None,
     clap_mean: "np.ndarray | None" = None,
     with_bge: bool = False,
+    with_relevance: bool = False,
 ) -> list[dict]:
     """One dict per candidate — becomes one row in the parquet output."""
     if played_meta is None:
@@ -419,6 +420,13 @@ def extract_features(
         if with_bge:
             row["bge_cos"] = float(c.get("bge_cos", 0.0))
             row["bge_rank_inv"] = 1.0 / max(1, c.get("bge_rank", c["wrrf_rank"]))
+        # Tier-2 #4.1 leak-free relevance features (pretrained Qwen3 dense cosine +
+        # raw BM25). Passthrough from the candidate dict (the RelevanceScorer
+        # injects them upstream); identical read at serve in lgbm_rerank ->
+        # train/serve parity. Omitted unless the build opted in (--with-relevance).
+        if with_relevance:
+            row["qwen_meta_cos"] = float(c.get("qwen_meta_cos", 0.0))
+            row["bm25_score"] = float(c.get("bm25_score", 0.0))
         # CLAP audio-similarity feature: candidate's acoustic similarity to the
         # session's played tracks. Only emitted when the clap lookup + played tids
         # are supplied (i.e. the build opted into clap), so legacy builds unchanged.
@@ -448,6 +456,8 @@ def build(
     use_clap: bool = False,
     bge_model: str = None,
     bge_cache_dir: str = None,
+    with_relevance: bool = False,
+    dataset_name: str = "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
 ) -> None:
     # bge-v2 bi-encoder features are OFF unless BOTH flags are provided, so any
     # existing run (no bge args) is byte-identical to before.
@@ -534,6 +544,16 @@ def build(
         _dev = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[lgbm-features] bge: loading model {bge_model} on {_dev}")
         bge_enc = SentenceTransformer(bge_model, device=_dev)
+
+    # Tier-2 #4.1 relevance scorer (qwen_meta_cos + bm25_score). Loaded once when
+    # --with-relevance is set; reuses the dense channel's shared Qwen3 encoder.
+    relevance_scorer = None
+    if with_relevance:
+        from mcrs.rerankers.relevance_scorer import RelevanceScorer
+        print("[lgbm-features] loading RelevanceScorer (qwen_meta_cos + bm25_score)")
+        relevance_scorer = RelevanceScorer(
+            dataset_name, ["all_tracks"],
+            ["track_name", "artist_name", "album_name"], cache_dir)
 
     # Build (query, chat_history, gold_tid, session_meta) triples per music turn.
     print(f"[lgbm-features] assembling queries")
@@ -681,6 +701,16 @@ def build(
                     cti = bge_cat_tid_to_idx.get(c["tid"])
                     c["bge_cos"] = float(sims_i[cti]) if cti is not None else 0.0
                     c["bge_rank"] = tid_to_rank.get(c["tid"], 10000)
+        # Tier-2 #4.1: inject qwen_meta_cos + bm25_score via the shared
+        # RelevanceScorer (same instance serve uses -> parity). One batch call
+        # per chunk; tids absent from the catalog/bm25-topk -> 0.0.
+        if with_relevance:
+            cand_tids_per_q = [[c["tid"] for c in cl] for cl in chunk_results]
+            feats = relevance_scorer.feats_for_batch(chunk_queries, cand_tids_per_q)
+            for j, cand_list in enumerate(chunk_results):
+                for c, f in zip(cand_list, feats[j]):
+                    c["qwen_meta_cos"] = f["qwen_meta_cos"]
+                    c["bm25_score"] = f["bm25_score"]
         _t0 = time.perf_counter()
         for j, cand_list in enumerate(chunk_results):
             sess_info = metas[i + j]
@@ -706,6 +736,7 @@ def build(
                 played_tids=prior_tids,
                 clap_mean=clap_mean,
                 with_bge=with_bge,
+                with_relevance=with_relevance,
             )
             row_buf.extend(rows)
         t_feat += time.perf_counter() - _t0
@@ -764,6 +795,12 @@ def main() -> int:
     p.add_argument("--bge-cache-dir", type=str, default=None,
                    help="Dir containing the bge catalog pickle track_embeddings.pkl "
                         "(the {cache}/retrieval_v2/dense_local/{safe}/{label}/ dir).")
+    p.add_argument("--with-relevance", action="store_true",
+                   help="Emit Tier-2 #4.1 leak-free relevance features "
+                        "(qwen_meta_cos + bm25_score) via the shared RelevanceScorer.")
+    p.add_argument("--dataset-name", type=str,
+                   default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
+                   help="Catalog dataset for the RelevanceScorer dense/bm25 models.")
     args = p.parse_args()
     if (args.oof_fold is None) != (args.oof_num_folds is None):
         p.error("--oof-fold and --oof-num-folds must be set together")
@@ -793,7 +830,9 @@ def main() -> int:
               oof_num_folds=args.oof_num_folds,
               use_clap=args.use_clap,
               bge_model=args.bge_model,
-              bge_cache_dir=args.bge_cache_dir)
+              bge_cache_dir=args.bge_cache_dir,
+              with_relevance=args.with_relevance,
+              dataset_name=args.dataset_name)
     finally:
         os.chdir(origin_cwd)
     return 0
