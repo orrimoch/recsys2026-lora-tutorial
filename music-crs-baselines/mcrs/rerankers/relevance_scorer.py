@@ -86,10 +86,18 @@ class RelevanceScorer:
             toks, k=self.bm25_topk, return_as="tuple")
         return self._bm25_score_maps(res, self.bm25.track_ids, len(queries))
 
-    def feats_for_batch(self, queries, cand_tids_per_query) -> list[list[dict]]:
-        q_emb = np.asarray(self.dense._encode_queries(list(queries)), dtype=np.float64)
-        q_emb = _l2_normalize_rows(q_emb)
-        bm25_maps = self._bm25_maps(list(queries))
+    def feats_for_batch(self, queries, cand_tids_per_query,
+                        encode_batch: int = 64) -> list[list[dict]]:
+        # Encode queries in sub-batches so a large call (e.g. the full 8k dev set
+        # at scoring time) doesn't OOM the Qwen3 encoder. The build calls this per
+        # 256-query chunk; scoring may pass thousands at once.
+        qs = list(queries)
+        parts = [np.asarray(self.dense._encode_queries(qs[i:i + encode_batch]),
+                            dtype=np.float64)
+                 for i in range(0, len(qs), encode_batch)]
+        q_emb = (_l2_normalize_rows(np.concatenate(parts, axis=0)) if parts
+                 else np.zeros((0, self.catalog_norm.shape[1])))
+        bm25_maps = self._bm25_maps(qs)
         return [
             relevance_feats_for_candidates(
                 q_emb[i], self.catalog_norm, self.tid_to_idx, bm25_maps[i], cands)

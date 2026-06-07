@@ -155,6 +155,16 @@ def test_feats_for_batch_aligns_and_scores():
     assert out[1][0]["qwen_meta_cos"] == pytest.approx(0.0)   # q2 cand "b"
 
 
+def test_feats_for_batch_encodes_in_subbatches():
+    # OOM fix: the full query set must be encoded in chunks <= encode_batch.
+    r = _stub_scorer()
+    seen = []
+    base = r.dense._encode_queries
+    r.dense._encode_queries = lambda qs: (seen.append(len(qs)) or base(qs))
+    r.feats_for_batch(["q"] * 150, [["a"]] * 150, encode_batch=64)
+    assert seen and max(seen) <= 64 and sum(seen) == 150
+
+
 # ---- serve/train alignment guards (parity is by construction via RelevanceScorer) ----
 
 def test_serve_relevance_scorer_uses_served_dataset_and_corpus():
