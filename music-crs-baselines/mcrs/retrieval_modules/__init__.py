@@ -94,6 +94,16 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
                 "inner_dense": ec.get("sq_inner_dense", "dense_metadata_qwen3_instruct"),
             },
         })
+    # Two-tower content channel (Tier-1 #3.3, 2026-06-07): a learned query head +
+    # ItemFusion over the 5 frozen catalog modalities, trained contrastively on
+    # (intent->gold) pairs. Pure content+intent (no session input) -> reaches the
+    # new-artist wall session/lexical channels can't. Opt-in via use_two_tower.
+    if ec.get("use_two_tower"):
+        specs.append({
+            "type": "two_tower", "topk_internal": 100,
+            "weight": float(ec.get("w_two_tower", 0.7)),
+            "extra_config": {"model_dir": ec.get("two_tower_model_dir", "two_tower_v1")},
+        })
     if ec.get("use_sasrec"):
         specs.append({
             "type": "sasrec_seq", "topk_internal": 100,
@@ -697,6 +707,36 @@ def load_retrieval_module(
 
         return SasrecRetriever(model, item_repr, track_ids, item_feats, _text_encode,
                                max_len=int(ec.get("max_len", 50)))
+    elif retrieval_type == "two_tower":
+        # Two-tower content channel: learned query head + ItemFusion over the 5
+        # frozen catalog modalities. Loads the trained model + precomputes the
+        # item-repr matrix; the query is encoded by the SAME Qwen3 encoder the
+        # dense channel uses (the contrastive heads align the spaces).
+        import os
+        import torch
+        from .two_tower_model import TwoTowerModel
+        from .two_tower_channel import TwoTowerRetriever
+        ec = extra_config or {}
+        model_dir = os.path.join(cache_dir, "retrieval_v2", "two_tower",
+                                 ec.get("model_dir", "two_tower_v1"))
+        ckpt = torch.load(os.path.join(model_dir, "two_tower.pt"),
+                          map_location="cpu", weights_only=False)
+        model = TwoTowerModel(**ckpt["model_kwargs"])
+        model.load_state_dict(ckpt["state_dict"])
+        model.eval()
+        item_feats = torch.as_tensor(ckpt["item_feats"], dtype=torch.float32)
+        track_ids = ckpt["track_ids"]
+        with torch.no_grad():
+            item_repr = model.encode_item(item_feats)
+        qenc = DENSE_PRECOMPUTED(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            embed_col="metadata-qwen3_embedding_0.6b",
+            instruct=QWEN3_MUSIC_INSTRUCT, instruct_label="instruct-music-v1")
+
+        def _query_encode(texts):
+            return qenc._encode_queries(list(texts))
+
+        return TwoTowerRetriever(model, item_repr, track_ids, _query_encode)
     elif retrieval_type == "wrrf_union_v1":
         # 3-channel recall union: lexical + frozen-Qwen semantic + session
         # artist continuity. session_cf was DROPPED after the G1 ablation
