@@ -97,6 +97,29 @@ def build_retrieval_query(
         )
         gt = (goal_text or "").strip()
         return f"{base}\ngoal: {gt}" if gt else base
+    if mode == "raw_enriched":
+        # Tier-1 #3.2: raw_with_goal plus cold-firable taste signals
+        # (preferred_musical_culture + age/country/gender). Each line is appended
+        # only when its field is present, so the format degrades to raw_with_goal
+        # (and to raw with no goal). These fields are legal at inference.
+        base = "\n".join(
+            f"{t.get('role','')}: {t.get('content','')}" for t in session_memory
+        )
+        lines = [base]
+        gt = (goal_text or "").strip()
+        if gt:
+            lines.append(f"goal: {gt}")
+        up = user_profile if isinstance(user_profile, dict) else {}
+        culture = str(up.get("preferred_musical_culture") or "").strip()
+        if culture:
+            lines.append(f"culture: {culture}")
+        age = up.get("age_group") or up.get("age")
+        country = up.get("country_name") or up.get("country_code")
+        gender = up.get("gender")
+        if age or country or gender:
+            lines.append(f"user: age={age or 'unknown'} "
+                         f"country={country or 'unknown'} gender={gender or 'unknown'}")
+        return "\n".join(lines)
     # Last user turn — find it from the END of session_memory.
     last_user = ""
     last_user_idx: Optional[int] = None
@@ -340,8 +363,8 @@ class CRS_BASELINE:
         # query — strip role prefixes + drop multi-turn assistant/music noise.
         # See build_retrieval_query() above for the modes.
         if query_preprocessing_mode not in (
-            "raw", "raw_with_goal", "last_user", "last_user_with_goal",
-            "bge_m3_structured",
+            "raw", "raw_with_goal", "raw_enriched", "last_user",
+            "last_user_with_goal", "bge_m3_structured",
         ):
             raise ValueError(f"unknown query_preprocessing_mode: {query_preprocessing_mode!r}")
         self.query_preprocessing_mode = query_preprocessing_mode
