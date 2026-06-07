@@ -79,6 +79,21 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
                 "batch_size": int(ec.get("hyde_batch_size", 16)),
             },
         })
+    # Structured-query channel (Tier-1 #3.1b, 2026-06-07): an LLM distils each turn
+    # into a content-only synthetic query (genres/moods/era/culture/intent), which
+    # the qwen3 dense retriever matches in the catalog space. De-noises the dialogue
+    # and de-emphasizes the seed artist -> reaches new-artist golds on pivot turns.
+    # Opt-in via use_structured_query (loads Qwen2.5-7B like HyDE). Default weight 0.5.
+    if ec.get("use_structured_query"):
+        specs.append({
+            "type": "structured_query", "topk_internal": 100,
+            "weight": float(ec.get("w_structured_query", 0.5)),
+            "extra_config": {
+                "sq_model": ec.get("sq_model", "Qwen/Qwen2.5-7B-Instruct"),
+                "batch_size": int(ec.get("sq_batch_size", 16)),
+                "inner_dense": ec.get("sq_inner_dense", "dense_metadata_qwen3_instruct"),
+            },
+        })
     if ec.get("use_sasrec"):
         specs.append({
             "type": "sasrec_seq", "topk_internal": 100,
@@ -616,6 +631,26 @@ def load_retrieval_module(
             corpus_types, cache_dir, extra_config={})
         return HydeQwen3Retriever(
             generator, inner, topk_per_doc=int(extra_config.get("topk_per_doc", 100)))
+    elif retrieval_type == "structured_query":
+        # Structured-query channel: LLM (Qwen2.5-7B via the generic HF wrapper)
+        # extracts a content-only synthetic query; an inner qwen3 dense retriever
+        # matches it in the catalog space. Mirrors the hyde_qwen3 build.
+        import os
+        from ..lm_modules.llama import LLAMA_MODEL
+        from ..query_rewriters.structured_query import StructuredQueryExtractor
+        from .structured_query_channel import StructuredQueryRetriever
+        lm = LLAMA_MODEL(
+            model_name=extra_config.get("sq_model", "Qwen/Qwen2.5-7B-Instruct"),
+            attn_implementation="sdpa")
+        prompt_path = os.path.join(
+            os.path.dirname(__file__), "..", "system_prompts", "structured_query.txt")
+        extractor = StructuredQueryExtractor(
+            lm, prompt_path, cache_dir=cache_dir,
+            batch_size=int(extra_config.get("batch_size", 16)))
+        inner = load_retrieval_module(
+            extra_config.get("inner_dense", "dense_metadata_qwen3_instruct"),
+            dataset_name, track_split_types, corpus_types, cache_dir, extra_config={})
+        return StructuredQueryRetriever(extractor, inner)
     elif retrieval_type == "sasrec_seq":
         # SASRec recall channel. Loads the trained model + precomputes the item-repr
         # matrix; the dialog context token is encoded by bge-base-en-v1.5 (English,
