@@ -48,6 +48,22 @@ def internal_val_warning() -> str:
     )
 
 
+def split_by_holdout(df: pd.DataFrame, holdout_ids):
+    """Split a feature frame into (train, holdout) by session_id. The holdout =
+    rows whose session_id is in holdout_ids (the latest-by-date sessions from
+    carve_temporal_selection_set); train = the rest. Used to early-stop on a
+    leak-free temporal holdout instead of the leaky internal val. Raises if the
+    holdout is empty (the parquet must include the holdout sessions)."""
+    ids = set(holdout_ids)
+    mask = df["session_id"].isin(ids)
+    hold = df[mask]
+    if len(hold) == 0:
+        raise ValueError(
+            "holdout split is empty — the train parquet contains none of the "
+            "holdout session_ids; build features over the holdout sessions too")
+    return df[~mask], hold
+
+
 def build_groups(df: pd.DataFrame) -> list[int]:
     """Group sizes by (session_id, turn_number) — preserves DataFrame row order.
 
@@ -99,17 +115,35 @@ def main():
 
     p = argparse.ArgumentParser()
     p.add_argument("--train-features", required=True)
-    p.add_argument("--val-features", required=True)
+    p.add_argument("--val-features", default=None,
+                   help="Validation parquet for early stopping. The internal val "
+                        "is LEAKY (anti-correlated with dev) — prefer --holdout-ids.")
+    p.add_argument("--holdout-ids", default=None,
+                   help="JSON from carve_temporal_selection_set.py. When set, "
+                        "early-stop on the leak-free temporal holdout carved from "
+                        "the train parquet (overrides --val-features).")
     p.add_argument("--output-dir", required=True)
     p.add_argument("--n-estimators", type=int, default=1000)
     p.add_argument("--early-stopping", type=int, default=50)
     args = p.parse_args()
+    if not args.val_features and not args.holdout_ids:
+        p.error("provide --holdout-ids (preferred, leak-free) or --val-features")
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     train_df = pd.read_parquet(args.train_features)
-    val_df = pd.read_parquet(args.val_features)
+    using_holdout = bool(args.holdout_ids)
+    if using_holdout:
+        import json as _json
+        hid = _json.loads(Path(args.holdout_ids).read_text())
+        holdout_ids = hid.get("holdout_ids", hid) if isinstance(hid, dict) else hid
+        train_df, val_df = split_by_holdout(train_df, holdout_ids)
+        print(f"[lgbm] early-stopping on the temporal holdout (leak-free): "
+              f"train={train_df['session_id'].nunique()} sessions, "
+              f"holdout={val_df['session_id'].nunique()} sessions")
+    else:
+        val_df = pd.read_parquet(args.val_features)
     # Sort rows so build_groups returns aligned sizes.
     train_df = train_df.sort_values(["session_id", "turn_number"]).reset_index(drop=True)
     val_df = val_df.sort_values(["session_id", "turn_number"]).reset_index(drop=True)
@@ -174,9 +208,14 @@ def main():
         zip(feat_cols, model.feature_importance(importance_type="gain")),
         key=lambda x: -x[1],
     )[:20]
-    print(f"[lgbm] saved → {booster_path} (best_iter={best_iter}, "
-          f"val_ndcg@20={best_score:.4f} [early-stopping only])")
-    print(internal_val_warning())
+    if using_holdout:
+        print(f"[lgbm] saved → {booster_path} (best_iter={best_iter}, "
+              f"holdout_ndcg@20={best_score:.4f} [temporal holdout — leak-free, "
+              f"selection-safe])")
+    else:
+        print(f"[lgbm] saved → {booster_path} (best_iter={best_iter}, "
+              f"val_ndcg@20={best_score:.4f} [early-stopping only])")
+        print(internal_val_warning())
     print("[lgbm] top-20 features by gain:")
     for name, gain in importance:
         print(f"  {name}: {gain:.2f}")
