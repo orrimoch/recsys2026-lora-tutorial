@@ -104,6 +104,22 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
             "weight": float(ec.get("w_two_tower", 0.7)),
             "extra_config": {"model_dir": ec.get("two_tower_model_dir", "two_tower_v1")},
         })
+    # RAG propose-then-ground channel (Tier-1 #3.5, 2026-06-07): an LLM proposes
+    # real "Artist - Title" tracks (incl. new artists in the same style), each
+    # grounded to a catalog track by dense NN. Sources candidates from the LLM's
+    # world knowledge — outside the collaborative/content graph — to reach the
+    # new-artist wall. Opt-in via use_propose_ground (loads Qwen2.5-7B like HyDE).
+    if ec.get("use_propose_ground"):
+        specs.append({
+            "type": "propose_ground", "topk_internal": 100,
+            "weight": float(ec.get("w_propose_ground", 0.5)),
+            "extra_config": {
+                "pg_model": ec.get("pg_model", "Qwen/Qwen2.5-7B-Instruct"),
+                "n_proposals": int(ec.get("pg_n_proposals", 20)),
+                "batch_size": int(ec.get("pg_batch_size", 16)),
+                "inner_dense": ec.get("pg_inner_dense", "dense_metadata_qwen3_instruct"),
+            },
+        })
     if ec.get("use_sasrec"):
         specs.append({
             "type": "sasrec_seq", "topk_internal": 100,
@@ -661,6 +677,27 @@ def load_retrieval_module(
             extra_config.get("inner_dense", "dense_metadata_qwen3_instruct"),
             dataset_name, track_split_types, corpus_types, cache_dir, extra_config={})
         return StructuredQueryRetriever(extractor, inner)
+    elif retrieval_type == "propose_ground":
+        # RAG propose-then-ground: LLM proposes real Artist - Title tracks; an
+        # inner dense retriever grounds each to a catalog track by NN; RRF fuses.
+        # Mirrors the hyde_qwen3 build.
+        import os
+        from ..lm_modules.llama import LLAMA_MODEL
+        from ..query_rewriters.propose_ground import ProposeGenerator
+        from .propose_ground_channel import ProposeGroundRetriever
+        lm = LLAMA_MODEL(
+            model_name=extra_config.get("pg_model", "Qwen/Qwen2.5-7B-Instruct"),
+            attn_implementation="sdpa")
+        prompt_path = os.path.join(
+            os.path.dirname(__file__), "..", "system_prompts", "propose_tracks.txt")
+        generator = ProposeGenerator(
+            lm, prompt_path, cache_dir=cache_dir,
+            n_proposals=int(extra_config.get("n_proposals", 20)),
+            batch_size=int(extra_config.get("batch_size", 16)))
+        inner = load_retrieval_module(
+            extra_config.get("inner_dense", "dense_metadata_qwen3_instruct"),
+            dataset_name, track_split_types, corpus_types, cache_dir, extra_config={})
+        return ProposeGroundRetriever(generator, inner)
     elif retrieval_type == "sasrec_seq":
         # SASRec recall channel. Loads the trained model + precomputes the item-repr
         # matrix; the dialog context token is encoded by bge-base-en-v1.5 (English,
