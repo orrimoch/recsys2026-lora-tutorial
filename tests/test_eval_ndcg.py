@@ -11,7 +11,7 @@ score is 1/log2(rank_1indexed+1) when the gold is in the top-k, else 0.
 """
 import math
 
-from mcrs.eval_ndcg import ndcg_at_k, ndcg_by_turn
+from mcrs.eval_ndcg import ndcg_at_k, ndcg_by_turn, recall_by_turn
 
 
 def test_ndcg_gold_at_rank_one_is_one():
@@ -55,3 +55,21 @@ def test_ndcg_by_turn_macro_averages_within_turn():
     assert rep["per_turn"][1]["ndcg"] == 0.5
     assert rep["per_turn"][1]["n"] == 2
     assert rep["per_turn"][2]["ndcg"] == 1.0
+
+
+def test_recall_by_turn_hit_within_k_and_turn1():
+    # turn 1: gold present in top-100 -> 1.0 ; turn 2: absent -> 0.0
+    ranked = [["a", "g"], ["x", "y"]]
+    golds = ["g", "g"]
+    turns = [1, 2]
+    rep = recall_by_turn(ranked, golds, turns, k=100)
+    assert rep["per_turn"][1]["recall"] == 1.0
+    assert rep["per_turn"][2]["recall"] == 0.0
+    assert rep["overall"] == 0.5
+    assert rep["turn1"] == 1.0
+
+
+def test_recall_by_turn_respects_k_cutoff():
+    ranked = [["a"] * 100 + ["g"]]  # gold at index 100, beyond k=100
+    rep = recall_by_turn(ranked, ["g"], [1], k=100)
+    assert rep["per_turn"][1]["recall"] == 0.0

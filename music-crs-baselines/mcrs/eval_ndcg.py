@@ -66,13 +66,47 @@ def ndcg_by_turn(ranked_lists, golds, turn_numbers, k: int = 20) -> dict:
     return {"overall": overall, "macro": macro, "turn1": turn1, "per_turn": per_turn}
 
 
-def format_by_turn(report: dict) -> str:
-    """Human-readable one-block summary for notebook/CLI logs."""
+def recall_by_turn(ranked_lists, golds, turn_numbers, k: int = 100) -> dict:
+    """Per-turn and overall recall@k (1 if the gold is in the top-k, else 0).
+
+    For validating a new recall channel before any reranker retrain: the turn-1
+    stratum is the cold / Blind proxy where session channels are dead, so a new
+    content channel must lift turn-1 recall to be worth shipping. Same return
+    shape as ndcg_by_turn: {overall, macro, turn1, per_turn:{tn:{recall,n}}}.
+    """
+    if not (len(ranked_lists) == len(golds) == len(turn_numbers)):
+        raise ValueError("ranked_lists, golds, turn_numbers must be the same length")
+
+    per_turn_scores: dict = defaultdict(list)
+    all_scores: list[float] = []
+    for ranked, gold, tn in zip(ranked_lists, golds, turn_numbers):
+        hit = 1.0 if gold in ranked[:k] else 0.0
+        all_scores.append(hit)
+        per_turn_scores[int(tn)].append(hit)
+
+    per_turn = {
+        tn: {"recall": sum(v) / len(v), "n": len(v)}
+        for tn, v in sorted(per_turn_scores.items())
+    }
+    overall = sum(all_scores) / len(all_scores) if all_scores else 0.0
+    macro = (sum(d["recall"] for d in per_turn.values()) / len(per_turn)
+             if per_turn else 0.0)
+    turn1 = per_turn.get(1, {}).get("recall")
+    return {"overall": overall, "macro": macro, "turn1": turn1, "per_turn": per_turn}
+
+
+def format_by_turn(report: dict, label: str = "") -> str:
+    """Human-readable one-block summary for notebook/CLI logs. Works for both
+    ndcg_by_turn (per-turn key 'ndcg') and recall_by_turn (key 'recall')."""
+    # Detect the metric key from a per-turn entry; fall back to 'ndcg'.
+    any_entry = next(iter(report["per_turn"].values()), {})
+    metric = "recall" if "recall" in any_entry else "ndcg"
+    tag = f"{metric}{'@100' if metric == 'recall' else '@20'}"
     lines = []
     t1 = report.get("turn1")
-    lines.append(f"nDCG@20 overall(flat)={report['overall']:.4f}  "
-                 f"macro={report['macro']:.4f}  "
+    head = f"{label + ' ' if label else ''}{tag} overall(flat)={report['overall']:.4f}  "
+    lines.append(head + f"macro={report['macro']:.4f}  "
                  f"turn1(cold/Blind proxy)={'n/a' if t1 is None else f'{t1:.4f}'}")
     for tn, d in report["per_turn"].items():
-        lines.append(f"  turn {tn:>2}: nDCG@20={d['ndcg']:.4f}  (n={d['n']})")
+        lines.append(f"  turn {tn:>2}: {tag}={d[metric]:.4f}  (n={d['n']})")
     return "\n".join(lines)

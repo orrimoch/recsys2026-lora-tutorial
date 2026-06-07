@@ -42,6 +42,20 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
         {"type": "same_artist", "topk_internal": 100,
          "weight": float(ec.get("w_artist", 1.0))},
     ]
+    # Attributes content channel (Tier-1 #3.1a, 2026-06-07): a 2nd dense content
+    # view via the precomputed attributes-qwen3 embeddings (instruct query side,
+    # Qwen3 is asymmetric). Verified ORTHOGONAL to metadata-dense (0.62 same-track
+    # cosine, 3.6% top-10 neighbor overlap), so it can surface new-artist golds the
+    # metadata/lexical/session channels miss (the new-artist wall). Opt-in via
+    # use_attributes so the shipped config 194 is unchanged. Default weight 0.4
+    # mirrors the metadata-dense mass; sweep only after turn-1 recall lifts.
+    if ec.get("use_attributes"):
+        specs.append({
+            "type": "dense_attributes_qwen3_instruct",
+            "corpus_types": corpus_types,
+            "topk_internal": 100,
+            "weight": float(ec.get("w_attributes", 0.4)),
+        })
     # Lyrics content channel (A1, roadmap 2026-05-30): a 2nd content view via the
     # precomputed lyrics-qwen3 embeddings. Different signal than metadata-dense,
     # so it can surface new-artist golds the metadata/lexical/session channels
