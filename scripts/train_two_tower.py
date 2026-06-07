@@ -164,8 +164,11 @@ def main():
 
     q_in_dim = encode_queries([train_pairs[0][0]]).shape[1]
     feats_t = torch.as_tensor(feats, dtype=torch.float32)
-    model = TwoTowerModel(item_modality_dims=modality_dims, q_in_dim=q_in_dim,
-                          d=args.d).to(device)
+    # Self-describing model_kwargs: pin EVERY constructor arg so the factory
+    # rebuilds an identically-shaped model even if a default changes later.
+    model_kwargs = {"item_modality_dims": modality_dims, "q_in_dim": q_in_dim,
+                    "d": args.d, "hidden": 1536, "dropout": 0.3, "temperature": 0.07}
+    model = TwoTowerModel(**model_kwargs).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     def run_epoch(pairs, train=True):
@@ -193,8 +196,7 @@ def main():
     out_dir = Path(args.cache_dir) / "retrieval_v2" / "two_tower" / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
     torch.save({
-        "model_kwargs": {"item_modality_dims": modality_dims, "q_in_dim": q_in_dim,
-                         "d": args.d},
+        "model_kwargs": model_kwargs,
         "state_dict": model.cpu().state_dict(),
         "item_feats": feats_t.cpu(),
         "track_ids": track_ids,
