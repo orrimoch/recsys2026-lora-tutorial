@@ -495,6 +495,21 @@ class CRS_BASELINE:
         return [str(t["track_id"]) for t in prior_history
                 if t.get("role") in ("music", "assistant") and t.get("track_id")]
 
+    @staticmethod
+    def _sasrec_dialog_turns(prior_history: list, user_query) -> list:
+        """Turn list handed to build_user_dialog for the weight-1.0 SASRec channel.
+
+        SASRec was trained (train_sasrec._walk_split) on user-turns-only dialog
+        built from the turns before the music turn PLUS the current-turn user
+        request. prior_history here is the PRE-append history (it excludes the
+        current request), so we append it back to match the training
+        distribution and the build_lgbm_features feature builder. Dropping the
+        current request (the old `build_user_dialog(prior_history)` call) was a
+        train/serve skew — build_user_dialog keeps only role=="user" turns, so
+        music/assistant turns are excluded regardless.
+        """
+        return list(prior_history) + [{"role": "user", "content": user_query}]
+
     def _finalize_topk(self, items: list, pool: list, played_set: set,
                        k: int = 20) -> list:
         """Assemble the final top-k: dedupe (keep first), drop ids not in the
@@ -676,11 +691,14 @@ class CRS_BASELINE:
                 "user_profile": data.get("user_profile_raw"),
                 "conversation_goal": data.get("conversation_goal"),
                 "history_tids": _played,
-                # SASRec was trained + dev-validated on user-turns-only dialog
-                # (build_user_dialog). Pass it at serve too, else sasrec_seq falls
-                # back to the noisy full raw query it was trained to exclude
-                # (train/serve skew on a weight-1.0 channel).
-                "user_dialog": build_user_dialog(prior_history),
+                # SASRec was trained on user-turns-only dialog that INCLUDES the
+                # current user request (train_sasrec._walk_split). prior_history
+                # is the pre-append history, so rebuild the training turn list via
+                # _sasrec_dialog_turns; else the channel sees a dialog missing the
+                # current request (train/serve skew on a weight-1.0 channel) or
+                # falls back to the noisy full raw query.
+                "user_dialog": build_user_dialog(
+                    self._sasrec_dialog_turns(prior_history, data["user_query"])),
             })
 
         # Stage 1: Batch retrieval. Pull retrieval_topk (default 20; 40 when

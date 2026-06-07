@@ -30,7 +30,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "music-crs-base
 from datasets import load_dataset, concatenate_datasets  # noqa: E402
 from sentence_transformers import SentenceTransformer  # noqa: E402
 from mcrs.retrieval_modules.sasrec_model import (  # noqa: E402
-    SasrecModel, apply_item_feats_mode, build_user_dialog, next_item_loss)
+    SasrecModel, apply_item_feats_mode, build_user_dialog, next_item_loss,
+    prior_turns)
 
 TRACK_EMB = "talkpl-ai/TalkPlayData-Challenge-Track-Embeddings"
 # v2 (post-review): dropped cf-bpr — it's structurally inert for the 62% new-
@@ -105,8 +106,7 @@ def _walk_split(hf_split, tid_to_idx, max_seq):
         for _, m in df[df["role"] == "music"].iterrows():
             tn = int(m["turn_number"])
             tgt = tid_to_idx.get(m["content"])
-            prior = df[(df["turn_number"] < tn) |
-                       ((df["turn_number"] == tn) & (df["role"] == "user"))]
+            prior = prior_turns(df, tn)
             if tgt is not None:
                 out.append((sid,
                             build_user_dialog(prior.to_dict("records")),

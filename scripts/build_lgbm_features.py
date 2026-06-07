@@ -72,6 +72,7 @@ from datasets import load_dataset, concatenate_datasets  # noqa: E402
 
 from mcrs.db_item import MusicCatalogDB  # noqa: E402
 from mcrs.crs_baseline import build_retrieval_query  # noqa: E402
+from mcrs.retrieval_modules.sasrec_model import build_user_dialog, prior_turns  # noqa: E402
 from mcrs.retrieval_modules import load_retrieval_module  # noqa: E402
 from mcrs.retrieval_modules.cf_bpr import CF_BPR  # noqa: E402
 from mcrs.retrieval_modules.rrf import RRF_MODEL  # noqa: E402
@@ -542,6 +543,14 @@ def build(
     golds: list[str] = []
     query_tokens_list: list[set[str]] = []
     played_tids_list: list[list[str]] = []
+    # User-turns-only dialog per turn for the SASRec channel. Must match what the
+    # model was trained on (train_sasrec._walk_split) AND what serve passes
+    # (crs_baseline._sasrec_dialog_turns): build_user_dialog over `prior` (which
+    # already includes the current-turn user request). Omitting this made
+    # sasrec_seq fall back to the raw query -> the wrrf_rank / n_channels_hit
+    # features the reranker trains on were computed from a context the model
+    # never saw (train/serve skew on a weight-1.0 channel).
+    user_dialog_list: list[str] = []
     for sess in tqdm(sessions, desc="sessions"):
         convos = sess["conversations"]
         df = pd.DataFrame(convos)
@@ -549,9 +558,9 @@ def build(
             turn_n = int(music["turn_number"])
             gold_tid = music["content"]
             # build retrieval_input: all turns STRICTLY before this music turn
-            # at this turn_number + the user turn at this turn_number.
-            prior = df[(df["turn_number"] < turn_n) |
-                       ((df["turn_number"] == turn_n) & (df["role"] == "user"))]
+            # at this turn_number + the user turn at this turn_number. Shared
+            # slice with train_sasrec via prior_turns -> SASRec dialog parity.
+            prior = prior_turns(df, turn_n)
             lines = []
             for _, t in prior.iterrows():
                 role = "assistant" if t["role"] == "music" else t["role"]
@@ -605,6 +614,9 @@ def build(
             })
             golds.append(gold_tid)
             query_tokens_list.append(_tokenize_simple(retrieval_input))
+            # SASRec dialog: user-turns-only over `prior` (same slice train_sasrec
+            # uses), i.e. prior turns + the current-turn user request.
+            user_dialog_list.append(build_user_dialog(prior.to_dict("records")))
             # Collect track_ids played BEFORE this turn (for session-continuity features).
             prior_music = df[(df["role"] == "music") & (df["turn_number"] < turn_n)]
             played_tids_list.append(list(prior_music["content"]))
@@ -644,7 +656,8 @@ def build(
         # indexing so batch_context[j] lines up with chunk_queries[j].
         chunk_n = len(chunk_queries)
         chunk_context = [
-            {"history_tids": played_tids_list[i + j]} for j in range(chunk_n)
+            {"history_tids": played_tids_list[i + j],
+             "user_dialog": user_dialog_list[i + j]} for j in range(chunk_n)
         ]
         chunk_user_ids = [metas[i + j]["user_id"] for j in range(chunk_n)]
         _t0 = time.perf_counter()

@@ -31,6 +31,23 @@ CATEGORICAL_FEATURES = [
 NON_FEATURE_COLS = {"query_id", "session_id", "user_id", "turn_number", "candidate_tid", "label"}
 
 
+def internal_val_warning() -> str:
+    """Tier-0 #4 guard text, printed every run.
+
+    The internal val parquet overlaps the train sample ~98.6% by session AND
+    shares the full-train SASRec/cf-bpr pool, so its nDCG is leaky and has been
+    anti-correlated with dev (the 'internal val trap'). It is valid ONLY for
+    early stopping — never for model/config selection.
+    """
+    return (
+        "[lgbm] NOTE: val_ndcg@20 is for EARLY STOPPING ONLY — do not select on "
+        "it. The internal val is leaky (~98.6% session overlap with train + shared "
+        "SASRec/cf-bpr pool) and anti-correlated with dev. Select configs on the "
+        "temporal holdout (scripts/carve_temporal_selection_set.py) and confirm on "
+        "split='test'."
+    )
+
+
 def build_groups(df: pd.DataFrame) -> list[int]:
     """Group sizes by (session_id, turn_number) — preserves DataFrame row order.
 
@@ -157,7 +174,9 @@ def main():
         zip(feat_cols, model.feature_importance(importance_type="gain")),
         key=lambda x: -x[1],
     )[:20]
-    print(f"[lgbm] saved → {booster_path} (best_iter={best_iter}, val_ndcg@20={best_score:.4f})")
+    print(f"[lgbm] saved → {booster_path} (best_iter={best_iter}, "
+          f"val_ndcg@20={best_score:.4f} [early-stopping only])")
+    print(internal_val_warning())
     print("[lgbm] top-20 features by gain:")
     for name, gain in importance:
         print(f"  {name}: {gain:.2f}")

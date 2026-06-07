@@ -39,6 +39,19 @@ def apply_item_feats_mode(feats, modality_dims, mode: str = "content",
     raise ValueError(f"unknown item-feats mode: {mode!r}")
 
 
+def prior_turns(df, turn_number):
+    """The SASRec conditioning slice for a target music turn: every turn BEFORE
+    `turn_number` (all roles) plus the current-turn USER request. The current
+    music (gold) turn and all future turns are excluded.
+
+    Single source of truth for train/serve/feature-build parity: train_sasrec
+    (training), build_lgbm_features (reranker features), and the nb74 dev harness
+    all slice via this so they cannot drift. Operates on the passed dataframe's
+    own API (no pandas import here — this module stays dependency-light)."""
+    return df[(df["turn_number"] < turn_number)
+              | ((df["turn_number"] == turn_number) & (df["role"] == "user"))]
+
+
 def build_user_dialog(turns) -> str:
     """User-turns-only dialog text: newline-join the `content` of turns whose
     role is 'user', in order. `turns` is an iterable of dict-like rows with
