@@ -64,17 +64,27 @@ class RelevanceScorer:
         self.bm25 = BM25_MODEL(dataset_name, split_types, corpus_types, cache_dir)
         self.bm25_topk = int(bm25_topk)
 
+    @staticmethod
+    def _bm25_score_maps(res, track_ids, n_queries) -> list[dict]:
+        """Parse a bm25s tuple-format retrieve result -> per-query {tid: score}.
+
+        Matches BM25_MODEL: res.documents[i] is a list of {'id': corpus_idx}
+        dicts, res.scores[i] the parallel score array, and track_ids[idx] the tid.
+        """
+        out = []
+        for i in range(n_queries):
+            out.append({track_ids[item["id"]]: float(s)
+                        for item, s in zip(res.documents[i], res.scores[i])})
+        return out
+
     def _bm25_maps(self, queries):
-        """tid -> raw bm25 score per query (top-`bm25_topk`)."""
+        """tid -> raw bm25 score per query (top-`bm25_topk`). Mirrors
+        BM25_MODEL.batch_text_to_item_retrieval (lowercase + tokenize + retrieve)."""
         import bm25s
-        toks = bm25s.tokenize(queries, show_progress=False)
-        docs, scores = self.bm25.bm25_model.retrieve(
+        toks = bm25s.tokenize([q.lower() for q in queries])
+        res = self.bm25.bm25_model.retrieve(
             toks, k=self.bm25_topk, return_as="tuple")
-        ids = self.bm25.track_ids
-        maps = []
-        for i in range(len(queries)):
-            maps.append({ids[d]: float(s) for d, s in zip(docs[i], scores[i])})
-        return maps
+        return self._bm25_score_maps(res, self.bm25.track_ids, len(queries))
 
     def feats_for_batch(self, queries, cand_tids_per_query) -> list[list[dict]]:
         q_emb = np.asarray(self.dense._encode_queries(list(queries)), dtype=np.float64)

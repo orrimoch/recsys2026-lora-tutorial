@@ -129,6 +129,21 @@ def _stub_scorer():
     return r
 
 
+def test_bm25_score_maps_parses_bm25s_tuple_format():
+    # Regression: bm25s retrieve returns documents as [{'id': corpus_idx}, ...]
+    # with parallel .scores; the tid is track_ids[item['id']]. (A wrong assumption
+    # here — int indices — crashed the build.)
+    from mcrs.rerankers.relevance_scorer import RelevanceScorer
+
+    class _Res:
+        documents = [[{"id": 0}, {"id": 2}], [{"id": 1}]]
+        scores = [[5.0, 1.0], [3.0]]
+
+    maps = RelevanceScorer._bm25_score_maps(_Res(), ["a", "b", "c"], 2)
+    assert maps[0] == {"a": 5.0, "c": 1.0}
+    assert maps[1] == {"b": 3.0}
+
+
 def test_feats_for_batch_aligns_and_scores():
     r = _stub_scorer()
     out = r.feats_for_batch(["q1", "q2"], [["a", "b"], ["b"]])
