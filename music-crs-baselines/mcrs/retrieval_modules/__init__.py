@@ -52,8 +52,11 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
             if t == "bm25":  # lexical content — on for both
                 s["cold_weight"] = float(ec.get("w_bm25_cold", ec.get("w_bm25", 1.0)))
                 s["warm_weight"] = float(ec.get("w_bm25_warm", ec.get("w_bm25", 1.0)))
-            elif "dense_metadata_qwen3" in t:  # dense content — stronger when cold
-                s["cold_weight"] = float(ec.get("w_qwen_cold", 1.0))
+            elif "dense_metadata_qwen3" in t:  # dense content — SYMMETRIC.
+                # Validated 2026-06-08: upweighting dense for cold backfired
+                # (turn-1 nDCG -0.0021); keeping it symmetric removed the cold
+                # regression while warm kept the same_artist gain (overall +0.0042).
+                s["cold_weight"] = float(ec.get("w_qwen_cold", ec.get("w_qwen", 0.7)))
                 s["warm_weight"] = float(ec.get("w_qwen_warm", ec.get("w_qwen", 0.7)))
             elif t == "same_artist":  # session continuity — only when warm
                 s["cold_weight"] = float(ec.get("w_artist_cold", 0.0))

@@ -149,33 +149,27 @@ class WRRFRunner:
     def __init__(self, cache_dir: str, corpus_types: list[str],
                  use_sasrec: bool = False,
                  w_sasrec: float = 1.0,
-                 sasrec_model_dir: str = "sasrec_v1"):
+                 sasrec_model_dir: str = "sasrec_v1",
+                 use_segment_routing: bool = False):
         # wrrf_union_v1 is the 3-channel recall union (lexical + frozen-Qwen
         # semantic + same-artist session continuity); session_cf was dropped
         # after the G1 ablation. The same-artist channel needs
         # batch_context['history_tids'] to fire — see run().
         self.use_sasrec = use_sasrec
+        # Segment routing must be enabled at BUILD time too (it changes the fused
+        # wrrf_rank), so the reranker trains on the same routed order it serves on.
+        extra = {"use_segment_routing": True} if use_segment_routing else {}
         if use_sasrec:
-            self.wrrf = load_retrieval_module(
-                "wrrf_union_v1",
-                "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
-                ["all_tracks"],
-                corpus_types,
-                cache_dir,
-                extra_config={
-                    "use_sasrec": True,
-                    "w_sasrec": w_sasrec,
-                    "sasrec_model_dir": sasrec_model_dir,
-                },
-            )
-        else:
-            self.wrrf = load_retrieval_module(
-                "wrrf_union_v1",
-                "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
-                ["all_tracks"],
-                corpus_types,
-                cache_dir,
-            )
+            extra.update({"use_sasrec": True, "w_sasrec": w_sasrec,
+                          "sasrec_model_dir": sasrec_model_dir})
+        self.wrrf = load_retrieval_module(
+            "wrrf_union_v1",
+            "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
+            ["all_tracks"],
+            corpus_types,
+            cache_dir,
+            extra_config=extra,
+        )
 
     def run(self, queries: list[str], topk: int,
             batch_context=None, user_ids=None) -> list[list[dict]]:
@@ -458,6 +452,7 @@ def build(
     bge_cache_dir: str = None,
     with_relevance: bool = False,
     dataset_name: str = "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
+    use_segment_routing: bool = False,
 ) -> None:
     # bge-v2 bi-encoder features are OFF unless BOTH flags are provided, so any
     # existing run (no bge args) is byte-identical to before.
@@ -517,6 +512,7 @@ def build(
         use_sasrec=use_sasrec,
         w_sasrec=w_sasrec,
         sasrec_model_dir=sasrec_model_dir,
+        use_segment_routing=use_segment_routing,
     )
 
     # bge-v2 bi-encoder feature (bge_cos + bge_rank). Loaded once when enabled.
@@ -798,6 +794,10 @@ def main() -> int:
     p.add_argument("--with-relevance", action="store_true",
                    help="Emit Tier-2 #4.1 leak-free relevance features "
                         "(qwen_meta_cos + bm25_score) via the shared RelevanceScorer.")
+    p.add_argument("--use-segment-routing", action="store_true",
+                   help="Build the candidate pool + wrrf_rank with segment-aware "
+                        "routing (cold->content, warm->session) so the reranker "
+                        "trains on the same routed order it serves on.")
     p.add_argument("--dataset-name", type=str,
                    default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
                    help="Catalog dataset for the RelevanceScorer dense/bm25 models.")
@@ -832,7 +832,8 @@ def main() -> int:
               bge_model=args.bge_model,
               bge_cache_dir=args.bge_cache_dir,
               with_relevance=args.with_relevance,
-              dataset_name=args.dataset_name)
+              dataset_name=args.dataset_name,
+              use_segment_routing=args.use_segment_routing)
     finally:
         os.chdir(origin_cwd)
     return 0
