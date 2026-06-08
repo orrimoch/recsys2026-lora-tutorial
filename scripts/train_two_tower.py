@@ -89,8 +89,10 @@ def load_item_feats(splits=("all_tracks",)):
 
 def build_pairs(hf_split, tid_to_idx, holdout_ids, item_db):
     """Causal (query_text, gold_idx, artist) pairs. Sessions in holdout_ids go to
-    val; the rest to train. Query = raw_enriched text at the turn; gold excluded
-    from being its own negative downstream via in-batch labels."""
+    val; the rest to train. Query = raw_with_goal text at the turn (MATCHES the
+    served query_preprocessing_mode in config 194/197 and the dev harness, so the
+    query tower sees the same distribution at train / eval / serve — no skew);
+    gold excluded from being its own negative downstream via in-batch labels."""
     train, val = [], []
     for sess in hf_split:
         sid = str(sess.get("session_id"))
@@ -109,7 +111,7 @@ def build_pairs(hf_split, tid_to_idx, holdout_ids, item_db):
                    "content": (item_db.id_to_metadata(t["content"])
                                if t["role"] == "music" else t["content"])}
                   for _, t in prior.iterrows()]
-            q = build_retrieval_query(sm, mode="raw_enriched", goal_text=gt, user_profile=up)
+            q = build_retrieval_query(sm, mode="raw_with_goal", goal_text=gt, user_profile=up)
             artist = ""
             try:
                 artist = (item_db.id_to_metadata(music["content"]) or "")
