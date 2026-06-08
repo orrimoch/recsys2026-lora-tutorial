@@ -42,6 +42,22 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
         {"type": "same_artist", "topk_internal": 100,
          "weight": float(ec.get("w_artist", 1.0))},
     ]
+    # Segment-aware routing (2026-06-08): cold queries (no played history) lean on
+    # CONTENT channels; warm queries lean on the SESSION channel. The RRF layer
+    # picks each query's weights by history presence. Opt-in via
+    # use_segment_routing; default off -> shipped fixed-weight fusion unchanged.
+    if ec.get("use_segment_routing"):
+        for s in specs:
+            t = s["type"]
+            if t == "bm25":  # lexical content — on for both
+                s["cold_weight"] = float(ec.get("w_bm25_cold", ec.get("w_bm25", 1.0)))
+                s["warm_weight"] = float(ec.get("w_bm25_warm", ec.get("w_bm25", 1.0)))
+            elif "dense_metadata_qwen3" in t:  # dense content — stronger when cold
+                s["cold_weight"] = float(ec.get("w_qwen_cold", 1.0))
+                s["warm_weight"] = float(ec.get("w_qwen_warm", ec.get("w_qwen", 0.7)))
+            elif t == "same_artist":  # session continuity — only when warm
+                s["cold_weight"] = float(ec.get("w_artist_cold", 0.0))
+                s["warm_weight"] = float(ec.get("w_artist_warm", 1.5))
     # Attributes content channel (Tier-1 #3.1a, 2026-06-07): a 2nd dense content
     # view via the precomputed attributes-qwen3 embeddings (instruct query side,
     # Qwen3 is asymmetric). Verified ORTHOGONAL to metadata-dense (0.62 same-track

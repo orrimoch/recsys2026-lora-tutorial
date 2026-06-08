@@ -55,9 +55,16 @@ class RRF_MODEL:
             sub_corpus = spec.get("corpus_types", corpus_types)
             sub_topk = int(spec.get("topk_internal", 60))
             weight = float(spec.get("weight", 1.0))
+            # Segment-aware routing: optional per-sub weights for cold (no played
+            # history) vs warm (has history) queries. Default both = weight, so
+            # fusion is unchanged unless a spec sets them (use_segment_routing).
+            cold_weight = float(spec.get("cold_weight", weight))
+            warm_weight = float(spec.get("warm_weight", weight))
             print(
                 f"[rrf] building sub retriever={retriever_type} "
                 f"topk_internal={sub_topk} weight={weight:.2f}"
+                + (f" (cold={cold_weight:.2f} warm={warm_weight:.2f})"
+                   if (cold_weight, warm_weight) != (weight, weight) else "")
             )
             sub_extra_config = spec.get("extra_config", {}) or {}
             sub = load_retrieval_module(
@@ -66,7 +73,8 @@ class RRF_MODEL:
             )
             self.subs.append({
                 "retriever": sub, "topk": sub_topk,
-                "weight": weight, "label": retriever_type,
+                "weight": weight, "cold_weight": cold_weight,
+                "warm_weight": warm_weight, "label": retriever_type,
             })
         print(f"[rrf] ready — k={self.k}, {len(self.subs)} sub-retriever(s)")
 
@@ -123,6 +131,27 @@ class RRF_MODEL:
             results.append([tid for tid, _ in ordered[:topk]])
         return results
 
+    @staticmethod
+    def fuse_per_sub_segmented(
+        per_sub: list[list[list[str]]], cold_weights: list[float],
+        warm_weights: list[float], k: int, topk: int, is_warm: list[bool],
+    ) -> list[list[str]]:
+        """Weighted RRF where each query uses warm_weights if is_warm[q] else
+        cold_weights. Implements per-segment channel routing (cold -> content
+        channels, warm -> session channels). Equivalent to fuse_per_sub when
+        cold_weights == warm_weights."""
+        n_queries = len(per_sub[0]) if per_sub else 0
+        results: list[list[str]] = []
+        for q_idx in range(n_queries):
+            weights = warm_weights if is_warm[q_idx] else cold_weights
+            fused: dict[str, float] = {}
+            for s_idx, w in enumerate(weights):
+                for rank, tid in enumerate(per_sub[s_idx][q_idx], start=1):
+                    fused[tid] = fused.get(tid, 0.0) + w / (k + rank)
+            ordered = sorted(fused.items(), key=lambda kv: -kv[1])
+            results.append([tid for tid, _ in ordered[:topk]])
+        return results
+
     def batch_text_to_item_retrieval(
         self, queries: list[str], topk: int, user_ids=None,
         batch_context: Optional[list[dict]] = None,
@@ -131,6 +160,14 @@ class RRF_MODEL:
         # Subs that ignore them (BM25, dense) still accept via try/except back-compat.
         per_sub, _ = self.batch_per_sub_rankings(
             queries, user_ids=user_ids, batch_context=batch_context)
+        cold_w = [sub.get("cold_weight", sub["weight"]) for sub in self.subs]
+        warm_w = [sub.get("warm_weight", sub["weight"]) for sub in self.subs]
+        # Segment-aware fusion only when routing weights actually differ AND we
+        # have per-query history to classify cold/warm. Otherwise the plain path.
+        if cold_w != warm_w and batch_context is not None:
+            is_warm = [bool((c or {}).get("history_tids")) for c in batch_context]
+            return self.fuse_per_sub_segmented(
+                per_sub, cold_w, warm_w, self.k, topk, is_warm)
         weights = [sub["weight"] for sub in self.subs]
         return self.fuse_per_sub(per_sub, weights, self.k, topk)
 
