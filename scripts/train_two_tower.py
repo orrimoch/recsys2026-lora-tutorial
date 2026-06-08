@@ -143,13 +143,17 @@ def main():
     print(f"[two-tower] item feats {feats.shape} modality_dims={modality_dims}")
 
     train_split = load_dataset(CONV, split="train")
-    sessions = [{"session_id": r["session_id"], "session_date": r["session_date"]}
-                for r in train_split]
-    _, holdout_ids = select_temporal_holdout(sessions, frac=args.holdout_frac)
+    # Subset FIRST, then carve the temporal holdout WITHIN the subset, so a small
+    # --n-sessions (a quick trend run) still yields a leak-free val set (latest
+    # sessions by date). Computing holdout over the full split + taking the first
+    # N rows would leave a small subset with ZERO val pairs -> no val curve.
     rows = list(train_split)[: args.n_sessions]
+    sessions = [{"session_id": r["session_id"], "session_date": r["session_date"]}
+                for r in rows]
+    _, holdout_ids = select_temporal_holdout(sessions, frac=args.holdout_frac)
     train_pairs, val_pairs = build_pairs(rows, tid_to_idx, holdout_ids, item_db)
     print(f"[two-tower] train pairs={len(train_pairs)} val pairs={len(val_pairs)} "
-          f"(time-based holdout {len(holdout_ids)} sessions)")
+          f"(n_sessions={len(rows)}, time-based holdout {len(holdout_ids)} sessions)")
 
     # Frozen Qwen3 query encoder (same as the dense channel) -> cache query embs.
     from mcrs.retrieval_modules import QWEN3_MUSIC_INSTRUCT
@@ -159,8 +163,24 @@ def main():
                              embed_col="metadata-qwen3_embedding_0.6b",
                              instruct=QWEN3_MUSIC_INSTRUCT, instruct_label="instruct-music-v1")
 
+    # Pre-encode every UNIQUE query ONCE (reuses + fills the shared query cache),
+    # so the epoch loop is pure cache lookups instead of re-encoding ~103k queries
+    # 5x via the private _encode_queries path (which bypasses the cache). This is
+    # the single biggest speedup: ~23 min/epoch -> seconds/epoch.
+    uniq = list({p[0] for p in train_pairs} | {p[0] for p in val_pairs})
+    miss = [q for q in uniq if q not in qenc._query_cache]
+    print(f"[two-tower] pre-encoding {len(miss)}/{len(uniq)} uncached queries "
+          f"({len(uniq) - len(miss)} cache hits)...")
+    for i in tqdm(range(0, len(miss), 128)):
+        chunk = miss[i:i + 128]
+        for q, e in zip(chunk, qenc._encode_queries(chunk)):
+            qenc._query_cache[q] = e.astype(np.float32)
+    if miss:
+        qenc._query_cache_dirty = True
+        qenc._save_query_cache()  # persist so future runs are instant too
+
     def encode_queries(texts):
-        return np.asarray(qenc._encode_queries(list(texts)), dtype=np.float32)
+        return np.stack([qenc._query_cache[q] for q in texts]).astype(np.float32)
 
     q_in_dim = encode_queries([train_pairs[0][0]]).shape[1]
     feats_t = torch.as_tensor(feats, dtype=torch.float32)
@@ -187,21 +207,42 @@ def main():
             total += float(loss.detach()) * len(idx); n += len(idx)
         return total / max(n, 1)
 
+    out_dir = Path(args.cache_dir) / "retrieval_v2" / "two_tower" / args.out
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _save(path, epoch, val):
+        # CPU-copy the state_dict WITHOUT moving the live model off-GPU (a plain
+        # model.cpu() mid-loop would force the next epoch onto CPU). Self-contained
+        # checkpoint: the factory rebuilds from model_kwargs + state_dict +
+        # item_feats + track_ids.
+        torch.save({
+            "model_kwargs": model_kwargs,
+            "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+            "item_feats": feats_t.cpu(),
+            "track_ids": track_ids,
+            "epoch": epoch, "val_loss": float(val),
+        }, path)
+
+    best_val = float("inf")
     for ep in range(args.epochs):
         tr = run_epoch(train_pairs, train=True)
         with torch.no_grad():
             va = run_epoch(val_pairs, train=False) if val_pairs else float("nan")
         print(f"[two-tower] epoch {ep+1}/{args.epochs} train_loss={tr:.4f} val_loss={va:.4f}")
+        # Checkpoint EVERY epoch -> an interrupt / Colab disconnect keeps the
+        # latest completed epoch instead of losing the whole run.
+        _save(out_dir / "two_tower_last.pt", ep + 1, va)
+        # two_tower.pt (what the factory loads) tracks the BEST val_loss (or the
+        # latest epoch when there is no val set). No early stopping here, so
+        # best-val checkpointing guards against later-epoch overfitting.
+        if not val_pairs or va < best_val:
+            if val_pairs:
+                best_val = va
+            _save(out_dir / "two_tower.pt", ep + 1, va)
+            print(f"[two-tower]   checkpoint -> two_tower.pt (epoch {ep+1}, val_loss={va:.4f})")
 
-    out_dir = Path(args.cache_dir) / "retrieval_v2" / "two_tower" / args.out
-    out_dir.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        "model_kwargs": model_kwargs,
-        "state_dict": model.cpu().state_dict(),
-        "item_feats": feats_t.cpu(),
-        "track_ids": track_ids,
-    }, out_dir / "two_tower.pt")
-    print(f"[two-tower] saved -> {out_dir / 'two_tower.pt'}")
+    print(f"[two-tower] done. best -> {out_dir / 'two_tower.pt'} (best val_loss={best_val:.4f}); "
+          f"latest -> {out_dir / 'two_tower_last.pt'}")
     return 0
 
 
