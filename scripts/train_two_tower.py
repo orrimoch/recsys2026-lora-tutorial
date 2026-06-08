@@ -130,6 +130,10 @@ def main():
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--weight-decay", type=float, default=0.01,
+                   help="AdamW L2 regularization; fights the fast overfit (0.0 = off)")
+    p.add_argument("--dropout", type=float, default=0.3,
+                   help="dropout in both towers; bump to 0.5 if val still overfits")
     p.add_argument("--holdout-frac", type=float, default=0.15)
     p.add_argument("--n-sessions", type=int, default=999999)
     p.add_argument("--seed", type=int, default=42)
@@ -189,9 +193,12 @@ def main():
     # Self-describing model_kwargs: pin EVERY constructor arg so the factory
     # rebuilds an identically-shaped model even if a default changes later.
     model_kwargs = {"item_modality_dims": modality_dims, "q_in_dim": q_in_dim,
-                    "d": args.d, "hidden": 1536, "dropout": 0.3, "temperature": 0.07}
+                    "d": args.d, "hidden": 1536, "dropout": args.dropout, "temperature": 0.07}
     model = TwoTowerModel(**model_kwargs).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # AdamW (decoupled weight decay) instead of Adam — the half-data run overfit
+    # by epoch 2 (train kept dropping, val rose); weight decay + dropout are the
+    # cheap regularizers before reaching for hard negatives / more data.
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     def run_epoch(pairs, train=True):
         model.train(train)
@@ -212,7 +219,7 @@ def main():
     out_dir = Path(args.cache_dir) / "retrieval_v2" / "two_tower" / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    def _save(path, epoch, val):
+    def _save(path, epoch, val, rec100=float("nan")):
         # CPU-copy the state_dict WITHOUT moving the live model off-GPU (a plain
         # model.cpu() mid-loop would force the next epoch onto CPU). Self-contained
         # checkpoint: the factory rebuilds from model_kwargs + state_dict +
@@ -222,28 +229,51 @@ def main():
             "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
             "item_feats": feats_t.cpu(),
             "track_ids": track_ids,
-            "epoch": epoch, "val_loss": float(val),
+            "epoch": epoch, "val_loss": float(val), "val_recall_100": float(rec100),
         }, path)
 
-    best_val = float("inf")
+    def val_recall(ks=(20, 100)):
+        """Honest metric: rank each val gold against the FULL 47k catalog (not just
+        in-batch). InfoNCE val_loss overfits while this — the metric # 4-tt actually
+        cares about — can still be improving. Print it instead of staring at loss."""
+        if not val_pairs:
+            return {k: float("nan") for k in ks}
+        model.eval()
+        with torch.no_grad():
+            item_repr = model.encode_item(feats_t.to(device))      # (N,d) L2-normed
+            hit = {k: 0 for k in ks}
+            for s in range(0, len(val_pairs), args.batch_size):
+                batch = val_pairs[s:s + args.batch_size]
+                q_emb = torch.as_tensor(encode_queries([p[0] for p in batch])).to(device)
+                gold = torch.tensor([p[1] for p in batch], device=device)
+                top = (model.encode_query(q_emb) @ item_repr.t()).topk(max(ks), dim=1).indices
+                for k in ks:
+                    hit[k] += (top[:, :k] == gold[:, None]).any(dim=1).sum().item()
+            del item_repr
+            return {k: hit[k] / len(val_pairs) for k in ks}
+
+    best_recall = -1.0
     for ep in range(args.epochs):
         tr = run_epoch(train_pairs, train=True)
         with torch.no_grad():
             va = run_epoch(val_pairs, train=False) if val_pairs else float("nan")
-        print(f"[two-tower] epoch {ep+1}/{args.epochs} train_loss={tr:.4f} val_loss={va:.4f}")
+        vr = val_recall()
+        print(f"[two-tower] epoch {ep+1}/{args.epochs} train_loss={tr:.4f} val_loss={va:.4f} "
+              f"val_recall@20={vr[20]:.4f} val_recall@100={vr[100]:.4f}")
         # Checkpoint EVERY epoch -> an interrupt / Colab disconnect keeps the
         # latest completed epoch instead of losing the whole run.
-        _save(out_dir / "two_tower_last.pt", ep + 1, va)
-        # two_tower.pt (what the factory loads) tracks the BEST val_loss (or the
-        # latest epoch when there is no val set). No early stopping here, so
-        # best-val checkpointing guards against later-epoch overfitting.
-        if not val_pairs or va < best_val:
-            if val_pairs:
-                best_val = va
-            _save(out_dir / "two_tower.pt", ep + 1, va)
-            print(f"[two-tower]   checkpoint -> two_tower.pt (epoch {ep+1}, val_loss={va:.4f})")
+        _save(out_dir / "two_tower_last.pt", ep + 1, va, vr[100])
+        # two_tower.pt (what the factory loads) tracks BEST val_recall@100 — the
+        # real metric — NOT val_loss (which overfits while recall still climbs).
+        # Falls back to the latest epoch when there is no val set.
+        score = vr[100] if val_pairs else float(ep)
+        if score > best_recall:
+            best_recall = score
+            _save(out_dir / "two_tower.pt", ep + 1, va, vr[100])
+            print(f"[two-tower]   checkpoint -> two_tower.pt (epoch {ep+1}, "
+                  f"val_recall@100={vr[100]:.4f})")
 
-    print(f"[two-tower] done. best -> {out_dir / 'two_tower.pt'} (best val_loss={best_val:.4f}); "
+    print(f"[two-tower] done. best -> {out_dir / 'two_tower.pt'} (best val_recall@100={best_recall:.4f}); "
           f"latest -> {out_dir / 'two_tower_last.pt'}")
     return 0
 
