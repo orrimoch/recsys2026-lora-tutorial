@@ -121,6 +121,39 @@ def build_pairs(hf_split, tid_to_idx, holdout_ids, item_db):
     return train, val
 
 
+def build_artist_index(track_ids, metadata_dict):
+    """idx_to_artist (lowercased, aligned to track_ids) + artist -> [track indices].
+    Tracks with no artist are not grouped (can't form same-artist negatives)."""
+    idx_to_artist, artist_to_idx = [], {}
+    for i, tid in enumerate(track_ids):
+        md = metadata_dict.get(tid) or {}
+        a = md.get("artist_name")
+        a = (", ".join(map(str, a)) if isinstance(a, list) else str(a or "")).strip().lower()
+        idx_to_artist.append(a)
+        if a:
+            artist_to_idx.setdefault(a, []).append(i)
+    return idx_to_artist, artist_to_idx
+
+
+def sample_hard_negatives(gold_indices, idx_to_artist, artist_to_idx, n_per, rng):
+    """Same-artist, different-track negative indices for a batch of golds. Excludes the
+    batch golds (they are in-batch positives). Returns a sorted unique index list.
+    Forces the model to separate a track from other tracks by the same artist —
+    finer content discrimination than random in-batch negatives."""
+    golds = set(int(g) for g in gold_indices)
+    negs = set()
+    for g in gold_indices:
+        pool = artist_to_idx.get(idx_to_artist[g], ())
+        cands = [j for j in pool if j != g]
+        if not cands:
+            continue
+        k = min(int(n_per), len(cands))
+        for c in rng.choice(len(cands), size=k, replace=False):
+            negs.add(int(cands[int(c)]))
+    negs.difference_update(golds)
+    return sorted(negs)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--cache-dir", required=True)
@@ -136,6 +169,10 @@ def main():
                    help="dropout in both towers; bump to 0.5 if val still overfits")
     p.add_argument("--holdout-frac", type=float, default=0.15)
     p.add_argument("--n-sessions", type=int, default=999999)
+    p.add_argument("--n-hard-negs", type=int, default=0,
+                   help="same-artist hard negatives per batch gold appended to the "
+                        "in-batch InfoNCE bank (0 = off). Forces finer content "
+                        "discrimination; try 4.")
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
     torch.manual_seed(args.seed)
@@ -147,6 +184,14 @@ def main():
     track_ids, feats, modality_dims = load_item_feats(["all_tracks"])
     tid_to_idx = {t: i for i, t in enumerate(track_ids)}
     print(f"[two-tower] item feats {feats.shape} modality_dims={modality_dims}")
+
+    # Same-artist hard negatives (opt-in): an artist -> track-indices index so each
+    # batch can append same-artist different-track negatives to the InfoNCE bank.
+    idx_to_artist, artist_to_idx = (build_artist_index(track_ids, item_db.metadata_dict)
+                                    if args.n_hard_negs > 0 else (None, None))
+    if args.n_hard_negs > 0:
+        print(f"[two-tower] hard negatives ON: n_per={args.n_hard_negs}, "
+              f"{len(artist_to_idx)} artists with >=1 track")
 
     train_split = load_dataset(CONV, split="train")
     # Subset FIRST, then carve the temporal holdout WITHIN the subset, so a small
@@ -210,7 +255,13 @@ def main():
             gold = [pairs[i][1] for i in idx]
             q_emb = torch.as_tensor(encode_queries(q_txt)).to(device)
             pos = feats_t[gold].to(device)
-            loss = info_nce_loss(model, q_emb, pos)
+            neg_feats = None
+            if train and args.n_hard_negs > 0 and artist_to_idx:
+                neg_idx = sample_hard_negatives(gold, idx_to_artist, artist_to_idx,
+                                                args.n_hard_negs, np.random)
+                if neg_idx:
+                    neg_feats = feats_t[neg_idx].to(device)
+            loss = info_nce_loss(model, q_emb, pos, extra_neg_feats=neg_feats)
             if train:
                 opt.zero_grad(); loss.backward(); opt.step()
             total += float(loss.detach()) * len(idx); n += len(idx)
