@@ -691,7 +691,17 @@ def build(
     total_rows = 0
     t_union = 0.0   # cumulative retrieval + GPU-encode time
     t_feat = 0.0    # cumulative python feature-extraction time
-    for i in tqdm(range(0, len(queries), CHUNK), desc="wrrf batches"):
+    # Progress logging: tqdm's \r in-place bar does NOT render under Colab's
+    # `!python -u` (non-TTY subprocess) — the loop looks frozen for hours. So when
+    # stderr isn't a TTY, disable the bar and emit periodic newline-terminated,
+    # FLUSHED lines (Colab renders those incrementally) carrying a live ETA +
+    # throughput. Interactive terminals still get the normal tqdm bar.
+    n_chunks = (len(queries) + CHUNK - 1) // CHUNK
+    _is_tty = sys.stderr.isatty()
+    LOG_EVERY_SEC = 30.0   # cadence of the Colab-visible progress line
+    _loop_t0 = time.perf_counter()
+    _last_log = _loop_t0
+    for i in tqdm(range(0, len(queries), CHUNK), desc="wrrf batches", disable=not _is_tty):
         chunk_queries = queries[i:i+CHUNK]
         # Feed the session-aware union channels the prior played track_ids +
         # per-query user_id. Mirror the existing prior_tids = played_tids_list[i+j]
@@ -766,6 +776,23 @@ def build(
             all_frames.append(pd.DataFrame(row_buf))
             total_rows += len(row_buf)
             row_buf = []
+        # Colab-visible progress (see note above the loop): every LOG_EVERY_SEC, or
+        # on the final batch, print a flushed newline line with throughput + ETA.
+        _b = i // CHUNK + 1
+        _now = time.perf_counter()
+        if not _is_tty and (_now - _last_log >= LOG_EVERY_SEC or _b == n_chunks):
+            _last_log = _now
+            _done = min(i + CHUNK, len(queries))
+            _el = _now - _loop_t0
+            _qps = _done / _el if _el > 0 else 0.0
+            _eta = (len(queries) - _done) / _qps if _qps > 0 else float("nan")
+            print(
+                f"[lgbm-features] wrrf {_b}/{n_chunks} batches | "
+                f"{_done}/{len(queries)} q ({100.0 * _done / max(len(queries), 1):.1f}%) | "
+                f"elapsed {_el / 60:.1f}m | {_qps:.1f} q/s | ETA {_eta / 60:.1f}m | "
+                f"union={t_union:.0f}s feat={t_feat:.0f}s | rows~{total_rows + len(row_buf)}",
+                flush=True,
+            )
 
     if row_buf:
         all_frames.append(pd.DataFrame(row_buf))
