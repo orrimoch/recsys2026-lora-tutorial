@@ -699,18 +699,16 @@ def load_retrieval_module(
     elif retrieval_type == "propose_ground":
         # RAG propose-then-ground: LLM proposes real Artist - Title tracks; an
         # inner dense retriever grounds each to a catalog track by NN; RRF fuses.
-        # Mirrors the hyde_qwen3 build.
+        # pg_model="gemini-*" routes to the Gemini API backend (no local 7B load);
+        # anything else uses the local HF model. Mirrors the hyde_qwen3 build.
         import os
-        from ..lm_modules.llama import LLAMA_MODEL
-        from ..query_rewriters.propose_ground import ProposeGenerator
+        from ..query_rewriters.gemini_propose import build_propose_generator
         from .propose_ground_channel import ProposeGroundRetriever
-        lm = LLAMA_MODEL(
-            model_name=extra_config.get("pg_model", "Qwen/Qwen2.5-7B-Instruct"),
-            attn_implementation="sdpa")
         prompt_path = os.path.join(
             os.path.dirname(__file__), "..", "system_prompts", "propose_tracks.txt")
-        generator = ProposeGenerator(
-            lm, prompt_path, cache_dir=cache_dir,
+        generator = build_propose_generator(
+            extra_config.get("pg_model", "Qwen/Qwen2.5-7B-Instruct"),
+            prompt_path, cache_dir,
             n_proposals=int(extra_config.get("n_proposals", 20)),
             batch_size=int(extra_config.get("batch_size", 16)))
         inner = load_retrieval_module(
