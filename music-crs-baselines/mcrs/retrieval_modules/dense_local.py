@@ -59,6 +59,28 @@ class DENSE_LOCAL:
             _SHARED_QUERY_CACHE[self._query_cache_key] = self._load_query_cache()
         self._query_cache: dict[str, np.ndarray] = _SHARED_QUERY_CACHE[self._query_cache_key]
         self._query_cache_dirty = False
+        # Throttled persist — see dense_precomputed for the full rationale: a
+        # per-batch full re-pickle of the growing cache is O(n^2) writes and, on
+        # a Drive-mounted cache_dir, fills the disk. Save every _cache_save_every
+        # new entries + a forced flush at process exit.
+        self._cache_save_every = 2000
+        self._cache_entries_since_save = 0
+        import atexit
+        atexit.register(self.flush_query_cache)
+
+    def flush_query_cache(self) -> None:
+        """Force-write the query cache if anything is unsaved (atexit + callable
+        explicitly at the end of a retrieval loop)."""
+        if self._query_cache_dirty:
+            self._save_query_cache()
+            self._cache_entries_since_save = 0
+
+    def _maybe_save_query_cache(self, n_new_entries: int) -> None:
+        """Throttled persist: rewrite the pickle only after enough new entries."""
+        self._cache_entries_since_save += n_new_entries
+        if self._cache_entries_since_save >= self._cache_save_every:
+            self._save_query_cache()
+            self._cache_entries_since_save = 0
 
     # ---- catalog embeddings ----
 
@@ -168,7 +190,7 @@ class DENSE_LOCAL:
             for j, q in enumerate(to_encode):
                 self._query_cache[q] = encoded[j].astype(np.float32)
             self._query_cache_dirty = True
-            self._save_query_cache()
+            self._maybe_save_query_cache(len(to_encode))
         if hits and queries:
             print(f"[dense_local] query cache hit/total = {hits}/{len(queries)}")
 

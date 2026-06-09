@@ -86,6 +86,34 @@ class DENSE_PRECOMPUTED:
             _SHARED_QUERY_CACHE[self._query_cache_key] = self._load_query_cache()
         self._query_cache: dict[str, np.ndarray] = _SHARED_QUERY_CACHE[self._query_cache_key]
         self._query_cache_dirty = False
+        # Persist the query cache SPARINGLY. The prior design called
+        # _save_query_cache() on EVERY batch with a miss, re-pickling the whole
+        # growing dict each time. When {cache_dir}/dense is a Google Drive FUSE
+        # mount (nb81 cell 1 symlinks it to Drive), hundreds of full rewrites of
+        # a hundreds-of-MB pickle pile up in the DriveFS upload cache -> the VM
+        # disk fills with hundreds of GB and the run stalls on Drive upload.
+        # Mirror dense_multimodal_local: save at most every _cache_save_every new
+        # entries, and force a final write at process exit (atexit) so callers
+        # need no change. See tests/test_dense_query_cache_throttle.py.
+        self._cache_save_every = 2000
+        self._cache_entries_since_save = 0
+        import atexit
+        atexit.register(self.flush_query_cache)
+
+    def flush_query_cache(self) -> None:
+        """Force-write the query cache to disk if anything is unsaved. Called at
+        process exit; safe to call explicitly at the end of a retrieval loop."""
+        if self._query_cache_dirty:
+            self._save_query_cache()
+            self._cache_entries_since_save = 0
+
+    def _maybe_save_query_cache(self, n_new_entries: int) -> None:
+        """Throttled persist: only rewrite the pickle once enough new entries
+        have accumulated (bounds Drive write amplification)."""
+        self._cache_entries_since_save += n_new_entries
+        if self._cache_entries_since_save >= self._cache_save_every:
+            self._save_query_cache()
+            self._cache_entries_since_save = 0
 
     def _cache_path(self) -> str:
         safe = self.embed_col.replace("/", "_")
@@ -320,7 +348,7 @@ class DENSE_PRECOMPUTED:
             for j, q in enumerate(to_encode):
                 self._query_cache[q] = encoded[j].astype(np.float32)
             self._query_cache_dirty = True
-            self._save_query_cache()
+            self._maybe_save_query_cache(len(to_encode))
         if hits and queries:
             print(f"[dense] query cache hit/total = {hits}/{len(queries)}")
 
