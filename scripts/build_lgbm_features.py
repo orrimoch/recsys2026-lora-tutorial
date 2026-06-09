@@ -140,6 +140,24 @@ def load_user_meta() -> dict[str, dict]:
 
 
 # ------------------------------------------------------------------ wRRF runner
+def _union_extra_config(use_sasrec: bool = False, w_sasrec: float = 1.0,
+                        sasrec_model_dir: str = "sasrec_v1",
+                        use_segment_routing: bool = False,
+                        use_two_tower: bool = False, w_two_tower: float = 0.7,
+                        two_tower_model_dir: str = "two_tower_v1") -> dict:
+    """Assemble the wrrf_union_v1 extra_config for feature-build time. Any channel
+    enabled here changes the fused wrrf_rank, so it MUST match serve — the reranker
+    has to train on the exact pool it will serve on. Pure (no I/O) for testing."""
+    extra: dict = {"use_segment_routing": True} if use_segment_routing else {}
+    if use_sasrec:
+        extra.update({"use_sasrec": True, "w_sasrec": w_sasrec,
+                      "sasrec_model_dir": sasrec_model_dir})
+    if use_two_tower:
+        extra.update({"use_two_tower": True, "w_two_tower": w_two_tower,
+                      "two_tower_model_dir": two_tower_model_dir})
+    return extra
+
+
 class WRRFRunner:
     """Thin wrapper that runs the 021-champion wRRF stack and returns ranked
     candidates with fusion score + position. Inference-friendly: the LGBM
@@ -150,18 +168,20 @@ class WRRFRunner:
                  use_sasrec: bool = False,
                  w_sasrec: float = 1.0,
                  sasrec_model_dir: str = "sasrec_v1",
-                 use_segment_routing: bool = False):
+                 use_segment_routing: bool = False,
+                 use_two_tower: bool = False,
+                 w_two_tower: float = 0.7,
+                 two_tower_model_dir: str = "two_tower_v1"):
         # wrrf_union_v1 is the 3-channel recall union (lexical + frozen-Qwen
         # semantic + same-artist session continuity); session_cf was dropped
         # after the G1 ablation. The same-artist channel needs
         # batch_context['history_tids'] to fire — see run().
         self.use_sasrec = use_sasrec
-        # Segment routing must be enabled at BUILD time too (it changes the fused
-        # wrrf_rank), so the reranker trains on the same routed order it serves on.
-        extra = {"use_segment_routing": True} if use_segment_routing else {}
-        if use_sasrec:
-            extra.update({"use_sasrec": True, "w_sasrec": w_sasrec,
-                          "sasrec_model_dir": sasrec_model_dir})
+        extra = _union_extra_config(
+            use_sasrec=use_sasrec, w_sasrec=w_sasrec, sasrec_model_dir=sasrec_model_dir,
+            use_segment_routing=use_segment_routing,
+            use_two_tower=use_two_tower, w_two_tower=w_two_tower,
+            two_tower_model_dir=two_tower_model_dir)
         self.wrrf = load_retrieval_module(
             "wrrf_union_v1",
             "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
@@ -453,6 +473,9 @@ def build(
     with_relevance: bool = False,
     dataset_name: str = "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
     use_segment_routing: bool = False,
+    use_two_tower: bool = False,
+    w_two_tower: float = 0.7,
+    two_tower_model_dir: str = "two_tower_v1",
 ) -> None:
     # bge-v2 bi-encoder features are OFF unless BOTH flags are provided, so any
     # existing run (no bge args) is byte-identical to before.
@@ -513,6 +536,9 @@ def build(
         w_sasrec=w_sasrec,
         sasrec_model_dir=sasrec_model_dir,
         use_segment_routing=use_segment_routing,
+        use_two_tower=use_two_tower,
+        w_two_tower=w_two_tower,
+        two_tower_model_dir=two_tower_model_dir,
     )
 
     # bge-v2 bi-encoder feature (bge_cos + bge_rank). Loaded once when enabled.
@@ -798,6 +824,14 @@ def main() -> int:
                    help="Build the candidate pool + wrrf_rank with segment-aware "
                         "routing (cold->content, warm->session) so the reranker "
                         "trains on the same routed order it serves on.")
+    p.add_argument("--use-two-tower", action="store_true",
+                   help="Add the Tier-1 #3.3 two-tower content channel to the union "
+                        "at build time so the reranker trains on the same pool it "
+                        "serves (converts the validated wall-recall into nDCG).")
+    p.add_argument("--w-two-tower", type=float, default=0.7,
+                   help="RRF weight for the two-tower channel (matches # 4-tt best).")
+    p.add_argument("--two-tower-model-dir", type=str, default="two_tower_v1",
+                   help="Trained two-tower checkpoint dir under retrieval_v2/two_tower/.")
     p.add_argument("--dataset-name", type=str,
                    default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
                    help="Catalog dataset for the RelevanceScorer dense/bm25 models.")
@@ -833,7 +867,10 @@ def main() -> int:
               bge_cache_dir=args.bge_cache_dir,
               with_relevance=args.with_relevance,
               dataset_name=args.dataset_name,
-              use_segment_routing=args.use_segment_routing)
+              use_segment_routing=args.use_segment_routing,
+              use_two_tower=args.use_two_tower,
+              w_two_tower=args.w_two_tower,
+              two_tower_model_dir=args.two_tower_model_dir)
     finally:
         os.chdir(origin_cwd)
     return 0
