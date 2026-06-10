@@ -6,7 +6,7 @@ from mcrs.db_item import MusicCatalogDB
 from mcrs.db_user import UserProfileDB
 from mcrs.lm_modules import load_lm_module
 from mcrs.retrieval_modules import load_retrieval_module
-from mcrs.retrieval_modules.sasrec_model import build_user_dialog
+from mcrs.retrieval_modules.sasrec_model import build_user_dialog, build_sasrec_context
 from mcrs.rerankers import load_reranker_module
 from mcrs.response_rerankers import load_response_reranker_module
 
@@ -267,6 +267,13 @@ class CRS_BASELINE:
         # user's stated intent, which is otherwise dropped before generation.
         # Default OFF so the shipped config 194 prompt is bit-identical.
         responder_use_goal: bool = False,
+        # ---- SASRec goal-ful context (opt-in, default OFF) ---------------
+        # When True, the listener_goal is appended to the SASRec channel's
+        # context (build_sasrec_context) at serve — the REQUIRED serve half of
+        # the in-pool goal-ful SASRec 3-way parity (SASRec_Improved_Plan.md).
+        # Default OFF -> goal=None -> build_sasrec_context == build_user_dialog,
+        # bit-identical to the goal-less sasrec_v1 path.
+        sasrec_context_use_goal: bool = False,
         response_reranker_type: Optional[str] = None,
         response_reranker_model_path: Optional[str] = None,
         response_n_candidates: int = 3,
@@ -372,6 +379,7 @@ class CRS_BASELINE:
         self.query_preprocessing_mode = query_preprocessing_mode
         # Responder goal injection (see _get_system_prompt). Default off.
         self.responder_use_goal = bool(responder_use_goal)
+        self.sasrec_context_use_goal = bool(sasrec_context_use_goal)
         # Response reranker (exp 026+): sample K responses and pick the best via
         # a reward model trained on train goal_progress_assessments.
         self.response_reranker_type = response_reranker_type
@@ -722,8 +730,13 @@ class CRS_BASELINE:
                 # _sasrec_dialog_turns; else the channel sees a dialog missing the
                 # current request (train/serve skew on a weight-1.0 channel) or
                 # falls back to the noisy full raw query.
-                "user_dialog": build_user_dialog(
-                    self._sasrec_dialog_turns(prior_history, data["user_query"])),
+                # Goal-ful context only when sasrec_context_use_goal (the in-pool
+                # model); else goal_text=None -> build_sasrec_context degrades to
+                # build_user_dialog, bit-identical to the goal-less sasrec_v1 path.
+                "user_dialog": build_sasrec_context(
+                    self._sasrec_dialog_turns(prior_history, data["user_query"]),
+                    goal_text=((data.get("conversation_goal") or {}).get("listener_goal")
+                               if self.sasrec_context_use_goal else None)),
             })
 
         # Stage 1: Batch retrieval. Pull retrieval_topk (default 20; 40 when
