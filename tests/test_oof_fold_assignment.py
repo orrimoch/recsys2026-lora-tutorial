@@ -27,6 +27,7 @@ def _session_fold_fns():
     (TDD: this test is written before the functions are added)."""
     fns = []
     for modname, rel in [("train_sasrec", "scripts/train_sasrec.py"),
+                         ("train_two_tower", "scripts/train_two_tower.py"),
                          ("build_lgbm_features", "scripts/build_lgbm_features.py")]:
         try:
             mod = _load(modname, rel)
@@ -39,17 +40,19 @@ def _session_fold_fns():
 
 
 def test_both_producers_agree_on_every_fold():
-    """train_sasrec.session_fold and build_lgbm_features.session_fold must be
-    byte-for-byte identical for a wide range of ids and fold counts."""
-    f_train, f_feat = _session_fold_fns()
+    """Every producer's session_fold (train_sasrec, train_two_tower,
+    build_lgbm_features) must be byte-for-byte identical for a wide range of ids
+    and fold counts — else the OOF leak guarantee silently breaks."""
+    fns = _session_fold_fns()
     ids = [f"sess_{i}" for i in range(500)] + ["abc-123", "00000", "", "x"]
     for k in (2, 3, 5, 10):
         for sid in ids:
-            assert f_train(sid, k) == f_feat(sid, k), (sid, k)
+            vals = {fn(sid, k) for fn in fns}
+            assert len(vals) == 1, (sid, k, vals)
 
 
 def test_fold_in_range_and_deterministic():
-    f_train, _ = _session_fold_fns()
+    f_train = _session_fold_fns()[0]
     for k in (2, 5, 10):
         for i in range(200):
             sid = f"s{i}"
@@ -60,7 +63,7 @@ def test_fold_in_range_and_deterministic():
 
 def test_folds_roughly_balanced():
     """Hash partition should spread sessions across folds (no degenerate fold)."""
-    f_train, _ = _session_fold_fns()
+    f_train = _session_fold_fns()[0]
     K = 5
     counts = [0] * K
     for i in range(5000):

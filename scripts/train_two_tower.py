@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -87,15 +88,34 @@ def load_item_feats(splits=("all_tracks",)):
     return track_ids, np.concatenate(parts, axis=1), modality_dims
 
 
-def build_pairs(hf_split, tid_to_idx, holdout_ids, item_db):
+def session_fold(session_id, num_folds):
+    """Deterministic OOF fold for a session, in [0, num_folds). MUST be byte-for-
+    byte identical to train_sasrec.session_fold and build_lgbm_features.session_fold
+    — the OOF leak guarantee depends on this script EXCLUDING fold k from training
+    while build_lgbm_features SELECTS fold k for feature-building, so both must map
+    a given session to the same k. Pinned by tests/test_oof_fold_assignment.py."""
+    h = int(hashlib.sha1(str(session_id).encode()).hexdigest()[:8], 16)
+    return h % num_folds
+
+
+def build_pairs(hf_split, tid_to_idx, holdout_ids, item_db,
+                oof_fold=None, oof_num_folds=None):
     """Causal (query_text, gold_idx, artist) pairs. Sessions in holdout_ids go to
     val; the rest to train. Query = raw_with_goal text at the turn (MATCHES the
     served query_preprocessing_mode in config 194/197 and the dev harness, so the
     query tower sees the same distribution at train / eval / serve — no skew);
-    gold excluded from being its own negative downstream via in-batch labels."""
-    train, val = [], []
+    gold excluded from being its own negative downstream via in-batch labels.
+
+    OOF mode (oof_fold + oof_num_folds set): sessions whose session_fold == oof_fold
+    are EXCLUDED entirely (neither train nor val), so build_lgbm_features can score
+    that fold leak-free with this fold-held-out model."""
+    oof = oof_fold is not None and oof_num_folds is not None
+    train, val, skipped = [], [], 0
     for sess in hf_split:
         sid = str(sess.get("session_id"))
+        if oof and session_fold(sid, oof_num_folds) == oof_fold:
+            skipped += 1
+            continue
         df = pd.DataFrame(sess["conversations"])
         goal = sess.get("conversation_goal") or {}
         gt = (goal.get("listener_goal") or "").strip()
@@ -118,6 +138,9 @@ def build_pairs(hf_split, tid_to_idx, holdout_ids, item_db):
             except Exception:
                 pass
             bucket.append((q, gold, artist))
+    if oof:
+        print(f"[two-tower] OOF fold {oof_fold}/{oof_num_folds}: held out "
+              f"{skipped} sessions from training")
     return train, val
 
 
@@ -174,7 +197,18 @@ def main():
                         "in-batch InfoNCE bank (0 = off). Forces finer content "
                         "discrimination; try 4.")
     p.add_argument("--seed", type=int, default=42)
+    # OOF cross-fitting: train this model EXCLUDING fold `--oof-fold` of
+    # `--oof-num-folds`, so build_lgbm_features can score that fold leak-free
+    # (its session_fold must be byte-identical — see tests/test_oof_fold_assignment.py).
+    p.add_argument("--oof-fold", type=int, default=None,
+                   help="OOF fold index to HOLD OUT from training [0, oof-num-folds).")
+    p.add_argument("--oof-num-folds", type=int, default=None,
+                   help="Total OOF folds (set together with --oof-fold).")
     args = p.parse_args()
+    if (args.oof_fold is None) != (args.oof_num_folds is None):
+        p.error("--oof-fold and --oof-num-folds must be set together")
+    if args.oof_fold is not None and not (0 <= args.oof_fold < args.oof_num_folds):
+        p.error("--oof-fold must be in [0, --oof-num-folds)")
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -202,7 +236,9 @@ def main():
     sessions = [{"session_id": r["session_id"], "session_date": r["session_date"]}
                 for r in rows]
     _, holdout_ids = select_temporal_holdout(sessions, frac=args.holdout_frac)
-    train_pairs, val_pairs = build_pairs(rows, tid_to_idx, holdout_ids, item_db)
+    train_pairs, val_pairs = build_pairs(rows, tid_to_idx, holdout_ids, item_db,
+                                         oof_fold=args.oof_fold,
+                                         oof_num_folds=args.oof_num_folds)
     print(f"[two-tower] train pairs={len(train_pairs)} val pairs={len(val_pairs)} "
           f"(n_sessions={len(rows)}, time-based holdout {len(holdout_ids)} sessions)")
 
