@@ -160,8 +160,19 @@ def main() -> int:
 
     # --- tensors ----------------------------------------------------------
     st = SentenceTransformer(CTX_MODEL, device=dev)
+    # Truncation parity with the warm-start training (train_sasrec.py main) and
+    # the serve factory (sasrec_seq): keep the most-recent turns + the trailing
+    # "goal: ..." line on >512-token contexts. The tokenizer DEFAULT is
+    # truncation_side='right', which silently drops the goal + latest turns on
+    # 9.9% of train contexts. cache_kw must claim the SAME config it encodes
+    # with — it is the cache key, so changing it also busts any stale cache.
+    st.max_seq_length = 512
+    try:
+        st.tokenizer.truncation_side = "left"
+    except Exception:
+        pass
     cache_kw = dict(cache_dir=args.cache_dir, encoder_name=CTX_MODEL,
-                    max_seq_length=256, truncation_side="left")
+                    max_seq_length=512, truncation_side="left")
     ctx = encode_dialogs_cached(st, [ctx_texts[i] for i in keep],
                                 split_label="train_inpool", **cache_kw)
     ctx_t = torch.as_tensor(ctx, dtype=torch.float32, device=dev)
