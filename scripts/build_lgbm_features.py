@@ -144,7 +144,11 @@ def _union_extra_config(use_sasrec: bool = False, w_sasrec: float = 1.0,
                         sasrec_model_dir: str = "sasrec_v1",
                         use_segment_routing: bool = False,
                         use_two_tower: bool = False, w_two_tower: float = 0.7,
-                        two_tower_model_dir: str = "two_tower_v1") -> dict:
+                        two_tower_model_dir: str = "two_tower_v1",
+                        use_propose_ground: bool = False, w_propose_ground: float = 0.5,
+                        pg_model: str = "Qwen/Qwen2.5-7B-Instruct",
+                        pg_inner_dense: str = "dense_metadata_qwen3_instruct",
+                        pg_n_proposals: int = 20, pg_batch_size: int = 16) -> dict:
     """Assemble the wrrf_union_v1 extra_config for feature-build time. Any channel
     enabled here changes the fused wrrf_rank, so it MUST match serve — the reranker
     has to train on the exact pool it will serve on. Pure (no I/O) for testing."""
@@ -155,6 +159,14 @@ def _union_extra_config(use_sasrec: bool = False, w_sasrec: float = 1.0,
     if use_two_tower:
         extra.update({"use_two_tower": True, "w_two_tower": w_two_tower,
                       "two_tower_model_dir": two_tower_model_dir})
+    if use_propose_ground:
+        # pg has NO in-sample leak (frozen LLM, never trains on sessions) so it
+        # needs no OOF — but it MUST be in the build so the reranker trains on the
+        # same pool it serves. pg_model="gemini-*" routes to the Gemini API backend
+        # (no local 7B load). Keys mirror mcrs.retrieval_modules.__init__ pg spec.
+        extra.update({"use_propose_ground": True, "w_propose_ground": w_propose_ground,
+                      "pg_model": pg_model, "pg_inner_dense": pg_inner_dense,
+                      "pg_n_proposals": pg_n_proposals, "pg_batch_size": pg_batch_size})
     return extra
 
 
@@ -171,7 +183,13 @@ class WRRFRunner:
                  use_segment_routing: bool = False,
                  use_two_tower: bool = False,
                  w_two_tower: float = 0.7,
-                 two_tower_model_dir: str = "two_tower_v1"):
+                 two_tower_model_dir: str = "two_tower_v1",
+                 use_propose_ground: bool = False,
+                 w_propose_ground: float = 0.5,
+                 pg_model: str = "Qwen/Qwen2.5-7B-Instruct",
+                 pg_inner_dense: str = "dense_metadata_qwen3_instruct",
+                 pg_n_proposals: int = 20,
+                 pg_batch_size: int = 16):
         # wrrf_union_v1 is the 3-channel recall union (lexical + frozen-Qwen
         # semantic + same-artist session continuity); session_cf was dropped
         # after the G1 ablation. The same-artist channel needs
@@ -181,7 +199,10 @@ class WRRFRunner:
             use_sasrec=use_sasrec, w_sasrec=w_sasrec, sasrec_model_dir=sasrec_model_dir,
             use_segment_routing=use_segment_routing,
             use_two_tower=use_two_tower, w_two_tower=w_two_tower,
-            two_tower_model_dir=two_tower_model_dir)
+            two_tower_model_dir=two_tower_model_dir,
+            use_propose_ground=use_propose_ground, w_propose_ground=w_propose_ground,
+            pg_model=pg_model, pg_inner_dense=pg_inner_dense,
+            pg_n_proposals=pg_n_proposals, pg_batch_size=pg_batch_size)
         self.wrrf = load_retrieval_module(
             "wrrf_union_v1",
             "talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
@@ -476,6 +497,12 @@ def build(
     use_two_tower: bool = False,
     w_two_tower: float = 0.7,
     two_tower_model_dir: str = "two_tower_v1",
+    use_propose_ground: bool = False,
+    w_propose_ground: float = 0.5,
+    pg_model: str = "Qwen/Qwen2.5-7B-Instruct",
+    pg_inner_dense: str = "dense_metadata_qwen3_instruct",
+    pg_n_proposals: int = 20,
+    pg_batch_size: int = 16,
 ) -> None:
     # bge-v2 bi-encoder features are OFF unless BOTH flags are provided, so any
     # existing run (no bge args) is byte-identical to before.
@@ -539,6 +566,12 @@ def build(
         use_two_tower=use_two_tower,
         w_two_tower=w_two_tower,
         two_tower_model_dir=two_tower_model_dir,
+        use_propose_ground=use_propose_ground,
+        w_propose_ground=w_propose_ground,
+        pg_model=pg_model,
+        pg_inner_dense=pg_inner_dense,
+        pg_n_proposals=pg_n_proposals,
+        pg_batch_size=pg_batch_size,
     )
 
     # bge-v2 bi-encoder feature (bge_cos + bge_rank). Loaded once when enabled.
@@ -859,6 +892,21 @@ def main() -> int:
                    help="RRF weight for the two-tower channel (matches # 4-tt best).")
     p.add_argument("--two-tower-model-dir", type=str, default="two_tower_v1",
                    help="Trained two-tower checkpoint dir under retrieval_v2/two_tower/.")
+    p.add_argument("--use-propose-ground", action="store_true",
+                   help="Add the Tier-1 #3.5 propose-ground (LLM RAG) channel to the "
+                        "union at build time so the reranker trains on the same pool it "
+                        "serves. pg has NO in-sample leak (frozen LLM) so needs no OOF.")
+    p.add_argument("--w-propose-ground", type=float, default=0.5,
+                   help="RRF weight for the propose-ground channel.")
+    p.add_argument("--pg-model", type=str, default="Qwen/Qwen2.5-7B-Instruct",
+                   help="propose-ground generator. 'gemini-*' routes to the Gemini API "
+                        "(no local GPU load; needs GEMINI_API_KEY); else a local HF model.")
+    p.add_argument("--pg-inner-dense", type=str, default="dense_metadata_qwen3_instruct",
+                   help="dense channel used to GROUND the LLM proposals to catalog tracks.")
+    p.add_argument("--pg-n-proposals", type=int, default=20,
+                   help="how many tracks the LLM proposes per query.")
+    p.add_argument("--pg-batch-size", type=int, default=16,
+                   help="generation batch size (local HF backend; ignored by Gemini API).")
     p.add_argument("--dataset-name", type=str,
                    default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata",
                    help="Catalog dataset for the RelevanceScorer dense/bm25 models.")
@@ -897,7 +945,13 @@ def main() -> int:
               use_segment_routing=args.use_segment_routing,
               use_two_tower=args.use_two_tower,
               w_two_tower=args.w_two_tower,
-              two_tower_model_dir=args.two_tower_model_dir)
+              two_tower_model_dir=args.two_tower_model_dir,
+              use_propose_ground=args.use_propose_ground,
+              w_propose_ground=args.w_propose_ground,
+              pg_model=args.pg_model,
+              pg_inner_dense=args.pg_inner_dense,
+              pg_n_proposals=args.pg_n_proposals,
+              pg_batch_size=args.pg_batch_size)
     finally:
         os.chdir(origin_cwd)
     return 0
