@@ -100,3 +100,51 @@ def test_offline_producers_share_the_prior_turns_helper():
         "build_lgbm_features.build must slice prior turns via prior_turns()"
     assert "prior_turns(" in inspect.getsource(train_sasrec._walk_split), \
         "train_sasrec._walk_split must slice prior turns via prior_turns()"
+
+
+# ---- SasrecRetriever runtime contract: honor user_dialog, warn+fallback if absent ----
+# The nb74 gate (and any union with use_sasrec=True) must pass user_dialog in
+# batch_context. These tests pin the RECEIVER side of that contract — that the
+# retriever encodes the dialog when given, and warns + falls back to the raw
+# query when it isn't (the skew that depressed the # 12c-inpool gate pool).
+
+def _tiny_sasrec_retriever(seen):
+    import numpy as np
+    import torch
+    from mcrs.retrieval_modules.sasrec_seq import SasrecRetriever
+    from mcrs.retrieval_modules.sasrec_model import SasrecModel
+    d, item_in, N = 8, 16, 5
+    m = SasrecModel(item_modality_dims=[item_in], ctx_in_dim=12, d=d,
+                    n_layers=1, n_heads=2, max_len=10).eval()
+
+    def recording_encode(dialogs):
+        seen.extend(dialogs)                       # capture exactly what got encoded
+        return np.zeros((len(dialogs), 12), dtype=np.float32)
+
+    return SasrecRetriever(
+        m, item_repr=torch.randn(N, d), track_ids=[f"t{i}" for i in range(N)],
+        item_feats=torch.randn(N, item_in), text_encode=recording_encode, max_len=10)
+
+
+def test_sasrec_retriever_encodes_user_dialog_when_present():
+    seen = []
+    r = _tiny_sasrec_retriever(seen)
+    r.batch_text_to_item_retrieval(
+        ["RAW QUERY WITH METADATA"], topk=3,
+        batch_context=[{"user_dialog": "clean user dialog", "history_tids": []}])
+    assert seen == ["clean user dialog"], \
+        "must encode batch_context['user_dialog'], not the raw query"
+
+
+def test_sasrec_retriever_warns_and_falls_back_when_user_dialog_missing():
+    import warnings
+    seen = []
+    r = _tiny_sasrec_retriever(seen)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        r.batch_text_to_item_retrieval(
+            ["RAW QUERY WITH METADATA"], topk=3,
+            batch_context=[{"history_tids": []}])     # no user_dialog
+    assert seen == ["RAW QUERY WITH METADATA"], "must fall back to the raw query"
+    assert any("user_dialog" in str(x.message) for x in w), \
+        "must warn loudly about the train/serve skew when user_dialog is missing"

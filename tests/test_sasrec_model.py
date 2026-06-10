@@ -210,3 +210,27 @@ def test_new_format_checkpoint_loads_under_weights_only_true(tmp_path):
     # And the state dict actually reconstructs into a SasrecModel.
     m2 = SasrecModel(**loaded["model_kwargs"])
     m2.load_state_dict(loaded["state_dict"])
+
+
+# ---- encode(): masked padding must not leak into the session state ----------
+
+def test_encode_state_invariant_to_trailing_masked_padding():
+    """encode() reads the hidden at position `lengths`, with every later slot
+    masked (key_padding = idx > lengths). So appending extra item slots — even
+    with arbitrary content — must NOT change the state. This is exactly why
+    training at max_seq=50 and gating at model.max_len yield identical states:
+    sessions have far fewer played tracks than either cap, and the surplus slots
+    are masked. Guards the train/gate sequence-length parity claim."""
+    torch.manual_seed(0)
+    m = SasrecModel(item_modality_dims=[16], ctx_in_dim=12, d=8,
+                    n_layers=2, n_heads=2, max_len=50).eval()
+    B, item_in = 4, 16
+    ctx = torch.randn(B, 12)
+    lengths = torch.tensor([3, 2, 1, 0])           # incl. an empty-prefix turn-1 row
+    real = torch.randn(B, 3, item_in)              # exactly max(lengths) real slots
+    padded = torch.cat([real, torch.randn(B, 7, item_in)], dim=1)  # +7 masked slots
+    with torch.no_grad():
+        s_real = m.encode(ctx, real, lengths)
+        s_padded = m.encode(ctx, padded, lengths)
+    assert torch.allclose(s_real, s_padded, atol=1e-5), \
+        "content in masked padding slots leaked into the session state"
