@@ -162,6 +162,21 @@ def test_rerank_exposes_valid_index_diagnostics(tmp_path):
     assert rr.diagnostics["head_len"] == [3]
 
 
+def test_failed_generation_is_not_cached_then_retried(tmp_path):
+    # API error -> empty parse -> must NOT be cached (else permanent passthrough).
+    # A later run with a working client must actually call + reorder.
+    err = _FakeClient(raises=True)
+    rr = LLMListwiseReranker(meta_lookup=META, cache_dir=str(tmp_path), client=err,
+                             k=2, system_prompt="rank", max_retries=1)
+    pool = [["uuid-aaa", "uuid-bbb"]]
+    assert rr.rerank(["q"], pool, topk=2) == [["uuid-aaa", "uuid-bbb"]]  # passthrough
+    ok = _FakeClient("2, 1")
+    rr.client = ok
+    out = rr.rerank(["q"], pool, topk=2)
+    assert ok.calls, "failed generation was cached -> retry never happened"
+    assert out == [["uuid-bbb", "uuid-aaa"]]  # now actually reordered
+
+
 def test_rerank_partial_ranking_fills_missing(tmp_path):
     # model returns only the last index; the rest must fill in pool order
     client = _FakeClient("3")

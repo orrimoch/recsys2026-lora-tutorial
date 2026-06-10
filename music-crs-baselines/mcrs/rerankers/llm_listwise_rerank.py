@@ -237,11 +237,26 @@ class LLMListwiseReranker:
                 order = merge_order(parsed, len(heads[i]))
                 orders[i] = order
                 n_parsed[i] = len(parsed)
-                self._save_cached(queries[i], heads[i], order, len(parsed))
+                # Only persist a SUCCESSFUL generation. An empty parse means the
+                # API failed (missing key / transient error -> degraded to "") or
+                # returned garbage; caching it would pin permanent passthrough and
+                # silently poison every future run. Leave it uncached so the next
+                # run retries once the key/API is fixed.
+                if parsed:
+                    self._save_cached(queries[i], heads[i], order, len(parsed))
 
         # Per-call diagnostics for the gate cell (valid-index fraction = mean
         # n_parsed/head_len; <0.7 => mostly passthrough, a "win" is uninformative).
         self.diagnostics = {"n_parsed": n_parsed, "head_len": [len(h) for h in heads]}
+        if todo:
+            n_empty = sum(1 for i in todo if not n_parsed[i])
+            if n_empty > len(todo) // 2:
+                import warnings
+                warnings.warn(
+                    f"[llm_listwise] {n_empty}/{len(todo)} generations returned NO "
+                    "valid ranking -> passthrough (recall order). Check GEMINI_API_KEY/"
+                    "GOOGLE_API_KEY and the model name; the result is uninformative.",
+                    stacklevel=2)
 
         out: list[list[str]] = []
         for i in range(n):
