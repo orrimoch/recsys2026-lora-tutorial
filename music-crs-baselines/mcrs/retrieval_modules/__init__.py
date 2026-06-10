@@ -87,6 +87,24 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
             "topk_internal": 100,
             "weight": float(ec.get("w_lyrics", 0.4)),
         })
+    # Doc-side enriched content channel (Track B): LLM-written rich per-track docs
+    # re-embedded with a stronger model. The doc side has never been enriched (all
+    # 5 LLM levers enrich the QUERY); this directly attacks the weak dense channel
+    # + the new-artist wall. Opt-in via use_doc_enriched. Default weight 0.7 (it is
+    # meant to be a PRIMARY content channel, not a 0.4 side view). Requires the
+    # embed pickle (enrich_track_docs.py -> embed_catalog.py --doc-source).
+    if ec.get("use_doc_enriched"):
+        specs.append({
+            "type": "dense_doc_enriched_local",
+            "corpus_types": corpus_types,
+            "topk_internal": 100,
+            "weight": float(ec.get("w_doc_enriched", 0.7)),
+            "extra_config": {
+                "embed_model": ec.get("doc_enriched_model", "BAAI/bge-m3"),
+                "embed_label": ec.get("doc_enriched_label", "doc-enriched-v1"),
+                "instruct": ec.get("doc_enriched_instruct", False),
+            },
+        })
     if ec.get("use_hyde"):
         specs.append({
             "type": "hyde_qwen3", "topk_internal": 100,
@@ -248,6 +266,22 @@ def load_retrieval_module(
             dataset_name, track_split_types, corpus_types, cache_dir,
             model_name=hub_repo,
             embed_label="bge-m3-music-v1-merged",
+        )
+    # Track B — doc-side LLM-enriched documents re-embedded with a stronger model.
+    # Pipeline: scripts/enrich_track_docs.py writes a rich per-track description ->
+    # scripts/embed_catalog.py --doc-source <docs.parquet> --model <embed_model>
+    # --label <embed_label> caches the pickle -> DENSE_LOCAL loads it. Attacks the
+    # weak dense channel (recall@100 0.179 < BM25 0.346) + the new-artist wall.
+    # extra_config: embed_model (default bge-m3, symmetric), embed_label, instruct.
+    elif retrieval_type == "dense_doc_enriched_local":
+        ec = extra_config or {}
+        _use_instruct = bool(ec.get("instruct", False))
+        return DENSE_LOCAL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            model_name=ec.get("embed_model", "BAAI/bge-m3"),
+            embed_label=ec.get("embed_label", "doc-enriched-v1"),
+            instruct=(QWEN3_MUSIC_INSTRUCT if _use_instruct else None),
+            instruct_label=("instruct-music-v1" if _use_instruct else "raw"),
         )
     # Phase 1 Bundle B — Qwen3-Embedding-4B over track metadata.
     # Same family as the current 0.6B; tests "is the dense just under-powered?"

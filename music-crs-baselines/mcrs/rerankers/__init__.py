@@ -54,6 +54,18 @@ def load_reranker_module(
             cache_dir=cache_dir,
             model_path=model_path,
         )
+    if reranker_type == "llm_listwise":
+        # Track A: LLM listwise reranker (Gemini reasons over the recall pool with
+        # real-world music knowledge -> converts pool golds into top-20). model_path
+        # carries the Gemini model name (default gemini-2.5-flash-lite), NOT a dir.
+        from .llm_listwise_rerank import LLMListwiseReranker
+        return LLMListwiseReranker(
+            item_db_name=item_db_name,
+            track_split_types=track_split_types,
+            corpus_types=corpus_types,
+            cache_dir=cache_dir,
+            model_path=model_path,
+        )
     if reranker_type == "pro_rank":
         # W3 default reranker — last-token-logit-diff scoring over Qwen-0.5B.
         # `model_path` (optional) loads a LoRA adapter on top of the base model

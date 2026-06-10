@@ -70,6 +70,12 @@ def main():
              "lowercased. USE THIS for FT models so the served catalog matches the "
              "training positives (with --fields track_name artist_name album_name).",
     )
+    parser.add_argument(
+        "--doc-source", default=None,
+        help="Track B: parquet from scripts/enrich_track_docs.py with columns "
+             "(track_id, enriched_doc). When set, the LLM-written enriched_doc is "
+             "the doc text (overrides --fields/--doc-format) -> a strong doc-side "
+             "dense channel. Tracks absent from the parquet fall back to build_doc_text.")
     parser.add_argument("--catalog-dataset", default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata")
     parser.add_argument("--catalog-split", default="all_tracks")
     parser.add_argument("--batch-size", type=int, default=64)
@@ -87,7 +93,15 @@ def main():
     if args.max_tracks is not None:
         ds = ds.select(range(min(args.max_tracks, len(ds))))
 
-    if args.doc_format == "id_to_metadata":
+    if args.doc_source:
+        import pandas as pd
+        doc_df = pd.read_parquet(args.doc_source)
+        doc_map = dict(zip(doc_df["track_id"], doc_df["enriched_doc"]))
+        n_have = sum(1 for r in ds if doc_map.get(r["track_id"]))
+        print(f"[embed_catalog] doc-source: {n_have}/{len(ds)} tracks have an enriched_doc",
+              file=sys.stderr)
+        _render = lambda row: (doc_map.get(row["track_id"]) or "").strip() or build_doc_text(row, args.fields)
+    elif args.doc_format == "id_to_metadata":
         sys.path.insert(0, str(BASELINES_DIR))
         from mcrs.retrieval_modules.track_text import format_catalog_track_text
         _render = lambda row: format_catalog_track_text(row["track_id"], {row["track_id"]: row}, args.fields)
