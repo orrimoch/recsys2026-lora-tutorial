@@ -62,6 +62,28 @@ def build_user_dialog(turns) -> str:
     )
 
 
+def inpool_target_index(pool_tids, gold_tid):
+    """Column index of the gold within the recall pool, or None if the gold is
+    NOT in the pool -> SKIP the sample (SASRec_Improved_Plan.md §4). At serve the
+    ranker only reorders the pool, so a gold recall missed is unrecoverable; it is
+    a recall failure, not a ranking one, and must not be a training target."""
+    try:
+        return list(pool_tids).index(gold_tid)
+    except ValueError:
+        return None
+
+
+def build_sasrec_context(turns, goal_text: str | None = None) -> str:
+    """SASRec context = user-dialog + optional listener_goal. SINGLE SOURCE for
+    train/dev-gate/serve parity (SASRec_Improved_Plan.md): build it identically
+    everywhere or the gate won't predict Blind. Empty/whitespace/None goal
+    degrades to goal-less IDENTICALLY — mirrors build_retrieval_query's
+    'raw_with_goal' format (`f"{base}\\ngoal: {gt}" if gt else base`)."""
+    base = build_user_dialog(turns)
+    gt = (goal_text or "").strip()
+    return f"{base}\ngoal: {gt}" if gt else base
+
+
 def build_session_examples(track_seqs: list[list[int]], max_len: int) -> list[tuple[list[int], int]]:
     """For each session's ordered track-index list, yield (prefix, target) for
     every position t (0-based): prefix = the up-to-max_len tracks before t,
@@ -181,3 +203,29 @@ def next_item_loss(model: SasrecModel, ctx_emb, item_feats, lengths, target_idx,
     state = model.encode(ctx_emb, item_feats, lengths)
     logits = model.score(state, item_matrix)
     return F.cross_entropy(logits, target_idx, label_smoothing=label_smoothing)
+
+
+def inpool_loss(model: SasrecModel, ctx_emb, played_feats, lengths,
+                pool_feats, target_in_pool, label_smoothing: float = 0.0) -> torch.Tensor:
+    """In-pool contrastive loss (SASRec_Improved_Plan.md): softmax cross-entropy
+    over each sample's OWN candidate POOL, not the full catalog. Trains the model
+    on the exact serve task — rank the gold #1 among the ~K plausible tracks recall
+    surfaced — which the full-catalog `next_item_loss` never does.
+
+    Same dual-encoder paradigm as `score`: encode the session once, cosine vs each
+    pool item, softmax. Differs only in that each row has its OWN K candidates, so
+    scoring is a per-sample bmm instead of one shared item matrix.
+
+    Args:
+      ctx_emb      (B, ctx_in_dim)      dialog (+goal) context embedding
+      played_feats (B, L, item_in_dim)  played-track features (the sequence)
+      lengths      (B,)                 real items per row
+      pool_feats   (B, K, item_in_dim)  frozen catalog features of the K pool candidates
+      target_in_pool (B,)               column index of the gold within each row's pool
+    """
+    state = model.encode(ctx_emb, played_feats, lengths)        # (B,d)
+    cand = model.item_fusion(pool_feats)                        # (B,K,d)
+    state = F.normalize(state, dim=-1)
+    cand = F.normalize(cand, dim=-1)                            # cosine (matches model.score)
+    logits = torch.bmm(cand, state.unsqueeze(-1)).squeeze(-1) / model.temperature  # (B,K)
+    return F.cross_entropy(logits, target_in_pool, label_smoothing=label_smoothing)
