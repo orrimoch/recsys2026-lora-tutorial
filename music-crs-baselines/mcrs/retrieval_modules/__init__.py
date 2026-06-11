@@ -226,6 +226,15 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
             "weight": float(ec.get("w_clap_text", 1.0)),
             "extra_config": {"clap_text_model": ec.get("clap_text_model", "laion/larger_clap_music")},
         })
+    # bge-base-en DIFFUSE-context dense channel (item 7, plan §1/§4). A complementary
+    # dense view (bge-base-en-v1.5, 768d) to the Qwen3 dense channel — the plan pairs
+    # ColBERT's SHARP current-intent matching with bge's DIFFUSE dialog-context matching.
+    # Opt-in via use_bge; reuses DENSE_LOCAL (catalog embeddings computed+cached on 1st run).
+    if ec.get("use_bge"):
+        specs.append({
+            "type": "dense_metadata_bge_base_local", "topk_internal": 100,
+            "weight": float(ec.get("w_bge", 0.5)),
+        })
     return specs
 
 
@@ -285,6 +294,14 @@ def load_retrieval_module(
             dataset_name, track_split_types, corpus_types, cache_dir,
             model_name="BAAI/bge-m3",
             embed_label="bge-m3-metadata",
+        )
+    elif retrieval_type == "dense_metadata_bge_base_local":
+        # bge-base-en-v1.5 diffuse-context dense channel (item 7). Catalog embeddings
+        # are computed + cached by DENSE_LOCAL on first instantiation.
+        return DENSE_LOCAL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            model_name="BAAI/bge-base-en-v1.5",
+            embed_label="bge-base-en-metadata",
         )
     # nDCG-stretch Stage A — fine-tuned BGE-M3 (merged Hub repo). Reuses
     # DENSE_LOCAL; the embed_label distinguishes its precomputed catalog

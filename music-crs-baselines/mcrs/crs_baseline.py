@@ -429,6 +429,19 @@ class CRS_BASELINE:
                 max_new_tokens=int(state_tracker_max_new_tokens),
             )
 
+        # intent_state Q* rewriter — opt-in via extra_config use_intent_state (plan §3/§5,
+        # W1.a). Rewrites each turn's raw retrieval query into a clean, self-contained
+        # query_star (goal+profile-seeded) via Gemini, feeding the content channels. Cached
+        # by (session, turn); falls back to the raw query on any failure (never breaks serve).
+        self.use_intent_state = bool(self.extra_config.get("use_intent_state"))
+        self.intent_state_rewriter = None
+        if self.use_intent_state:
+            from mcrs.query_rewriters.intent_state import IntentStateRewriter
+            self.intent_state_rewriter = IntentStateRewriter(
+                cache_dir=self.cache_dir,
+                model=self.extra_config.get("intent_state_model", "gemini-2.5-flash-lite"),
+            )
+
         # CMQR — opt-in via config (W2). Wraps self.retrieval transparently:
         # downstream code calls self.retrieval.batch_text_to_item_retrieval(...)
         # and gets RRF-fused rewrites without knowing CMQR is in the path.
@@ -660,6 +673,21 @@ class CRS_BASELINE:
                 goal_text=goal_text,
                 user_profile=user_profile_for_query,
             )
+            # intent_state Q* rewrite (opt-in): replace the raw query with a clean,
+            # self-contained query_star. fallback_query=retrieval_input means any failure
+            # degrades to the exact raw query (bit-identical to use_intent_state=False).
+            if self.use_intent_state and self.intent_state_rewriter is not None:
+                sid = data.get('session_id') or ""
+                tn = int(data.get('turn_number') or 0)
+                history_text = "\n".join(
+                    f"{t.get('role','')}: {t.get('content','')}" for t in session_memory[:-1])
+                try:
+                    qs = self.intent_state_rewriter.rewrite(
+                        sid, tn, history_text, user_query, goal_text or "",
+                        user_profile_for_query, fallback_query=retrieval_input)
+                    retrieval_input = qs.get("query_star") or retrieval_input
+                except Exception as e:
+                    print(f"[CRS_BASELINE] intent_state failed on session={sid[:8]} turn={tn}: {e!r}")
             retrieval_inputs.append(retrieval_input)
             session_memories.append(session_memory)
             user_ids.append(user_id)
