@@ -1,6 +1,9 @@
-"""Tests for the ColBERT trainer's pure data-shaping (the PyLate training loop
-itself is GPU integration, run in the notebook)."""
-from scripts.train_colbert import triples_to_contrastive_rows
+"""Tests for the ColBERT trainer's pure data-shaping + dev-eval metric (the
+PyLate training loop + the live-model callback are GPU integration, run in the
+notebook)."""
+import pytest
+
+from scripts.train_colbert import triples_to_contrastive_rows, wall_recall_at_k
 
 
 class TestTriplesToContrastiveRows:
@@ -26,3 +29,23 @@ class TestTriplesToContrastiveRows:
 
     def test_empty_input_yields_empty(self):
         assert triples_to_contrastive_rows([]) == []
+
+
+class TestWallRecallAtK:
+    def test_recall_over_wall_subset_only(self):
+        # Row 1 is excluded (wall=False); rows 0 and 2 count. Gold in top-2 for both.
+        ranked = [["g", "a"], ["a", "b"], ["c", "g2"]]
+        golds = ["g", "b", "g2"]
+        wall = [True, False, True]
+        assert wall_recall_at_k(ranked, golds, wall, k=2) == pytest.approx(1.0)
+
+    def test_partial_hit(self):
+        ranked = [["x", "y"], ["g", "z"]]
+        golds = ["g", "g"]
+        wall = [True, True]
+        # row0: g not in top-1 ['x'] -> 0; row1: g in top-1 ['g'] -> 1 => 0.5
+        assert wall_recall_at_k(ranked, golds, wall, k=1) == pytest.approx(0.5)
+
+    def test_no_wall_rows_returns_zero(self):
+        # Safe sentinel so best-model tracking (max) never sees NaN.
+        assert wall_recall_at_k([["a"]], ["g"], [False], k=1) == 0.0

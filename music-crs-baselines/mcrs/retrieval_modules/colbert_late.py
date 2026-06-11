@@ -70,24 +70,13 @@ def rerank_pool(
     return [pool_tids[i] for i in order]
 
 
-def _load_pylate_encoder(model_name: str, q_len: int, d_len: int):
-    """Lazy-load a PyLate ColBERT model and return (query_encoder, doc_encoder)
-    callables, each mapping list[str] -> list[(n_tok, dim) np.ndarray].
+def pylate_encoders(model):
+    """Wrap an already-loaded PyLate ColBERT model into (query_encoder,
+    doc_encoder) callables, each mapping list[str] -> list[(n_tok, dim) np.ndarray].
 
-    Imported lazily so the pure scoring core and the unit tests have no hard
-    dependency on `pylate` (which is GPU/notebook-only).
+    Used both by the lazy loader below and by the trainer's in-loop dev eval,
+    which must encode with the *live* (mid-training) model object.
     """
-    cache_key = f"{model_name}|q{q_len}|d{d_len}"
-    if cache_key not in _SHARED_COLBERT_MODEL:
-        from pylate import models  # lazy: pylate is notebook/GPU-only
-
-        _SHARED_COLBERT_MODEL[cache_key] = models.ColBERT(
-            model_name_or_path=model_name,
-            query_length=q_len,
-            document_length=d_len,
-        )
-    model = _SHARED_COLBERT_MODEL[cache_key]
-
     def _encode(texts, is_query: bool):
         embs = model.encode(
             list(texts),
@@ -98,6 +87,23 @@ def _load_pylate_encoder(model_name: str, q_len: int, d_len: int):
         return [np.asarray(e, dtype=np.float32) for e in embs]
 
     return (lambda qs: _encode(qs, True), lambda ds: _encode(ds, False))
+
+
+def _load_pylate_encoder(model_name: str, q_len: int, d_len: int):
+    """Lazy-load a PyLate ColBERT model and return its (query_encoder, doc_encoder)
+    callables. Imported lazily so the pure scoring core and the unit tests have no
+    hard dependency on `pylate` (which is GPU/notebook-only).
+    """
+    cache_key = f"{model_name}|q{q_len}|d{d_len}"
+    if cache_key not in _SHARED_COLBERT_MODEL:
+        from pylate import models  # lazy: pylate is notebook/GPU-only
+
+        _SHARED_COLBERT_MODEL[cache_key] = models.ColBERT(
+            model_name_or_path=model_name,
+            query_length=q_len,
+            document_length=d_len,
+        )
+    return pylate_encoders(_SHARED_COLBERT_MODEL[cache_key])
 
 
 class ColbertRetriever:
