@@ -47,20 +47,26 @@ def cosine_topk(
 
 def _load_clap_text_encoder(model_name: str = DEFAULT_CLAP_MODEL):
     """Lazy-load the LAION-CLAP text tower -> callable: list[str] -> (Q, d) L2-normed.
-    Imported lazily so the pure core + unit tests need no transformers/CLAP weights."""
+    Imported lazily so the pure core + unit tests need no transformers/CLAP weights.
+
+    Uses ClapTextModelWithProjection (NOT ClapModel.get_text_features, whose return type
+    varies across transformers versions) — its `.text_embeds` is the PROJECTED text
+    embedding in the joint audio space, so it matches the precomputed audio-laion_clap.
+    """
     if model_name in _SHARED_CLAP_TEXT_ENCODER:
         return _SHARED_CLAP_TEXT_ENCODER[model_name]
 
     import torch
-    from transformers import ClapModel, ClapProcessor
+    from transformers import ClapProcessor, ClapTextModelWithProjection
 
-    model = ClapModel.from_pretrained(model_name).eval()
+    model = ClapTextModelWithProjection.from_pretrained(model_name).eval()
     processor = ClapProcessor.from_pretrained(model_name)
 
     def encode(texts):
         inputs = processor(text=list(texts), return_tensors="pt", padding=True, truncation=True)
+        inputs = {k: v for k, v in inputs.items() if k in ("input_ids", "attention_mask")}
         with torch.no_grad():
-            emb = model.get_text_features(**inputs)
+            emb = model(**inputs).text_embeds  # (Q, proj_dim) in the joint audio space
         v = emb.cpu().numpy().astype(np.float32)
         n = np.linalg.norm(v, axis=1, keepdims=True)
         return v / np.maximum(n, 1e-9)
