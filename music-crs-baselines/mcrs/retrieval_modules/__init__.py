@@ -197,6 +197,23 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
             "type": "clap_recall", "topk_internal": 100,
             "weight": float(ec.get("w_clap_recall", 1.0)),
         })
+    # ColBERT full-catalog late-interaction RECALL channel (W3.a, 2026-06-11). Stage B:
+    # PLAID retrieval over the 47k catalog with music-colbert-v1 rescues ~10% of the
+    # new-artist WALL golds the union missed (+0.05 recall@100 ceiling) — the FIRST
+    # content channel to crack the wall (dense/bge_ft/two-tower all failed). Opt-in via
+    # use_colbert; gate on union recall@100 THEN nDCG (a weak channel can inject RRF
+    # noise). Query-independent + cold-firable on Blind; needs a prebuilt PLAID index
+    # (scripts/build_colbert_index.py). Leak-free (frozen index, train-only fine-tune).
+    if ec.get("use_colbert"):
+        specs.append({
+            "type": "colbert_index", "topk_internal": 100,
+            "weight": float(ec.get("w_colbert", 1.0)),
+            "extra_config": {
+                "colbert_index_folder": ec.get("colbert_index_folder"),
+                "colbert_index_name": ec.get("colbert_index_name", "colbert-music-v1"),
+                "colbert_model": ec.get("colbert_model"),
+            },
+        })
     return specs
 
 
@@ -680,6 +697,21 @@ def load_retrieval_module(
     elif retrieval_type == "clap_recall":
         from .clap_recall import ClapRecallRetriever
         return ClapRecallRetriever(dataset_name, track_split_types, corpus_types, cache_dir)
+    elif retrieval_type == "colbert_index":
+        # ColBERT full-catalog recall channel over a prebuilt PyLate PLAID index
+        # (Stage B). Defaults derive from the standard Drive cache layout.
+        import os
+        from .colbert_late import ColbertIndexRetriever
+        ec = extra_config or {}
+        folder = ec.get("colbert_index_folder") or os.path.join(
+            cache_dir, "retrieval_v2", "colbert", "plaid")
+        model = ec.get("colbert_model") or os.path.join(
+            cache_dir, "retrieval_v2", "colbert", "music-colbert-v1")
+        return ColbertIndexRetriever(
+            index_folder=folder,
+            index_name=ec.get("colbert_index_name", "colbert-music-v1"),
+            model_name=model,
+        )
     elif retrieval_type == "session_cf":
         from .session_cf import SessionCFRetriever
         return SessionCFRetriever(dataset_name, track_split_types, corpus_types, cache_dir)
