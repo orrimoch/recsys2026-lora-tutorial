@@ -1,0 +1,73 @@
+# 202 — config 200 + ColBERT full-catalog recall channel (W3.a, 2026-06-11).
+#        union+SASRec+pg+ColBERT recall -> LLM LISTWISE rerank (Gemini) -> v5-kto. Blind-A.
+#
+# Clone of 200 with use_colbert:true. ColBERT is a late-interaction full-catalog recall
+# channel (PLAID index over the 47k catalog, fine-tuned music-colbert-v1). Validated arc:
+#   Stage B  — rescues ~10% (50/505) of new-artist WALL golds the union missed (+0.05
+#              recall@100 ceiling) — FIRST content channel to crack the wall.
+#   W3.a fuse — fused union+colbert turn-1 wall recall@20 +0.022 (0.325 -> 0.347).
+#   P3       — LGBM-reranked turn-1 nDCG@20 union 0.1709 -> union+colbert 0.1908 (+0.0198);
+#              monotonic w_colbert sweep -> w_colbert=1.0 best. FIRST campaign content lever
+#              to convert recall -> nDCG (beats the recall-up-nDCG-flat trap).
+# ColBERT is query-independent + cold-firable (fires on Blind, 100% turn-1). EXPECT lossy
+# dev->Blind (config 198's +0.05 dev went flat); this tests whether the +0.0198 shows up.
+# Requires a prebuilt PLAID index at cache_dir/retrieval_v2/colbert/plaid/ (build_colbert_index.py)
+# and the fine-tuned model at cache_dir/retrieval_v2/colbert/music-colbert-v1.
+# Needs GEMINI_API_KEY / GOOGLE_API_KEY (pg flash proposals + flash-lite listwise rerank).
+
+lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
+lora_path: null
+lora_max_rank: 32
+
+retrieval_type: "wrrf_union_v1"
+
+use_sasrec: true
+w_sasrec: 1.0
+sasrec_model_dir: "sasrec_v1"
+
+# Track C: propose-ground world-knowledge recall channel (attacks the new-artist wall).
+use_propose_ground: true
+w_propose_ground: 0.5
+pg_model: "gemini-2.5-flash"
+pg_n_proposals: 20
+pg_batch_size: 4
+pg_inner_dense: "dense_metadata_qwen3_instruct"
+
+# ColBERT full-catalog late-interaction recall channel (new for 202).
+use_colbert: true
+w_colbert: 1.0
+colbert_index_folder: null   # null -> cache_dir/retrieval_v2/colbert/plaid (factory default)
+colbert_index_name: "colbert-music-v1"
+colbert_model: null          # null -> cache_dir/retrieval_v2/colbert/music-colbert-v1
+
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+retrieval_topk: 100
+reranker_type: "llm_listwise"
+reranker_model_path: "gemini-2.5-flash-lite"
+
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 320
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw_with_goal"
+
+use_vllm: false
+
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+use_cmqr: false
