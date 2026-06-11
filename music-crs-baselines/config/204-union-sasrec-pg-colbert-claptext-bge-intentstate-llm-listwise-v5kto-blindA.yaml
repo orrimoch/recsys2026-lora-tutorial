@@ -39,8 +39,11 @@ use_clap_text: true
 w_clap_text: 1.0
 clap_text_model: "laion/larger_clap_music"
 
-# item 7: bge-base-en diffuse-context dense channel
-use_bge: true
+# item 7: bge-base-en diffuse-context dense channel — DISABLED to unblock the run.
+# It needs precomputed catalog embeddings (DENSE_LOCAL won't auto-build). To enable:
+# set use_bge: true AND first run nb82 #82-build-bge (embed_catalog.py for bge-base-en).
+# Dropped because it's a recall lever (likely Blind-nDCG-flat) and was blocking the submission.
+use_bge: false
 w_bge: 0.5
 
 # item 1: intent_state Q* rewrite (query preprocessing)
