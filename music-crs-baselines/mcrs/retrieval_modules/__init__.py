@@ -214,6 +214,18 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
                 "colbert_model": ec.get("colbert_model"),
             },
         })
+    # CLAP text->audio RECALL channel (P4, 2026-06-11). Encodes the query TEXT into the
+    # LAION-CLAP audio space and returns catalog tracks that SOUND like the request —
+    # COLD-firable (reads query text, not played history, so it fires on turn-1/Blind,
+    # unlike clap_recall). Reaches new-artist WALL golds by ACOUSTICS, orthogonal to the
+    # text/metadata/late-interaction channels (ColBERT included). Opt-in via use_clap_text;
+    # gate on turn-1 wall recall@20 then nDCG (weak channel can inject RRF noise).
+    if ec.get("use_clap_text"):
+        specs.append({
+            "type": "clap_text", "topk_internal": 100,
+            "weight": float(ec.get("w_clap_text", 1.0)),
+            "extra_config": {"clap_text_model": ec.get("clap_text_model", "laion/larger_clap_music")},
+        })
     return specs
 
 
@@ -697,6 +709,10 @@ def load_retrieval_module(
     elif retrieval_type == "clap_recall":
         from .clap_recall import ClapRecallRetriever
         return ClapRecallRetriever(dataset_name, track_split_types, corpus_types, cache_dir)
+    elif retrieval_type == "clap_text":
+        from .clap_text import ClapTextRetriever
+        return ClapTextRetriever(dataset_name, track_split_types, corpus_types, cache_dir,
+                                 extra_config=extra_config)
     elif retrieval_type == "colbert_index":
         # ColBERT full-catalog recall channel over a prebuilt PyLate PLAID index
         # (Stage B). Defaults derive from the standard Drive cache layout.
