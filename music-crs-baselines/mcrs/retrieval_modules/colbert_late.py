@@ -25,6 +25,26 @@ _SHARED_COLBERT_MODEL: dict[str, object] = {}
 # Default off-the-shelf checkpoint for the P1 zero-shot probe.
 DEFAULT_COLBERT_MODEL = "colbert-ir/colbertv2.0"
 
+# Query/doc token budgets. q_len=96 (was 32) because our raw turn-1 query is the
+# full dialog + 'goal: <listener_goal>' (mean ~55 tok, p99 ~93) — q_len=32
+# right-truncated the goal (the highest-value turn-1 signal) off ~95% of queries.
+DEFAULT_Q_LEN = 96
+DEFAULT_D_LEN = 96
+
+
+def strip_track_id_prefix(doc_text: str) -> str:
+    """Drop the leading 'track_id: <uuid>, ' segment from a catalog doc string.
+
+    `format_catalog_track_text` prepends the track_id (a UUID) as the first field;
+    it tokenizes to ~30 content-free hex subwords that dilute ColBERT MaxSim (every
+    query token can max onto noise). The UUID never contains ', ', so the first
+    ', ' reliably ends the track_id field. Non-prefixed or field-less text is
+    returned unchanged (never empty).
+    """
+    if doc_text.startswith("track_id: ") and ", " in doc_text:
+        return doc_text.split(", ", 1)[1]
+    return doc_text
+
 
 def maxsim_score(query_emb: np.ndarray, doc_emb: np.ndarray) -> float:
     """ColBERT late-interaction score between one query and one document.
@@ -124,8 +144,8 @@ class ColbertRetriever:
         query_encoder: Optional[Callable[[Sequence[str]], list[np.ndarray]]] = None,
         doc_encoder: Optional[Callable[[Sequence[str]], list[np.ndarray]]] = None,
         model_name: str = DEFAULT_COLBERT_MODEL,
-        q_len: int = 32,
-        d_len: int = 96,
+        q_len: int = DEFAULT_Q_LEN,
+        d_len: int = DEFAULT_D_LEN,
     ):
         self.doc_embs = doc_embs
         if query_encoder is None:

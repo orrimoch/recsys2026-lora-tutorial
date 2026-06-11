@@ -8,9 +8,11 @@ import numpy as np
 import pytest
 
 from mcrs.retrieval_modules.colbert_late import (
+    DEFAULT_Q_LEN,
     ColbertRetriever,
     maxsim_score,
     rerank_pool,
+    strip_track_id_prefix,
 )
 
 
@@ -121,3 +123,27 @@ class TestColbertRetrieverPoolRerank:
             topk=5,
         )
         assert out == [["tA"]]
+
+
+class TestStripTrackIdPrefix:
+    def test_strips_leading_track_id_uuid_segment(self):
+        # The catalog renderer prepends 'track_id: <uuid>, '; the UUID tokenizes to
+        # ~30 content-free hex subwords that dilute MaxSim. Strip it for ColBERT docs.
+        assert strip_track_id_prefix(
+            "track_id: 97f5eeec-1ec7-4bb9-aa00, track_name: foo, artist_name: bar"
+        ) == "track_name: foo, artist_name: bar"
+
+    def test_leaves_non_prefixed_text_unchanged(self):
+        assert strip_track_id_prefix("track_name: foo, artist_name: bar") == \
+            "track_name: foo, artist_name: bar"
+
+    def test_bare_track_id_with_no_fields_unchanged(self):
+        # Degenerate (no metadata) — keep the id rather than return an empty doc.
+        assert strip_track_id_prefix("track_id: 97f5eeec") == "track_id: 97f5eeec"
+
+
+class TestDefaults:
+    def test_default_query_length_covers_the_goal_facet(self):
+        # Regression guard: q_len=32 right-truncated the 'goal:' facet off ~95% of
+        # turn-1 queries (mean 54.8 tok). The default must keep the goal.
+        assert DEFAULT_Q_LEN >= 96

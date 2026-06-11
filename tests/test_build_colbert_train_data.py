@@ -77,12 +77,53 @@ class TestBuildDialogQuery:
 class TestIterPositiveTurns:
     def test_yields_only_moves_toward_goal_turns(self):
         rows = iter_positive_turns(_SESSION, _ID2META)
-        assert len(rows) == 1  # turn 2 is DOES_NOT_MOVE -> dropped
+        assert len(rows) == 1  # turn 2 is DOES_NOT_MOVE -> dropped; turn-1 always kept
         r = rows[0]
         assert r["gold_tid"] == "tGOLD1"
         assert r["turn_number"] == 1
         assert r["session_id"] == "s1"
         assert r["query"] == "user: play hard 90s hip hop\ngoal: hard 90s hip hop"
+
+    def test_turn1_positive_synthesized_even_without_label(self):
+        # REGRESSION (RCA #1): real turn-1 has NO goal_progress_assessment, so the
+        # MOVES_TOWARD_GOAL filter dropped 100% of turn-1 rows — yet the gate is 100%
+        # turn-1. Turn-1 must be synthesized (gold-direct) regardless of label.
+        session = {
+            "session_id": "s2",
+            "conversation_goal": {"listener_goal": "calm jazz"},
+            "goal_progress_assessments": [
+                {"turn_number": 2, "goal_progress_assessment": "MOVES_TOWARD_GOAL"},
+            ],  # NOTE: no turn-1 entry — mirrors real data
+            "conversations": [
+                {"turn_number": 1, "role": "user", "content": "play calm jazz"},
+                {"turn_number": 1, "role": "music", "content": "tGOLD1"},
+                {"turn_number": 2, "role": "user", "content": "more"},
+                {"turn_number": 2, "role": "music", "content": "tGOLD2"},
+            ],
+        }
+        rows = iter_positive_turns(session, _ID2META)
+        tns = sorted(r["turn_number"] for r in rows)
+        assert tns == [1, 2]  # turn-1 synthesized despite no label; turn-2 via MOVES
+        r1 = next(r for r in rows if r["turn_number"] == 1)
+        assert r1["gold_tid"] == "tGOLD1"
+
+    def test_turn_gt1_without_moves_label_still_dropped(self):
+        # The tn==1 bypass must NOT relax the filter for warm turns.
+        session = {
+            "session_id": "s3",
+            "conversation_goal": {"listener_goal": "x"},
+            "goal_progress_assessments": [
+                {"turn_number": 2, "goal_progress_assessment": "DOES_NOT_MOVE_TOWARD_GOAL"},
+            ],
+            "conversations": [
+                {"turn_number": 1, "role": "user", "content": "a"},
+                {"turn_number": 1, "role": "music", "content": "g1"},
+                {"turn_number": 2, "role": "user", "content": "b"},
+                {"turn_number": 2, "role": "music", "content": "g2"},
+            ],
+        }
+        rows = iter_positive_turns(session, _ID2META)
+        assert sorted(r["turn_number"] for r in rows) == [1]  # turn-2 dropped
 
 
 class TestSelectHardNegatives:

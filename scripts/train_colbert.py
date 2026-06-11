@@ -155,7 +155,9 @@ def main():  # pragma: no cover
                     help="Dev re-probe cadence (not too often / not too rare)")
     ap.add_argument("--dev-subset", type=int, default=300,
                     help="Turn-1 queries used for in-loop dev eval (caps cost)")
-    ap.add_argument("--q-len", type=int, default=32)
+    ap.add_argument("--q-len", type=int, default=96,
+                    help="query token budget; 96 keeps the trailing 'goal:' facet "
+                         "(was 32, which right-truncated the goal off ~95% of queries)")
     ap.add_argument("--d-len", type=int, default=96)
     ap.add_argument("--k", type=int, default=20, help="recall@k for dev selection")
     ap.add_argument("--seed", type=int, default=42)

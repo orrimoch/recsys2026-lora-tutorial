@@ -70,8 +70,15 @@ def _prior_slice(conversations: list[dict], tn: int) -> list[dict]:
 def iter_positive_turns(
     session: dict, id_to_metadata: Callable[[str], str]
 ) -> list[dict[str, Any]]:
-    """Yield one row per MOVES_TOWARD_GOAL music turn: {query, gold_tid,
-    turn_number, session_id, user_id}. Query is the nb74-parity dialog query."""
+    """Yield one positive-training row per qualifying music turn: {query, gold_tid,
+    turn_number, session_id, user_id, played_tids}. Query is the nb74-parity dialog
+    query.
+
+    TURN-1 IS ALWAYS INCLUDED (gold-direct), regardless of label — real turn-1 has
+    NO goal_progress_assessment, so the MOVES_TOWARD_GOAL filter used to drop 100%
+    of turn-1 while the gate is 100% turn-1 (RCA #1). Turns >1 still require
+    MOVES_TOWARD_GOAL (strips noisy mid-conversation targets).
+    """
     goal_txt = ((session.get("conversation_goal") or {}).get("listener_goal") or "").strip()
     convos = session.get("conversations") or []
     rows: list[dict[str, Any]] = []
@@ -79,7 +86,7 @@ def iter_positive_turns(
         if t["role"] != "music":
             continue
         tn = int(t["turn_number"])
-        if goal_progress_label(session, tn) != LABEL_POS:
+        if tn != 1 and goal_progress_label(session, tn) != LABEL_POS:
             continue
         prior = _prior_slice(convos, tn)
         rows.append({
@@ -144,10 +151,14 @@ def main():  # pragma: no cover
     from tqdm import tqdm
     from mcrs.db_item.music_catalog import MusicCatalogDB
     from mcrs.retrieval_modules import load_retrieval_module
+    from mcrs.retrieval_modules.colbert_late import strip_track_id_prefix
 
     corpus = ["track_name", "artist_name", "album_name"]
     item_db = MusicCatalogDB(args.track_meta_hf, ["all_tracks"], corpus)
-    id2meta = item_db.id_to_metadata
+    id2meta = item_db.id_to_metadata  # raw (with track_id) — for the query/dialog rendering
+    # ColBERT DOC text strips the leading 'track_id: <uuid>' (RCA #4: UUID dilutes MaxSim).
+    def doc_text(tid):
+        return strip_track_id_prefix(item_db.id_to_metadata(tid))
 
     # 1) Collect MOVES_TOWARD_GOAL rows from the TRAIN split.
     conv = load_dataset(args.train_conv_hf, split="train")
@@ -180,8 +191,8 @@ def main():  # pragma: no cover
                 n_skipped += 1
                 continue
             triple = build_colbert_triple(
-                query=r["query"], pos_text=id2meta(r["gold_tid"]),
-                neg_texts=[id2meta(t) for t in neg_tids],
+                query=r["query"], pos_text=doc_text(r["gold_tid"]),
+                neg_texts=[doc_text(t) for t in neg_tids],
                 pos_tid=r["gold_tid"], neg_tids=neg_tids,
                 session_id=r["session_id"], turn_number=r["turn_number"])
             f.write(json.dumps(triple) + "\n")
