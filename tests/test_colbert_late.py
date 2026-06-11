@@ -9,8 +9,10 @@ import pytest
 
 from mcrs.retrieval_modules.colbert_late import (
     DEFAULT_Q_LEN,
+    ColbertIndexRetriever,
     ColbertRetriever,
     maxsim_score,
+    plaid_results_to_tids,
     rerank_pool,
     strip_track_id_prefix,
 )
@@ -147,3 +149,39 @@ class TestDefaults:
         # Regression guard: q_len=32 right-truncated the 'goal:' facet off ~95% of
         # turn-1 queries (mean 54.8 tok). The default must keep the goal.
         assert DEFAULT_Q_LEN >= 96
+
+
+class TestPlaidResultsToTids:
+    def test_extracts_ranked_ids_per_query(self):
+        # PyLate PLAID retrieve() returns per-query lists of {id, score}.
+        results = [
+            [{"id": "tA", "score": 9.0}, {"id": "tB", "score": 8.0}],
+            [{"id": "tC", "score": 7.0}],
+        ]
+        assert plaid_results_to_tids(results) == [["tA", "tB"], ["tC"]]
+
+    def test_handles_empty_query_result(self):
+        assert plaid_results_to_tids([[]]) == [[]]
+
+
+class TestColbertIndexRetriever:
+    def test_full_catalog_retrieval_via_injected_index(self):
+        # Stage-B retriever: encode query -> PLAID index -> ranked track ids. Encoder
+        # and index are injected so the orchestration is testable without pylate.
+        class FakeRetriever:
+            def retrieve(self, queries_embeddings, k):
+                self.k = k
+                return [[{"id": "tA", "score": 9.0}, {"id": "tB", "score": 8.0}]]
+
+        captured = {}
+
+        def fake_q_enc(qs):
+            captured["qs"] = list(qs)
+            return ["QEMB"]
+
+        fake = FakeRetriever()
+        retr = ColbertIndexRetriever(query_encoder=fake_q_enc, plaid_retriever=fake)
+        out = retr.batch_text_to_item_retrieval(["find 90s jazz"], topk=2)
+        assert out == [["tA", "tB"]]
+        assert captured["qs"] == ["find 90s jazz"]  # the query was encoded
+        assert fake.k == 2  # topk forwarded to the index

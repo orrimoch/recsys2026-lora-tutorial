@@ -1,0 +1,66 @@
+"""Build a PyLate PLAID index over the full 47k catalog with music-colbert-v1
+(Stage B / W2.c of the ColBERT plan).
+
+This is the artifact that tests the plan's RECALL thesis. The pool-reranker
+(ColbertRetriever) can only reorder the union's own top-100 — it can never surface
+a gold the union missed. A full-catalog PLAID index CAN: it retrieves over all 47k
+tracks, so `ColbertIndexRetriever` can add new-artist/wall golds the union's
+BM25+dense+session channels never reached. Doc text is UUID-stripped (RCA #4),
+matching the training docs.
+
+Usage (Colab GPU):
+  python scripts/build_colbert_index.py \
+    --model-dir experiments/cache/retrieval_v2/colbert/music-colbert-v1 \
+    --index-folder experiments/cache/retrieval_v2/colbert/plaid \
+    --index-name colbert-music-v1
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "music-crs-baselines"))
+
+
+def main():  # pragma: no cover
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model-dir", required=True,
+                    help="Fine-tuned ColBERT dir (music-colbert-v1) or a hub name")
+    ap.add_argument("--index-folder", required=True)
+    ap.add_argument("--index-name", default="colbert-music-v1")
+    ap.add_argument("--track-meta-hf", default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata")
+    ap.add_argument("--batch-size", type=int, default=256)
+    args = ap.parse_args()
+
+    from pylate import indexes, models
+    from mcrs.db_item.music_catalog import MusicCatalogDB
+    from mcrs.retrieval_modules.colbert_late import (
+        DEFAULT_D_LEN, DEFAULT_Q_LEN, strip_track_id_prefix,
+    )
+
+    corpus = ["track_name", "artist_name", "album_name"]
+    item_db = MusicCatalogDB(args.track_meta_hf, ["all_tracks"], corpus)
+    tids = list(item_db.metadata_dict.keys())
+    docs = [strip_track_id_prefix(item_db.id_to_metadata(t)) for t in tids]
+    print(f"[colbert-index] {len(tids)} catalog docs (UUID-stripped)", file=sys.stderr)
+
+    model = models.ColBERT(
+        model_name_or_path=args.model_dir,
+        query_length=DEFAULT_Q_LEN,
+        document_length=DEFAULT_D_LEN,
+    )
+    doc_embeddings = model.encode(
+        docs, batch_size=args.batch_size, is_query=False, show_progress_bar=True
+    )
+
+    index = indexes.PLAID(
+        index_folder=args.index_folder, index_name=args.index_name, override=True
+    )
+    index.add_documents(documents_ids=tids, documents_embeddings=doc_embeddings)
+    print(f"[colbert-index] DONE -> {args.index_folder}/{args.index_name}", file=sys.stderr)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

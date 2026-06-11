@@ -185,3 +185,65 @@ class ColbertRetriever:
             pool_embs = [self.doc_embs[t] for t in tids]
             results.append(rerank_pool(q_emb, pool_embs, tids, topk))
         return results
+
+
+# --------------------------------------------------------------------------- #
+# Stage B: full-catalog ColBERT recall channel (PyLate PLAID index).
+#
+# ColbertRetriever (above) only RERANKS a given pool — it can never surface a gold
+# the union missed (recall@100 is invariant under pool-reranking). ColbertIndexRetriever
+# retrieves over the WHOLE 47k catalog, so it CAN add new golds — the only artifact
+# that tests the plan's recall thesis. Build the index with scripts/build_colbert_index.py.
+# --------------------------------------------------------------------------- #
+def plaid_results_to_tids(results) -> list[list[str]]:
+    """Convert PyLate PLAID `retrieve()` output (per-query list of {id, score} dicts,
+    ranked) into per-query ranked lists of track ids."""
+    return [[hit["id"] for hit in q] for q in results]
+
+
+class ColbertIndexRetriever:
+    """ColBERT full-catalog retriever over a PyLate PLAID index — the Stage-B recall
+    channel. Conforms to the `batch_text_to_item_retrieval` contract so the wRRF
+    factory can fuse it as a union channel.
+
+    Inject `query_encoder` + `plaid_retriever` for unit tests; in production pass
+    `index_folder` / `index_name` / `model_name` to lazy-load PyLate.
+    """
+
+    def __init__(
+        self,
+        index_folder: Optional[str] = None,
+        index_name: str = "colbert-index",
+        model_name: str = DEFAULT_COLBERT_MODEL,
+        q_len: int = DEFAULT_Q_LEN,
+        d_len: int = DEFAULT_D_LEN,
+        query_encoder: Optional[Callable[[Sequence[str]], object]] = None,
+        plaid_retriever: object = None,
+    ):
+        if query_encoder is None or plaid_retriever is None:
+            from pylate import indexes, models, retrieve  # lazy: notebook/GPU-only
+
+            model = models.ColBERT(
+                model_name_or_path=model_name, query_length=q_len, document_length=d_len
+            )
+            index = indexes.PLAID(
+                index_folder=index_folder, index_name=index_name, override=False
+            )
+            plaid_retriever = retrieve.ColBERT(index=index)
+            query_encoder = lambda qs: model.encode(  # noqa: E731
+                list(qs), is_query=True, show_progress_bar=False
+            )
+        self._query_encoder = query_encoder
+        self._retriever = plaid_retriever
+
+    def batch_text_to_item_retrieval(
+        self, queries, topk, user_ids=None, batch_context=None
+    ) -> list[list[str]]:
+        """Retrieve the top-`topk` catalog track ids per query (full-catalog, not a
+        pool). `user_ids`/`batch_context` are accepted for interface parity, unused."""
+        q_emb = self._query_encoder(list(queries))
+        results = self._retriever.retrieve(queries_embeddings=q_emb, k=topk)
+        return plaid_results_to_tids(results)
+
+    def text_to_item_retrieval(self, query, topk, user_id=None) -> list[str]:
+        return self.batch_text_to_item_retrieval([query], topk=topk)[0]
