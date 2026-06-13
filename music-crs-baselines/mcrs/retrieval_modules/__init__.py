@@ -948,6 +948,13 @@ def load_retrieval_module(
             dataset_name, track_split_types, corpus_types, cache_dir,
             sub_specs=_wrrf_union_v1_specs(extra_config, corpus_types),
             k=60,
+            # EXP-012 channel-quota fusion (off unless config opts in; default
+            # symmetric path keeps config 205 bit-identical). quota_window MUST
+            # match reranker_k so reserved rescues land inside the reranker window.
+            fusion_strategy=(extra_config or {}).get("fusion_strategy", "symmetric"),
+            channel_quota=int((extra_config or {}).get("channel_quota", 0)),
+            quota_labels=(extra_config or {}).get("quota_labels"),
+            quota_window=int((extra_config or {}).get("quota_window", 50)),
         )
     # Sequential retrieve-then-rerank.
     elif retrieval_type == "bm25_then_dense_rerank_v1":

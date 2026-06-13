@@ -1,0 +1,83 @@
+# 208 — EXP-012: config 205 (the 0.50 best) + e5 dense REPLACEMENT (w=1.0, NOT up-weighted) managed by
+# rescue-aware CHANNEL-QUOTA fusion (q=1, e5-only). The quota RESERVES one seat in the reranker window
+# (quota_window=50, = reranker_k) for e5's top solo rescue WITHOUT up-weighting — fixing the 63% RRF
+# fusion-drop of single-channel wall-rescues that EXP-009/010 measured, while AVOIDING the multi-channel
+# demotion that made config 207's up-weighting regress (-0.08). ONE retrieval change vs 205; PRO responder
+# (set in nb82) + flash ranker @2048 + k=50 all UNCHANGED. q=1 is a FIXED structural choice (minimal
+# capacity, not a swept hyperparameter) to keep it robust to Blind-B. Gate: nb74 #4-quota + #12d-quota.
+
+lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
+lora_path: null
+lora_max_rank: 32
+
+retrieval_type: "wrrf_union_v1"
+
+use_sasrec: true
+w_sasrec: 1.0
+sasrec_model_dir: "sasrec_v1"
+
+# e5 dense REPLACEMENT for the 0.6B Qwen3 dense (EXP-009: e5-alone rescues 19.2% net-new wall golds;
+# replacement carries 100% of that wall-rescue without double-weighting the dense-text axis). w=1.0 (the
+# EXP-010 Pareto-best for overall recall) — NO up-weighting; the quota does the wall-RETENTION job instead.
+use_e5_instruct: true
+w_e5_instruct: 1.0
+use_base_dense: false
+
+# EXP-012 rescue-aware channel-quota fusion: guarantee e5's top-1 solo pick a seat in the top-50 window.
+fusion_strategy: "channel_quota"
+channel_quota: 1
+quota_labels:
+  - "dense_metadata_e5_instruct_local"
+quota_window: 50
+
+use_propose_ground: true
+w_propose_ground: 0.5
+pg_model: "gemini-2.5-flash"
+pg_n_proposals: 20
+pg_batch_size: 4
+pg_inner_dense: "dense_metadata_qwen3_instruct"
+
+# ColBERT full-catalog late-interaction recall channel (text).
+use_colbert: true
+w_colbert: 1.0
+colbert_index_folder: null
+colbert_index_name: "colbert-music-v1"
+colbert_model: null
+
+# CLAP text->audio recall channel (audio, P4) — the orthogonal wall lever.
+use_clap_text: true
+w_clap_text: 1.0
+clap_text_model: "laion/larger_clap_music"
+
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+retrieval_topk: 100
+reranker_type: "llm_listwise"
+reranker_model_path: "gemini-2.5-flash"
+reranker_max_output_tokens: 2048
+
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 320
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw_with_goal"
+
+use_vllm: false
+
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+use_cmqr: false

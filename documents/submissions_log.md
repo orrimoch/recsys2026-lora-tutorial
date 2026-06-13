@@ -22,3 +22,5 @@ _DATE_RE does not understand HTML comments and would count it against
 the weekly cap):
 YYYY-MM-DD [blindA] tid=301-pilot-blindset-A stage=W6-pilot score=3.20 ndcg20=0.21
 -->
+2026-06-13 [blindA] tid=EXP-010-207-e5replace-w1.5-k100-litegemini stage=loop score=3.55 ndcg20=0.28 composite=0.41
+2026-06-13 [blindA] tid=205-resubmit-flashrank2048-gemini-pro-bo1 stage=loop score=4.35 ndcg20=0.33 composite=0.50

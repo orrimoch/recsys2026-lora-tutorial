@@ -18,6 +18,19 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+# EXP-012 — channel-quota fusion default targets: the ORTHOGONAL wall-cracker
+# channels whose single-channel rescues get drowned by weighted-RRF (3 channels
+# @ rank30 outscore 1 channel @ rank5). NOT bm25 / 0.6b-dense / same_artist /
+# sasrec — those already dominate the fusion, so they need no reserved slots.
+_DEFAULT_QUOTA_LABELS = (
+    "dense_metadata_e5_instruct_local",
+    "dense_metadata_qwen3_4b_local",
+    "colbert_index",
+    "clap_recall",
+    "clap_text",
+    "propose_ground",
+)
+
 
 class RRF_MODEL:
     def __init__(
@@ -28,6 +41,10 @@ class RRF_MODEL:
         cache_dir: str = "./cache",
         sub_specs: list[dict[str, Any]] | None = None,
         k: int = 60,
+        fusion_strategy: str = "symmetric",
+        channel_quota: int = 0,
+        quota_labels: list[str] | None = None,
+        quota_window: int = 50,
     ) -> None:
         """Assemble sub-retrievers from the factory.
 
@@ -47,6 +64,11 @@ class RRF_MODEL:
         from . import load_retrieval_module
 
         self.k = k
+        # EXP-012 channel-quota fusion (off by default → symmetric path unchanged).
+        self.fusion_strategy = fusion_strategy
+        self.channel_quota = int(channel_quota)
+        self.quota_labels = quota_labels
+        self.quota_window = int(quota_window)
         if sub_specs is None:
             raise ValueError("RRF_MODEL requires sub_specs")
         self.subs: list[dict[str, Any]] = []
@@ -152,6 +174,62 @@ class RRF_MODEL:
             results.append([tid for tid, _ in ordered[:topk]])
         return results
 
+    @staticmethod
+    def fuse_per_sub_quota(
+        per_sub: list[list[list[str]]], weights: list[float], k: int, topk: int,
+        quota_by_idx: dict[int, int], window: int,
+    ) -> list[list[str]]:
+        """Rescue-aware RRF (EXP-012): guarantee each quota channel's top-q
+        single-channel rescues land in the reranker window WITHOUT down-weighting.
+
+        Steps per query: (1) standard weighted-RRF order (the base, unchanged);
+        (2) round-robin reserve top-q (deduped) from each quota channel, keeping
+        ONLY candidates not already in rrf_order[:window] (else no-op); (3) insert
+        the reserved set at the TAIL of the window — keep the strongest
+        (window - n) RRF items, append reserved, then the rest. Inserting at the
+        tail (not the head) minimizes eviction of borderline multi-channel golds;
+        the reranker re-scores the whole window, so within-window order is benign
+        and presence-in-window is what converts. quota_by_idx={} recovers pure RRF.
+        """
+        n_queries = len(per_sub[0]) if per_sub else 0
+        max_depth = max(quota_by_idx.values()) if quota_by_idx else 0
+        results: list[list[str]] = []
+        for q_idx in range(n_queries):
+            fused: dict[str, float] = {}
+            for s_idx, w in enumerate(weights):
+                for rank, tid in enumerate(per_sub[s_idx][q_idx], start=1):
+                    fused[tid] = fused.get(tid, 0.0) + w / (k + rank)
+            rrf_order = [tid for tid, _ in sorted(fused.items(), key=lambda kv: -kv[1])]
+            if not quota_by_idx:
+                results.append(rrf_order[:topk])
+                continue
+            in_window = set(rrf_order[:window])
+            reserved: list[str] = []
+            seen: set[str] = set()
+            for depth in range(max_depth):
+                for s_idx, q in quota_by_idx.items():
+                    if depth >= q:
+                        continue
+                    lst = per_sub[s_idx][q_idx]
+                    if depth >= len(lst):
+                        continue
+                    tid = lst[depth]
+                    if tid in seen or tid in in_window:
+                        continue
+                    seen.add(tid)
+                    reserved.append(tid)
+            if not reserved:
+                results.append(rrf_order[:topk])
+                continue
+            n_inject = min(len(reserved), window)
+            reserved = reserved[:n_inject]
+            seen = set(reserved)
+            keep = max(0, window - n_inject)
+            head = rrf_order[:keep]
+            tail = [tid for tid in rrf_order[keep:] if tid not in seen]
+            results.append((head + reserved + tail)[:topk])
+        return results
+
     def batch_text_to_item_retrieval(
         self, queries: list[str], topk: int, user_ids=None,
         batch_context: Optional[list[dict]] = None,
@@ -160,6 +238,19 @@ class RRF_MODEL:
         # Subs that ignore them (BM25, dense) still accept via try/except back-compat.
         per_sub, _ = self.batch_per_sub_rankings(
             queries, user_ids=user_ids, batch_context=batch_context)
+        # EXP-012 channel-quota fusion takes precedence when enabled. Off by
+        # default → falls through to the segmented/symmetric paths unchanged.
+        if getattr(self, "fusion_strategy", "symmetric") == "channel_quota" \
+                and getattr(self, "channel_quota", 0):
+            labels = self.quota_labels or list(_DEFAULT_QUOTA_LABELS)
+            quota_by_idx = {
+                i: self.channel_quota
+                for i, sub in enumerate(self.subs) if sub["label"] in labels
+            }
+            if quota_by_idx:
+                weights = [sub["weight"] for sub in self.subs]
+                return self.fuse_per_sub_quota(
+                    per_sub, weights, self.k, topk, quota_by_idx, self.quota_window)
         cold_w = [sub.get("cold_weight", sub["weight"]) for sub in self.subs]
         warm_w = [sub.get("warm_weight", sub["weight"]) for sub in self.subs]
         # Segment-aware fusion only when routing weights actually differ AND we

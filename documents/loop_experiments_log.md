@@ -492,3 +492,145 @@ Decision:     NEXT = Stage 2 (#12d-e5b): rerank the weight x window grid w_e5{1.
               sees; a structural unlock no weight replicates). w=1.0 safe / w=1.5 Blind-aggressive (Blind
               ~99% new-artist -> weight wall-retention > aggregate recall). Updated prior real-Blind-gain
               ~55-65% (driven by k=100), vs ~40% at k=50/w=1.0. Best arm >=0.2652 -> full-union confirm -> Blind.
+
+--- BLIND (config 207, straight-to-Blind, user override) ---
+Result:       {"exp":"EXP-009/010","config":207,"ndcg@20":0.28,"cat_div":0.03,"lex_div":0.77,"llm_judge":3.55,"composite":0.41,"n_sessions":80,"gate":"blindA"}
+Verdict:      REGRESSION -0.08 vs the 0.49 best (beyond ±0.05 noise). config 205 (0.49) REMAINS BEST.
+              Two UNVALIDATED changes bundled into one slot, both regressed:
+              (1) RESPONDER pro->flash-lite: LLM 4.25->3.55 (-0.70) = -0.0525 composite. The bigger hit.
+                  Never dev-tested; lite is INCONCLUSIVE-leaning-refuted (confounded w/ retrieval via
+                  top_n=1: e5/k100 changed the explained top-1 track). Prior strongly favors pro.
+              (2) RETRIEVAL e5 w1.5 + k100: nDCG 0.33->0.28 (-0.05) = -0.025 composite. The full-union
+                  RE-CROWDING the RecSys review predicted: the +0.0128 dev win was on a STRIPPED union
+                  (no ColBERT/CLAP/pg); on the full serve union those channels crowd e5's wall-golds out
+                  of the k=100 window -> lever flips negative (like dev w1.5/k50 = -0.0077). The skipped
+                  $0 full-union confirm would have caught it. INCONCLUSIVE-leaning-negative (e5-swap +
+                  k-widen confounded within the arm).
+RecSys review: attribution clean on nDCG (responder can't touch it -> 100% retrieval); LLM axis NOT clean
+              (top_n=1 bleeds retrieval into the responder score). nDCG -0.05 = noise-band point estimate
+              but agrees with the pre-registered re-crowding prediction + the dev k50 negative.
+Decision:     RECOVERY (RecSys): EXP-1 (Blind, next slot) = revert responder to PRO, keep e5/k100 ->
+              isolates retrieval cleanly (expected ~0.46-0.47 if retrieval is -0.025; ~0.49 if nDCG was
+              noise). EXP-2 (DEV, $0, run FIRST/parallel) = the skipped FULL-UNION confirm: e5 w1.5
+              k50-vs-k100 on the union WITH ColBERT/CLAP/pg, gate turn-1 nDCG vs 0.6B baseline -> decides
+              keep-e5/k100 vs drop-to-k50 vs revert-to-0.6B. Do NOT spend another slot on an unconfirmed
+              retrieval config. config 205 = 0.49 still BEST.
+PROCESS RULE: ONE unvalidated change per Blind slot; gate it on the FULL serve config (not a stripped
+              dev proxy). 207 broke both -> -0.08 + a burned slot + attribution debt.
+
+---
+
+## EXP-011 — config 205 REPLICATION (Gemini-pro responder re-submit) — 2026-06-13
+Hypothesis:   (post-hoc; operator re-submitted "the gemini-pro last submission" = config 205, the
+              0.49 best) An identical re-submit re-establishes config 205's floor and quantifies the
+              Blind LLM-judge variance on an UNCHANGED responder. Doubles as the soft-confirmation
+              the EXP-006 RecSys review requested ("if composite holds >=0.48 it re-establishes 205's floor").
+Lever:        none (replication — identical config: 203 track_ids + flash-rank@2048 + Gemini-pro bo1, top_n=1).
+Change:       NONE. Same config 205, re-submitted to CodaBench.
+--- run ---
+Result:       {"exp":"EXP-011","config":"205-resubmit","ndcg@20":0.33,"cat_div":0.03,"lex_div":0.78,"llm_judge":4.35,"composite":0.50,"n_sessions":80,"gate":"blindA"}
+Verdict:      NEW BEST-KNOWN 0.50 (was 0.49) — but the +0.01 is JUDGE VARIANCE, NOT a real gain.
+              nDCG/Cat/Lex are byte-identical to the 0.49 draw (0.33/0.03/0.78); ONLY LLM moved
+              4.25->4.35 on an IDENTICAL Gemini-pro responder. Arithmetic confirms it's pure judge:
+              +0.10 LLM = 0.30*(0.10/4) = +0.0075 composite -> 0.4897 -> 0.4972 (rounds 0.49->0.50).
+              The trustworthy update: config 205's COMPOSITE reproduces at 0.49-0.50 across two draws.
+Reviews:      RecSys-researcher = APPROVE-WITH-CORRECTIONS:
+              (1) Bank 0.50 as best-KNOWN; +0.01 = judge noise, not algorithmic.
+              (2) n=2 caveat: cannot estimate an SD from two draws; honest statement = "observed LLM
+                  range 0.10 over two identical draws; true judge SD unknown but >= this." Composite
+                  contribution ~+0.004 (i.e. +/-0.00375), a SMALL subset of the +/-0.05 composite band
+                  -> the 80-session RETRIEVAL draw dominates Blind noise, NOT the judge (reassuring).
+              (3) A real LLM-axis win must clear the full +/-0.05 composite band ~ +0.5 LLM points
+                  (0.30*(0.5/4)=0.0375) to be Blind-confirmable in isolation. +0.10 LLM is firmly noise.
+              (4) DON'T over-bank "retrieval floor confirmed": nDCG 0.33 is the SAME track_ids both
+                  times = ONE effective retrieval draw. Say "composite reproduced at 0.49-0.50", not
+                  "retrieval floor confirmed."
+              (5) This re-submit did NOT advance the open e5/k100 retrieval question (nDCG stayed 0.33
+                  = config-203 tracks, not e5). config 207's regression confounded retrieval (e5/k100)
+                  WITH responder (flash-lite) -> uninterpretable -> the clean isolation is necessary.
+Decision:     BANK best-known = 0.50, config 205. NEXT = see EXP-012 plan below (sequenced: $0 dev e5
+              full-union recall gate FIRST, then Blind only if it clears).
+
+---
+
+## EXP-012 — rescue-aware / channel-quota fusion (DEV gate, no Blind slot) — 2026-06-13
+Hypothesis:   The wall is FUSION-bound, not recall- or rerank-bound (EXP-009/010): e5 rescues 97
+              wall golds ALONE but pure weighted-RRF surfaces only ~36 into top-100 (−63%) and the
+              k=50 reranker window sees even fewer, because RRF structurally drowns SINGLE-channel
+              rescues under MULTI-channel golds (3 channels @ rank30 outscore 1 channel @ rank5).
+              Up-WEIGHTING e5 (EXP-010/config 207) demotes multi-channel golds → regressed on the
+              full union. A channel-QUOTA merge instead RESERVES a few top slots for each orthogonal
+              wall-cracker (e5, ColBERT, CLAP, propose-ground) so their rescues are GUARANTEED into
+              the reranker window WITHOUT down-weighting anything — then the proven-excellent
+              reranker (EXP-010: 87.5% in-window top-20 conversion) sorts the added candidates. Net:
+              recover a share of the 63% fusion loss → lift turn-1 nDCG@20 on the FULL serve union.
+Lever:        fusion / pool construction (NOT recall encoder, NOT reranker, NOT RRF weights).
+DESIGN CORRECTIONS folded from the RecSys design-review (APPROVE-WITH-CORRECTIONS, pre-run):
+              - PLACEMENT: do NOT prepend reserved to position 0 (the reranker re-scores in-window so
+                head-vs-tail is order-neutral for survivors → prepending ONLY adds eviction of
+                borderline multi-channel golds). Instead INSERT reserved at the TAIL of the window
+                (fill the lowest-RRF window slots) → minimal eviction. Needs a `window` param (=reranker_k=50).
+              - Only inject reserved candidates that are NOT already in rrf_order[:window] (no-op if the
+                channel's rescue already surfaced) → isolates the quota effect to genuine added presence.
+              - q range → {1,2,3} (was {3,5}); START with the CHEAPEST DECISIVE probe q=1 e5-ONLY
+                (e5 = the validated 19.2% wall-cracker; if one guaranteed e5 slot doesn't move A, multi-
+                channel/larger-q won't). q=5 dropped (≤20 of a 50-window = over-reserve).
+              - PRECISION is an uncontrolled risk (injected items are mostly NON-gold; C is blind to
+                top-20 cannibalization) → add binding condition D (non-wall non-inferiority).
+              - Pre-check cross-channel OVERLAP of solo rescues (e5/ColBERT/CLAP): if correlated, dedup
+                collapses the multi-channel benefit → q=1 e5-only is then the whole lever.
+Change (code, TDD + code-review):
+              (1) `RRF_MODEL.fuse_per_sub_quota(per_sub, weights, k, topk, quota_by_idx, window)` in
+                  rrf.py — pure fn mirroring fuse_per_sub: compute standard weighted-RRF order; round-
+                  robin RESERVE top-q (deduped) from each quota channel; inject ONLY those not already
+                  in rrf_order[:window], at the TAIL of the window (displacing the lowest-RRF window
+                  items); cap topk.
+              (2) dispatcher in RRF_MODEL.batch_text_to_item_retrieval: fusion_strategy=="channel_quota"
+                  + channel_quota>0 → quota path (default symmetric path unchanged → config 205 bit-identical).
+              (3) RRF_MODEL.__init__ + wrrf_union_v1 factory dispatch read fusion_strategy / channel_quota /
+                  quota_labels / quota_window (default 50, MUST match reranker_k) from extra_config.
+                  Default quota_labels = the ORTHOGONAL wall-crackers PRESENT in the union:
+                  dense_metadata_e5_instruct_local, dense_metadata_qwen3_4b_local, colbert_index,
+                  clap_recall, clap_text, propose_ground (NOT bm25 / 0.6b-dense / same_artist / sasrec).
+              (4) nb74 dev cell `#4-quota` (overlap pre-check + recall + wall-survival A/B) +
+                  `#12d-quota` (nDCG conversion, incl non-wall subset).
+              (5) GATED config 208 = config 205 + fusion_strategy: channel_quota + channel_quota: <best q>
+                  + quota_window: 50 + PRO responder + k=50 (ONE change vs 205: the fusion strategy).
+Pre-registered gate (DEV, turn-1, flash@2048 ranker, on the FULL serve union — BM25 + 0.6B dense +
+              same_artist + SASRec + ColBERT + CLAP + pg + e5 — NOT a stripped proxy; this is the
+              207 discipline fix). Sweep q ∈ {1,2,3}, q=1 e5-only FIRST. PASS requires ALL:
+              (A MECHANISM, binding) wall-gold survival in the reranker window (top-k=50) rises
+                  ≥ +25 of the 505 union-missed wall golds vs pure-RRF (bar raised from +10 per review,
+                  so a real mechanism has headroom for B above the nDCG noise floor).
+              (B CONVERSION, primary) turn-1 nDCG@20(quota) − nDCG@20(pure-RRF, SAME full union, same
+                  run) ≥ +0.005, point estimate; paired-bootstrap 95% CI reported. CI excluding 0 =
+                  clean PASS; CI straddling 0 with B>0 AND A,C,D pass = PROMISING (mechanism real,
+                  conversion noise-bound) → cheap Blind confirm justified.
+              (C GUARD, binding) turn-1 OVERALL recall@50 (window) does NOT drop below pure-RRF (the
+                  crowding mode that sank 207 — tail-insertion should make this easy).
+              (D PRECISION, binding) turn-1 nDCG@20 on the NON-wall gold subset does NOT drop vs pure-RRF
+                  (injected non-gold rescues must not cannibalize normal golds in top-20); also report
+                  top-20 gold-rate of promoted reserved items.
+Baseline:     pure-RRF (fuse_per_sub) on the SAME full union, same run/cell: turn-1 nDCG@20 (≈0.2602
+              flash@2048 reference) + recall@50 + wall-survival@50 + non-wall nDCG@20, all re-printed
+              in-cell (within-run comparison, not vs a historical number — avoids the stripped-union confound).
+Decision rule: PASS (A∧C∧D ∧ B≥+0.005) → full-union confirmed → Blind config 208 (quota, PRO responder,
+                  k=50; ONE change vs the 0.50 best). Expected ~0.50–0.52 if conversion is real.
+               PROMISING (A∧C∧D, B>0 but CI soft) → mechanism real, conversion at the noise floor →
+                  ONE cheap Blind confirm is justified (best q).
+               INCONCLUSIVE (A holds, B≤0) → golds reach the window but don't convert → contradicts
+                  EXP-010's 87.5% → re-examine the reranker on rescued golds; do NOT ship.
+               FAIL (A < +25 OR C drops OR D drops) → quota can't retain rescues without crowding/
+                  cannibalizing → fusion retention is not slot-reservation-fixable → pivot to GENERATIVE
+                  (#2: stronger pg, gemini-2.5-pro goal-seeded) as the only remaining wall lever.
+Budget:       0 Blind. ~5 min GPU (full-union dev retrieval, caches warm) + ~$ flash ranker for the
+              nDCG A/B. Blind slot only after a dev PASS.
+Smoke:        pytest tests/test_rrf_quota.py tests/test_rrf_fuse.py tests/test_union_factory.py green
+              before handoff.
+Reviews:      code-review subagent on the diff (REQUIRED); RecSys-researcher on the DESIGN now
+              (pre-registration) + on the VERDICT after the run.
+Process note: ONE unvalidated change isolated per Blind slot; gated on the FULL serve union, not a
+              stripped dev proxy (the rule config 207 violated).
+--- run ---
+Result:       (pending build → human runs nb74 #4-quota + #12d-quota)
+Verdict:      (pending)
