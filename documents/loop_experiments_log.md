@@ -281,6 +281,26 @@ Reviews:      RecSys-researcher = INCONCLUSIVE-PROMISING. NEXT = inspect flash's
 Decision:     DON'T bank as PASS. The ranker-upgrade lever is OPEN + the most promising of the session.
               NEXT = DIAG (nb74 #12d-diag raw-output inspection) → fix parser → re-run EXP-006.
 
+--- DIAG + re-run (2048 tokens) ---
+Diagnostic:   #12d-diag showed flash returns a CLEAN comma-list (~22/50 parse) — NOT a format problem.
+              Root cause = TRUNCATION: flash is a THINKING model; the default 512 tokens (thinking+output)
+              cut its ranking to ~7. Fix: include max_output_tokens in the reranker cache key (latent bug
+              +test) + cell 55 uses 2048; cleared cache; re-ran.
+Re-run:       flash-lite 0.2259 (valid-idx 0.82) | gemini-2.5-flash 0.2602 (valid-idx 0.46) = +0.0344.
+              The fix not only validated the gain, it GREW it (+0.0191→+0.0344; the 512-run was truncated).
+Verdict:      PASS (clean, trustworthy). +0.0344 ≫ +0.005 gate; valid-idx 0.46 = ~23/50 = FULL top-20
+              coverage (all nDCG@20 cares about). RecSys review = APPROVE-WITH-CORRECTIONS: monotone-
+              credible across 512→2048; z≈2.0; pool-mismatch HELPS (richer 203 serve pool); turn-1 dev =
+              valid Blind proxy. THE biggest single-change nDCG lever of the campaign.
+Translation:  +0.0344 dev turn-1 → ~+0.046 Blind nDCG (×1.33) → ~+0.023 composite → 0.4673 → ~0.49 (upper
+              end; Blind n=80 SE±0.07 so one submission is a production-gate BET, not statistical proof).
+Decision:     BANK PASS. NEXT = Blind confirm via config 205 = 203 + reranker_model_path: gemini-2.5-flash
+              + reranker_max_output_tokens: 2048 + Gemini responder. CRITICAL FIX FIRST (review): the serve
+              path (run_inference_blindset → CRS_BASELINE → load_reranker_module → LLMListwiseReranker) does
+              NOT thread max_output_tokens → defaults to 512 → would silently run TRUNCATED flash (0.2450)
+              on Blind. Must wire reranker_max_output_tokens through all 3 layers + the config, with TDD +
+              code-review, BEFORE submitting. Skip gemini-2.5-pro for now (own gate needed; flash signal suffices).
+
 ---
 
 ## EXP-005 — query enrichment: culture + profile (#3.2) (DEV recall gate, no Blind) — 2026-06-13
