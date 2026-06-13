@@ -767,6 +767,22 @@ Pre-registered gate: offline Gemini-judge LLM score (turn-1 or full dev) of each
               gain projects >= +0.4-0.5 LLM (above the ±0.05 composite band).
 Budget:       0 Blind for dev; Gemini judge API $ (offline). Blind only after a stacked dev PASS.
 Reviews:      RecSys-researcher on each sub-verdict; code-review on any emitter/serve diff.
+--- EXP-014a: richer reranker candidate context (BUILT, dev-pending) ---
+Hypothesis:   The LLM reranker showed only artist-title-album-5tags and SILENTLY ignored goal_category.
+              Adding release-year + 12 tags + the goal_category line gives more signal to match against
+              the goal — esp. for tracks the LLM doesn't already know (much of our pool). Shared lever:
+              the same enrichment later feeds the RESPONDER's track block (the high-headroom axis).
+              NOTE: goal text + culture were ALREADY at serve (rerank line 856; _profile_block); only
+              goal_category was accepted-but-unrendered.
+Change:       `rich_candidates` flag (OFF by default → config 205 bit-identical), threaded end-to-end
+              (run_inference_* → load_crs_baseline → CRS_BASELINE → load_reranker_module → reranker).
+              render_candidate(max_tags, include_year) + build_listwise_prompt renders goal_category in
+              rich mode. CACHE KEY now includes rich_candidates (the EXP-006 collision lesson) +test.
+              8 new tests; 1249 pass. config 210 = 205 + reranker_rich_candidates: true. nb74 #12d-rich.
+              Reviews: code-review = GO (byte-identical default, threading verified; nit: key-format
+              change invalidates the 205 cache → first rerun recomputes, safe).
+Pre-registered gate: nb74 #12d-rich, flash@2048 k=50 turn-1: nDCG@20(rich) − nDCG@20(lean) ≥ +0.005
+              AND valid-idx ≥ 0.6 → config 210 (one flag) → Blind; else drop, focus responder best-of-N/top_n.
 --- run ---
-Result:       (pending: confirm offline-judge tooling + pre-register sub-experiment 1)
+Result:       (pending human run: nb74 #12d-rich [cells 1→3→4→#12d-rich, GEMINI_API_KEY, ~$2-4 SUBSET=400])
 Verdict:      (pending)
