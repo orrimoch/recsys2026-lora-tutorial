@@ -12,6 +12,14 @@
 
 ---
 
+## Division of labor (hard boundary — spec §1.1)
+
+The human is a **compute executor only**: runs notebooks, pastes raw output. ALL reasoning,
+hypotheses, prioritization, verdicts, conclusions, and recommendation-systems domain
+judgment are Claude's. No step may ask the human to decide, judge, or reason. Where a step
+below says "human", it means "human runs a prepared notebook/cell and pastes the raw result";
+the analysis of that result is always Claude's.
+
 ## Review discipline (applies to EVERY task and every loop iteration)
 
 Per spec §2.2, two gates are mandatory and non-negotiable:
@@ -264,12 +272,12 @@ print_results_block(
 )
 ```
 
-- [ ] **Step 4: Verify (human-assisted handoff)**
+- [ ] **Step 4: Verify the emitter end-to-end**
 
-This requires running on Colab (GPU/auth). Hand the human a run package to execute nb74
-end-to-end on a known config (204) and paste back the `RESULTS_JSON` block. Confirm the
-block parses and the composite matches `benchmarks.md` for config 204 within the noise band.
-(If the human is unavailable, mark this step pending — it does not block Tasks 3-6.)
+The human runs nb74 end-to-end on config 204 (GPU/auth) and pastes back the `RESULTS_JSON`
+block — that is their entire role. **Claude** then verifies: the block parses, and the
+composite matches `benchmarks.md` for config 204 within the noise band (±0.05). The judgment
+is Claude's. (If the human is unavailable, mark pending — does not block Tasks 3-6.)
 
 - [ ] **Step 5: Commit**
 
@@ -293,6 +301,11 @@ Create `RESEARCH_CHARTER.md` with this exact content:
 # Research Charter — RecSys 2026 Music CRS Autonomous Loop
 
 Re-read this file at the top of EVERY iteration before proposing an experiment.
+
+## Division of labor
+Human = compute executor ONLY (runs notebooks, pastes raw output). Claude = the researcher:
+all hypotheses, priorities, verdicts, conclusions, and RecSys domain judgment are Claude's.
+Never defer a research decision to the human.
 
 ## Objective
 Maximize the Blind composite:
@@ -713,15 +726,18 @@ git add scripts/codabench_submit.py tests/test_codabench_submit.py
 git commit -m "feat: CodaBench poll/parse logic + discovery-gated live wrapper"
 ```
 
-- [ ] **Step 6: DISCOVERY — confirm endpoints + wire live HTTP (human-assisted)**
+- [ ] **Step 6: DISCOVERY — confirm endpoints + wire live HTTP (Claude-driven)**
 
-With the human: do ONE manual CodaBench submission with browser DevTools → Network open.
-Capture: the auth header format, the submit POST URL + payload (multipart vs presigned
-upload), and the status GET URL + the JSON field holding status + scores. Alternatively read
-`codalab/codabench` on GitHub (`src/apps/api/`). Then implement `submit_zip` and
-`_default_status_getter` against the real endpoints using `requests`, confirm `CODABENCH_TOKEN`
-auth works against the live competition, and update the module docstring (remove the DISCOVERY
-notice). Commit:
+Claude does the reverse-engineering — read the open-source `codalab/codabench` repo on GitHub
+(`src/apps/api/` — submission viewsets/serializers/URLs) to determine: the auth header format,
+the submit endpoint + payload (CodaBench uses a presigned-upload-then-create-submission flow:
+`POST .../sumbissions/get_details`-style), and the status endpoint + the JSON field holding
+status + scores. Implement `submit_zip` and `_default_status_getter` against those endpoints
+with `requests`. To confirm against the LIVE competition without the human reasoning: prepare
+a one-off notebook cell that calls `submit_zip(...)`/`_default_status_getter(...)` (token from
+the Colab env) and have the human run it and paste the raw response; Claude verifies the
+endpoints from that raw output and finalizes the code. Update the module docstring (remove the
+DISCOVERY notice). Commit:
 
 ```bash
 git add scripts/codabench_submit.py
@@ -733,21 +749,22 @@ preparer + a human one-click upload (the spec's documented fallback).
 
 ---
 
-## Task 7: One-time setup verification (human-assisted)
+## Task 7: One-time setup verification
 
-**Files:** none (verification only)
+**Files:** none (verification only). Human runs cells + pastes; Claude judges.
 
 - [ ] **Step 1: Confirm the Tier-1 local gate reproduces a known baseline**
 
-Hand the human a run package: run nb74 end-to-end on config 204, paste back `RESULTS_JSON`.
-Confirm the composite matches `benchmarks.md`/memory for 204 (~0.44) within the noise band
-(±0.05). This validates the trusted reward before the loop relies on it.
+The human runs nb74 end-to-end on config 204 and pastes back `RESULTS_JSON`. **Claude**
+confirms the composite matches `benchmarks.md`/memory for 204 (~0.44) within the noise band
+(±0.05) — this validates the trusted reward before the loop relies on it. The call is Claude's.
 
 - [ ] **Step 2: Confirm the CodaBench token + cap**
 
-Confirm `CODABENCH_TOKEN` is set in the environment Claude runs in (for auto-submit) and the
-real weekly/total submission cap. Update `RESEARCH_CHARTER.md` `WEEKLY_CAP` with the confirmed
-value. Commit:
+Claude determines the real submission cap from the competition page / `codalab/codabench`
+source (not by asking the human to reason). The human confirms `CODABENCH_TOKEN` is set in the
+environment and, if needed, pastes the competition's submission-limit text. Claude updates
+`RESEARCH_CHARTER.md` `WEEKLY_CAP` with the confirmed value. Commit:
 
 ```bash
 git add RESEARCH_CHARTER.md

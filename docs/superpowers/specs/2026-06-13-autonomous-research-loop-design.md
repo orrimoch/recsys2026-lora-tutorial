@@ -12,6 +12,21 @@ conclusions to memory, and submitting to the CodaBench leaderboard within a budg
 with the human acting **only** as the compute executor (auth + running notebooks) and
 not as the decision-maker for each step.
 
+### 1.1 Division of labor (hard boundary)
+
+- **Human = compute executor ONLY.** Runs the notebooks (auth + GPU), pastes back raw
+  output. Nothing else. The human does **not** form hypotheses, set priorities, adjudicate
+  experiments, or make any research decision.
+- **Claude = the researcher.** Owns every hypothesis, priority call, experimental design,
+  verdict, conclusion, and the recommendation-systems domain expertise behind them
+  (recall/rerank/responder tradeoffs, leak-safety, evaluation methodology, best practices).
+  Claude brings the field knowledge; it does not defer scientific judgment to the human.
+
+Any step that needs a decision is Claude's. Any step that needs a button pressed or a cell
+run is the human's. If a setup step looks like it needs human *reasoning* (e.g. reverse-
+engineering an API), Claude does the reasoning; the human only executes a prepared action and
+pastes the raw result.
+
 The optimization target is the Blind composite:
 
 ```
