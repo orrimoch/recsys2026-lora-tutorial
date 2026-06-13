@@ -92,3 +92,36 @@ Decision:     ADOPT "config-203 track_ids + Gemini-pro bo1" as new benchmark (be
               Budget spent: 1/3 weekly. Next lever = in-pool SASRec reranker (dev gate, turn-1
               STRATIFIED per review) — see EXP-002 plan.
 Memory:       [[project_autonomous_research_loop_2026_06_13]] + benchmarks.md + submissions_log.md updated.
+
+---
+
+## EXP-002 — in-pool SASRec reranker (DEV gate, no Blind slot) — 2026-06-13
+Hypothesis:   Fine-tuning SASRec on the in-pool ranking objective (softmax-CE over the SASRec-free
+              recall pool top-100, goal-ful context) converts a meaningful share of the documented
+              18.2% recall→ranking gap, lifting dev nDCG@20 above the lgbm_relev baseline 0.1652.
+Lever:        reranker (in-pool SASRec ranking). Attacks the conversion gap, NOT the 42% recall wall.
+Change:       RUN the already-built lever (no code diff): nb74 cell 53 #12c-train (warm-start
+              sasrec_v1, topk=100, SMOKE→full → sasrec_inpool_v1) → cell 54 #12c-inpool dev gate.
+Pre-registered gate (PRIMARY): in-pool SASRec-alone OVERALL dev nDCG@20 (nb74 cell 54, test split,
+              goal-ful 3-way parity) vs lgbm_relev=0.1652 and recall-only=0.1498.
+Baseline:     lgbm_relev dev nDCG@20 = 0.1652; recall-only = 0.1498 (SASRec_Improved_Plan.md §7).
+Decision rule (STAGED):
+              FAIL  if overall < 0.1652 → in-pool objective didn't convert; bank the negative,
+                    switch lever (do NOT pursue turn-1/3-way).
+              INCONCLUSIVE if 0.1652 ≤ overall < 0.1752 (gain < +0.01) → marginal; only worth the
+                    LGBM+inpool-feature variant (c) if it specifically helps, else shelve.
+              PASS  if overall ≥ 0.1752 → promising; BUT before any Blind promote, run the FOLLOW-UP
+                    turn-1-stratified 3-way (SASRec-alone vs LGBM-alone vs LGBM+inpool-feat, plan
+                    §10.2): SASRec is COLD on turn-1 (empty sequence) and Blind is turn-uniform
+                    (~1/8 turn-1), so SHIP only the variant that does NOT regress turn-1 vs LGBM.
+                    Promote requires the crs_baseline goal-ful serve-parity change (plan §2).
+Budget:       0 Blind slots (DEV/Tier-1 only). Blind confirmation only AFTER a dev PASS + the
+              turn-1 check + the serve-parity code change.
+Smoke:        cell 53 SMOKE=True (300 sessions / 1 epoch) to validate shapes + gold-in-pool% BEFORE
+              the full --epochs 3 fine-tune.
+Reviews:      code-review N/A (running built code, no diff). RecSys-researcher REQUIRED on the
+              dev-gate verdict before banking. Tier-3 watch: dev is a cold-Blind-biased proxy — a
+              dev nDCG gain must pass the turn-1 robustness check before we trust Blind transfer.
+--- run ---
+Result:       (pending human run: nb74 cells 1→3→53→54)
+Verdict:      (pending)
