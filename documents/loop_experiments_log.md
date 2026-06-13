@@ -719,6 +719,54 @@ FREE ARM (run FIRST, $0): nb74 `#12d-cerank` uses the EXISTING free local cross-
               flash@k50 0.2602: free≈/≥flash → ADOPT (free+reproducible) + window-for-free; free≪flash →
               keep flash, run the paid `#12d-rwin` (SUBSET) for flash's own window. (2nd free option =
               reranker_type `pro_rank`, Qwen-0.5B logit-diff.) No new code — used the ready reranker.
+--- run (EXP-013b: FREE bge cross-encoder) ---
+Result:       dev turn-1, N=1000. recall@50=0.4310 @100=0.4950 (64 golds at pool rank 51-100).
+                bge @k=50 : nDCG@20 = 0.1677 | rank51-100 golds->top20 = 0/64
+                bge @k=100: nDCG@20 = 0.1542 | rank51-100 golds->top20 = 22/64
+                (vs flash @k=50 = 0.2602)
+Verdict:      TWO findings. (1) bge is NOT a viable flash replacement: 0.1677 << 0.2602 (-0.093, -36% rel).
+              The LLM listwise reasoning over goal+profile+conversation (mirroring the LLM that CREATED the
+              golds = near-oracle alignment) is essential; pointwise content-matching can't reach it. Keep
+              flash; manage cost via SUBSET+cache, NOT replacement. (pro_rank Qwen-0.5B even weaker — skip.)
+              Salvage levers (prepend goal, max_length 256->512) ~+0.04 best case -> still -0.05 < flash ->
+              not worth it. bge is only useful as a free POOL-PROVIDER/pre-filter, not a ranker.
+              (2) bge@k100 < bge@k50 (0.1542<0.1677) DESPITE pulling 22/64 deep golds into top-20 -> the ~50
+              added distractors displaced MORE shallow golds than the deep golds gained = NOISE BEATS SIGNAL
+              for a weak reranker (the user's exact noise concern, measured). This is a weak-reranker artifact
+              (sign need not transfer to flash), but the MATH caps the flash window upside too: 64/1000 deep
+              golds, flash converts ~30-50% = ~7-11 into top20 = ~+0.005-0.015 dev nDCG = SUB-NOISE on Blind.
+Reviews:      RecSys = ACCEPT (1)+(2); flash window (#12d-rwin) = a <$1 fire-and-forget side-check whose max
+              prize (~+0.01 dev) is below the ±0.05 Blind band -> run it to close the question, NOT a banker.
+              DECISIVE PIVOT: nDCG/recall line is TAPPED (reranker near LLM-oracle ceiling, fusion exhausted,
+              7 flat levers, best remaining lever sub-noise). The ONLY above-noise composite headroom is the
+              RESPONDER/LLM axis: ours 4.35 vs leaders 4.45-4.95; +0.5 LLM = 0.30·(0.5/4)=+0.0375..+0.045
+              composite -> CLEARS ±0.05. Make the responder the workstream; nDCG side-checks only.
+Decision:     BANK EXP-013/013b. Keep flash@k=50 reranker (config 205 = 0.50 best, unchanged). nDCG line
+              CLOSED for cheap wins. config 209 (k=100) NOT pursued unless the optional #12d-rwin surprises.
+              🔴 PIVOT loop primary workstream to the RESPONDER/LLM axis = EXP-014 (below).
+
+---
+
+## EXP-014 — RESPONDER / LLM-axis optimization (DEV, offline Gemini judge) — 2026-06-13
+Hypothesis:   nDCG is tapped (EXP-012/013); the LLM axis (0.30 wt) is the only lever with above-noise Blind
+              headroom. ours 4.35 vs leaders 4.45-4.95. A single Blind LLM win must clear ±0.05 composite =
+              ~+0.5 LLM pts, so MARGINAL responder tweaks won't show — must STACK cheap wins + best-of-N to
+              target 4.35 -> ~4.85. Gate on the OFFLINE Gemini judge (Tier-1, leak-free, $0 Blind) BEFORE
+              any Blind slot.
+Lever:        responder (gemini-2.5-pro, the config-205 responder). Axis = Personalization + Explanation.
+Plan (sequenced, cheap-first; pre-register each sub-gate before its run):
+              (0) PREREQ: wire/verify a RESULTS_JSON emitter on the offline Gemini-judge path (nb79/nb75,
+                  gemini_judge_responses.py) so the LLM-axis reward is captured locally (the loop BUILD NOTE
+                  follow-up — never done). Without it there's no Tier-1 responder gate.
+              (1) top_n_for_prompt 1 -> 3/5 (responder currently explains only the #1 track; biggest cheap win).
+              (2) response length / max_new_tokens sweep.
+              (3) prompt A/B (Personalization + Explanation rubric-aligned).
+              (4) best-of-N on pro (reward_reranker exists) — the main path to a LARGE LLM jump.
+Pre-registered gate: offline Gemini-judge LLM score (turn-1 or full dev) of each arm vs the config-205
+              responder baseline; STACK arms that each clear judge-noise; Blind only when the stacked dev
+              gain projects >= +0.4-0.5 LLM (above the ±0.05 composite band).
+Budget:       0 Blind for dev; Gemini judge API $ (offline). Blind only after a stacked dev PASS.
+Reviews:      RecSys-researcher on each sub-verdict; code-review on any emitter/serve diff.
 --- run ---
-Result:       (pending human run: nb74 #12d-cerank [FREE, run first] then #12d-rwin [paid, only if needed])
+Result:       (pending: confirm offline-judge tooling + pre-register sub-experiment 1)
 Verdict:      (pending)
