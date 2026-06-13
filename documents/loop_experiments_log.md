@@ -417,3 +417,56 @@ Decision:     BANK Phase A PASS = e5 is a VALIDATED recall lever (the wall-rescu
               check; gate turn-1 nDCG@20 >= 0.2652 (0.2602 + 0.005) w/ bootstrap CI excl 0 -> only THEN
               Blind (config 207, e5 replacement, lite responder). If recall rose but nDCG flat -> rescued
               golds stranded >rank20 -> the wall is rerank-bound not recall-bound -> pivot.
+
+--- run (DEV Phase B, nDCG conversion) ---
+Result:       turn-1 nDCG@20 (flash@2048): baseline(this run) 0.2564 | e5-replace 0.2623 (+0.0059
+              within-run) | e5-additive 0.2680 (+0.0116 within-run, +0.0078 vs hist 0.2602). Gate
+              (>=0.2652): ADDITIVE clears (0.2680), replace misses (0.2623). BINDING diag (e5-replace):
+              e5-ALONE rescued 97 wall golds but the UNION surfaced only 36 into top-100 (RRF dropped
+              ~63%), and flash ranked 14/36 into top-20 (38.9%) -> 14.4% end-to-end conversion.
+Verdict:      MARGINAL-PASS (RecSys review). Real but small + NOT bankable on Blind:
+              (1) additive +0.0116 within-run = ~3x the reranker noise floor (~0.004) -> sign+magnitude
+              real, but NO nDCG bootstrap CI -> point estimate soft -> dev PASS, not a Blind ticket.
+              (2) The additive>replace FLIP is an ARTIFACT: this dev union LACKS ColBERT/CLAP/pg — the
+              very orthogonal channels the additive-redundancy concern is about — so it structurally
+              cannot reproduce the harm. Do NOT ship additive on this evidence.
+              (3) MECHANISM = FUSION-bound (63% loss, dominant) THEN rerank-bound (61% of survivors
+              stranded >rank20). The 19.2% wall-rescue collapsed to ~+0.008 nDCG. The bottleneck is RRF
+              dropping e5's single-channel rescues BEFORE the reranker sees them.
+              (4) This KILLS the EXP-008/Qwen3-4B fallback: 4B = same single-vector text modality giving
+              MORE recall, but recall isn't the bottleneck — it'd hit the identical fusion+rerank wall.
+Composite:    +0.0078 dev turn-1 nDCG -> ~+0.005 composite (0.49 -> ~0.495), INSIDE the ±0.05 Blind
+              noise band -> one 80-session submission cannot confirm it. Spending a slot now = -EV.
+Decision:     Do NOT submit. NEXT = EXP-010 (the reviewer's Option C, $0/no-Blind): additive vs replace
+              on the FULL serve union (BM25+dense(s)+same_artist+SASRec+ColBERT+CLAP+pg), turn-1,
+              flash@2048, + log in-pool survival of the 505 wall golds under each — resolves the ship
+              config on the REAL Blind union AND measures the fusion-bound hypothesis. Pair with an e5
+              RRF-WEIGHT SWEEP (w_e5 0.7/1.0/1.5): the highest-EV fix is FUSION RETENTION (recovering
+              half the 63% fusion loss dwarfs +0.0116), not a bigger encoder. e5 BANKED as a real (small)
+              recall+nDCG lever; 4B fallback RETIRED.
+Reviews:      RecSys = MARGINAL-PASS (Option C). code-review N/A (config-only dev cells).
+
+---
+
+## EXP-010 — e5 RRF-weight fusion-retention sweep (Stage 1) — 2026-06-13
+Hypothesis:   EXP-009 Phase B proved the wall is FUSION-bound: e5 rescues 97 wall golds alone but RRF
+              surfaces only 36 into top-100 (-63%), and the flash reranker (k=50) never sees rank 51-100.
+              Up-weighting e5 in the RRF should push its solo rescues into the top-50 (the reranker window),
+              recovering some of the 63% fusion loss — a bigger lever than any encoder swap.
+Lever:        fusion / RRF weighting (NOT recall encoder, NOT reranker).
+Change:       nb74 cell `#4-e5-wsweep` — sweep w_e5 in {0.7,1.0,1.5,2.0} on the e5-replacement union;
+              report turn-1 recall@{50,100} + wall-gold survival@{50,100} (of the 505 union-missed).
+              $0, no reranker, no Gemini. Config-only built cell (uses use_e5_instruct/use_base_dense).
+Pre-registered gate: BINDING = wall-gold survive@50 (top-50 = reranker window). A higher w_e5 must lift
+              survive@50 MATERIALLY (>= +10 golds vs w_e5=0.7) WITHOUT dropping turn-1 recall@50 below the
+              w_e5=0.7 level (guard: too much weight demotes multi-channel golds).
+Decision rule: PASS -> rerank the best w_e5 (flash@2048) to confirm nDCG conversion, then EXP-010 Stage 2
+              (full union incl ColBERT/CLAP + additive-vs-replace) -> Blind only if it clears on the full
+              union. FLAT (survive@50 unmoved by weight) -> RRF can't retain single-channel rescues by
+              weight alone -> pivot to rescue-aware fusion (round-robin / channel-quota merge) or widen
+              the reranker window (k=50->100). Either branch isolates WHERE the 63% fusion loss lives.
+Budget:       0 Blind, 0 API. ~5 min GPU (union retrieval over dev, e5 query cache warm from cell 8).
+Reviews:      code-review N/A (config-only dev cell). RecSys-researcher on the verdict.
+--- run ---
+Result:       (pending human run: nb74 cell #4-e5-wsweep; warm session reuses cell 4 + cell 8)
+Verdict:      (pending)
