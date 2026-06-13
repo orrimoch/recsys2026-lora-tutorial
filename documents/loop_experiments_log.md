@@ -143,4 +143,15 @@ Decision:     BANK FAIL; in-pool-ALONE closed. NEXT = ONE cheap decisive diagnos
               matched pool well? PASS-on-matched → confound confirmed, in-pool salvageable via a
               pool-parity retrain (parked, leak-aware). FLAT(~0.09)-on-matched → in-pool truly dead →
               pivot to the 42% new-artist WALL (propose-ground variant) = the bigger nDCG bucket.
+Diagnostic:   Re-gated on the TRAIN-matched (SASRec-free) pool: inpool = 0.1093 vs same-pool
+              recall-only prior = 0.1449 (inpool −0.036 BELOW the prior even on its own pool).
+              CONCLUSION: confound was real but PARTIAL (matching pool gained only +0.021:
+              0.0885→0.1093); the dominant cause is the model is a genuinely WEAK ranker — a single
+              SASRec dual-encoder loses to the multi-signal wRRF fusion (BM25+dense+same_artist) it
+              replaces, even under ideal matched-pool conditions. Pool-parity retrain ceiling ≈ 0.11
+              << 0.1652 → NOT worth it. IN-POOL RERANKING CLOSED. Option (c) also closed (inpool
+              score loses to the prior → redundant as an LGBM feature + leak-risky).
+Next lever:   PIVOT to the 42% new-artist recall WALL (the bigger nDCG bucket) — to be pre-registered
+              as EXP-003. Cheapest first probe: attributes-qwen3 orthogonal dense channel (training-free,
+              cold-query-safe). Stronger option: a goal-seeded generate→retrieve propose-ground variant.
 Memory:       [[project_autonomous_research_loop_2026_06_13]] + [[project_ndcg_campaign_status_2026_06_08]].
