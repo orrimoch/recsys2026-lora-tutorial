@@ -199,3 +199,30 @@ Decision:     BANK INCONCLUSIVE. attributes-qwen3 CLOSED (config-only, leave off
               (gemini-2.5-pro / more proposals / goal-seeded) on the wall + nDCG conversion via nb74
               cells 13 (#4-pg) + 14 (#4-pg-conv). Cheaper alt (lower prior): #3.2 goal+culture probe
               (cell 8) — but listener_goal is already in raw_with_goal, so it only adds culture+profile.
+
+---
+
+## EXP-004 — propose-ground nDCG CONVERSION (dev gate, no Blind slot) — 2026-06-13
+Hypothesis:   The generative propose-ground channel (LLM hypothesizes new-artist tracks → retrieve)
+              rescues new-artist WALL golds no similarity channel reaches (campaign: flash-pg recall
+              PASSED, ~0.024 wall rescue), AND those rescued golds CONVERT to turn-1 nDCG@20 — the
+              LLM-listwise ranker lifts them into top-20, beating LLM(cs)=0.2256 by >+0.005. Conversion
+              was NEVER tested — it is THE open question; recall-up≠nDCG-up is the campaign's trap.
+Lever:        recall (GENERATIVE). nb74 cell 14 (#4-pg-conv); no code diff for Phase 1.
+Sequencing:   Phase 1 = EXISTING flash pg (gemini-2.5-flash, 20 proposals) — cheapest, tests the untested
+              conversion directly. Mechanism note: the LLM ranker is pg-model-independent, so Phase 1
+              localizes the bottleneck (recall-quality vs ranking). Phase 2 (ONLY if Phase 1 rescues-
+              but-doesn't-convert) = STRONGER pg (gemini-2.5-pro / n_proposals 40 / goal-seeded).
+Pre-registered gate: turn-1 nDCG@20 of LLM-listwise-rank on union(cs,pg) vs on cs (cell-14 GATE).
+Baseline:     LLM(cs) turn-1 nDCG@20 = 0.2256 (cell-14 ref). recall-only cs turn-1 nDCG also printed.
+Decision rule: PASS if LLM(cs+pg) − LLM(cs) > +0.005 → pg CONVERTS → fold pg in + retrain → Blind confirm.
+              RESCUE-NO-CONVERT if union(cs,pg) WALL recall rises but nDCG Δ ≤ +0.005 → rescued golds
+              not rankable → bottleneck is the RANKER (pro-pg won't fix) → Phase 2 only if the limiter
+              looks like recall-quality, else the ranker is the wall.
+              FAIL if pg neither rescues WALL recall nor converts → generative lever dead → nDCG
+              retrieval-side closed (architectural ceiling).
+Budget:       0 Blind (DEV gate). ~$0.6-0.9 Gemini. Blind confirm only after a dev PASS.
+Reviews:      code-review N/A Phase 1 (built cell). RecSys-researcher REQUIRED on the verdict.
+--- run ---
+Result:       (pending human run: nb74 cell 14 #4-pg-conv; warm session from EXP-003, else 1→3→4→14)
+Verdict:      (pending)
