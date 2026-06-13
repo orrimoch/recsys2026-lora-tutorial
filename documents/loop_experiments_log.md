@@ -470,3 +470,25 @@ Reviews:      code-review N/A (config-only dev cell). RecSys-researcher on the v
 --- run ---
 Result:       (pending human run: nb74 cell #4-e5-wsweep; warm session reuses cell 4 + cell 8)
 Verdict:      (pending)
+
+--- run (Stage 1: w_e5 retention sweep) ---
+Result:       baseline(0.6B) recall@50 0.4310/@100 0.4950. e5-replacement union:
+              w_e5=0.7 r@50 0.4390 r@100 0.5150 | wall-survive@50 16 @100 36
+              w_e5=1.0 r@50 0.4500 r@100 0.5200 | wall-survive@50 32 @100 54
+              w_e5=1.5 r@50 0.4310 r@100 0.5200 | wall-survive@50 51 @100 83
+              w_e5=2.0 r@50 0.4130 r@100 0.5120 | wall-survive@50 57 @100 92
+Verdict:      PASS — fusion retention is a REAL, strong lever. wall-survive@50 triples (16->57) with
+              weight. w_e5=1.0 Pareto-beats the w=0.7 Phase-B arm (overall recall@50 0.4390->0.4500 AND
+              wall-survive@50 16->32) -> retires w=0.7. Tradeoff past 1.0: higher weight retains more wall
+              golds but DROPS overall recall@50 (demotes multi-channel golds); w=2.0 dominated.
+REFRAME (key): cross-ref Phase B — reranker top-20'd 14 wall golds, wall-survive@50 was 16 -> 14/16 =
+              87.5% in-window conversion (14 subset of 16 is STRUCTURAL: a gold can only be top-20'd if it
+              was in the top-50 window). So the reranker is NOT the bottleneck — it's excellent; the wall
+              is WINDOW/FUSION-bound. (Small-N: Wilson95 on 14/16 = 64-96% -> framing trustworthy, point
+              estimate noisy; confirm at denom 32/51 in Stage 2.) RecSys review = PASS.
+Decision:     NEXT = Stage 2 (#12d-e5b): rerank the weight x window grid w_e5{1.0,1.5} x k{50,100} with
+              flash, turn-1 nDCG@20 + same-run in-window wall conversion. THE k=50->100 window-widen is the
+              highest-EV arm (survive@100>>survive@50 = 22-35 wall golds at rank 51-100 the reranker never
+              sees; a structural unlock no weight replicates). w=1.0 safe / w=1.5 Blind-aggressive (Blind
+              ~99% new-artist -> weight wall-retention > aggregate recall). Updated prior real-Blind-gain
+              ~55-65% (driven by k=100), vs ~40% at k=50/w=1.0. Best arm >=0.2652 -> full-union confirm -> Blind.
