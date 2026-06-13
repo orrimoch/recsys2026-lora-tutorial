@@ -632,5 +632,41 @@ Reviews:      code-review subagent on the diff (REQUIRED); RecSys-researcher on 
 Process note: ONE unvalidated change isolated per Blind slot; gated on the FULL serve union, not a
               stripped dev proxy (the rule config 207 violated).
 --- run ---
-Result:       (pending build → human runs nb74 #4-quota + #12d-quota)
-Verdict:      (pending)
+Result:       (dev, turn-1, 505 wall golds; code-version confirmed fresh via hasattr(RRF_MODEL,'fuse_per_sub_quota')=True)
+                0.6B union (0.50 ship baseline): recall@50=0.4310 r@100=0.4950 | wall-survive@50= 0 @100= 0 (=0 by construction)
+                e5 replace, NO quota:            recall@50=0.4500 r@100=0.5200 | wall-survive@50=32 @100=54
+                e5 + quota q=1 (DECISION):        recall@50=0.4500 r@100=0.5200 | wall-survive@50=32 @100=54
+                e5 + quota q=2:                   recall@50=0.4500 r@100=0.5200 | wall-survive@50=32 @100=54
+                e5 + quota q=3:                   recall@50=0.4500 r@100=0.5200 | wall-survive@50=32 @100=54
+Verdict:      FAIL. Condition A (wall-survive@50 ≥ +25 vs e5-no-quota) scored +0 — byte-identical 32→32 at
+              every q. The quota is a confirmed NO-OP (not a silent failure: the 10 unit tests prove it
+              promotes out-of-window items in synthetic cases; here the reserved set is empty every query).
+              MECHANISM (proven, not artifact): e5 is a full-weight (w=1.0) channel so its top-q picks
+              ALREADY land in the fused top-50 → top-q reservation injects nothing. The wall golds RRF drops
+              are e5's SOLO rescues at DEEP ranks (weak solo score 1/(60+rank) loses to multi-channel sums) —
+              top-q never touches them. This is why up-weighting worked (boosts ALL e5 items incl. deep golds,
+              EXP-010 32→57) but quota-top-q can't. Fusion is the 7th flat retrieval/fusion wall lever.
+              SIDE NOTE: e5-replacement itself is a small real recall win vs 0.6B (recall@50 +0.019, +32 wall
+              golds into the window) — but already banked marginal/Blind-unconfirmable (EXP-009 Phase B).
+              THE LOOP WORKED: the $0 mechanism cell caught a mis-targeted design before any Blind slot or $.
+Reviews:      RecSys-researcher = CONFIRM-FAIL + ONE $0 salvage probe before pivot. (1) FAIL unambiguous,
+              deep-rank diagnosis mechanically airtight. (2) the top-q test addressed ZERO of the 61 solo
+              golds EXP-009 Phase B measured RRF dropping (-63%); a SOLO-channel quota (reserve e5 items
+              found by NO other channel, any rank) is a genuinely DIFFERENT, untested target. (3) BUT gate it
+              first with a $0 e5-rank-distribution probe on the dropped solo golds — if they cluster DEEP
+              (~50-100), no reservation reaches a weak deep signal w/o a precision blowup → fusion EXHAUSTED.
+              (4) pro-pg = LOW-EV (EXP-004 pessimism upheld; the EXP-006 ranker-tier analogy is weak — the
+              ranker reads the whole window, pg hits the 99%-new-artist REACHABILITY wall + must ground into
+              the 47k catalog where the gold may be absent; ~+0.002-0.005, inside noise — do NOT burn a slot).
+              (5) HONEST highest-EV lever = RESPONDER/LLM axis: 7 flat fusion levers + we're now INSIDE the
+              leader composite band (0.50; leaders 0.49-0.57) while nDCG (0.33) stays below leaders → their
+              edge is partly uncrackable nDCG + partly LLM we CAN move. LLM headroom 4.35→~4.95 = +0.036
+              composite (clears ±0.05 only at the top); needs a responder-MODEL/PROMPT change (+0.5 LLM
+              target), not micro-tuning. code-review N/A (config-only dev cells; the rrf.py quota code was
+              GO-reviewed at commit 3dfea99).
+Decision:     BANK FAIL. NEXT = run the $0 salvage probe (nb74 #4-quota-diag, e5-rank of the dropped wall
+              golds). DEEP → fusion exhausted → pivot loop to the RESPONDER/LLM axis (the only real-headroom
+              lever; target +0.5 LLM via a responder model/prompt change, NOT pro-pg). SHALLOW-MID → build a
+              solo-channel quota (reserve e5 items found by no other channel) as one more cheap dev gate.
+              config 205 = 0.50 REMAINS BEST. quota code stays in repo (off by default, symmetric path
+              bit-identical) — reusable if a future channel's solo rescues live at shallow rank.
