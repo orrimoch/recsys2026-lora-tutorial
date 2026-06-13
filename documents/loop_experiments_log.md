@@ -123,5 +123,24 @@ Reviews:      code-review N/A (running built code, no diff). RecSys-researcher R
               dev-gate verdict before banking. Tier-3 watch: dev is a cold-Blind-biased proxy — a
               dev nDCG gain must pass the turn-1 robustness check before we trust Blind transfer.
 --- run ---
-Result:       (pending human run: nb74 cells 1→3→53→54)
-Verdict:      (pending)
+Result:       in-pool SASRec-ALONE OVERALL dev nDCG@20: smoke(300 sess/1ep)=0.0922; FULL(71470
+              trainable/121592 = 58.8% gold-in-pool, 3 epochs, loss 3.309→3.184→3.105)=0.0885.
+              vs lgbm_relev 0.1652, recall-only 0.1498.
+Verdict:      FAIL (0.0885 < 0.1652; below even recall-only 0.1498). Training-INVARIANT (40× data /
+              3× epochs: 0.0922→0.0885 with loss monotone-down) → ceiling is STRUCTURAL, not undertraining.
+              CONFOUND (RecSys review, structurally derivable not post-hoc): gate ranks the SERVE pool
+              (union WITH SASRec, use_sasrec=True) but the model trained on the SASRec-FREE pool. The
+              inpool model IS a SASRec dual-encoder → it over-scores SASRec-retrieved items, displacing
+              the conversion-gap golds (which SASRec did NOT retrieve) below rank 20. Model has real
+              signal (≈2.1× random) but can't beat the wRRF prior it discards.
+Reviews:      RecSys-researcher = SIGN-OFF on FAIL banking with the confound framing. It recommended
+              EXP-003 (option c: LGBM + inpool-score-as-feature). Claude OVERRULES jumping there:
+              inpool_score on TRAIN is in-sample (model trained on train) = the documented sasrec_rank_inv
+              leak trap (+internal/−dev) unless OOF cross-fit; and the conversion-gap bucket ceiling is
+              small (~+0.01). Option (c) DEFERRED (only with proper OOF).
+Decision:     BANK FAIL; in-pool-ALONE closed. NEXT = ONE cheap decisive diagnostic: re-gate on the
+              MATCHED SASRec-free pool (cell 54 use_sasrec=False) — does the model rank its training-
+              matched pool well? PASS-on-matched → confound confirmed, in-pool salvageable via a
+              pool-parity retrain (parked, leak-aware). FLAT(~0.09)-on-matched → in-pool truly dead →
+              pivot to the 42% new-artist WALL (propose-ground variant) = the bigger nDCG bucket.
+Memory:       [[project_autonomous_research_loop_2026_06_13]] + [[project_ndcg_campaign_status_2026_06_08]].
