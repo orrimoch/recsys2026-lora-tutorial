@@ -224,5 +224,29 @@ Decision rule: PASS if LLM(cs+pg) − LLM(cs) > +0.005 → pg CONVERTS → fold 
 Budget:       0 Blind (DEV gate). ~$0.6-0.9 Gemini. Blind confirm only after a dev PASS.
 Reviews:      code-review N/A Phase 1 (built cell). RecSys-researcher REQUIRED on the verdict.
 --- run ---
-Result:       (pending human run: nb74 cell 14 #4-pg-conv; warm session from EXP-003, else 1→3→4→14)
+Result:       DEFERRED (operator opted not to run). The generative pg conversion remains THE untested
+              open question — revisit if the cheaper query-side probes (EXP-005) also close out.
+Verdict:      (deferred)
+
+---
+
+## EXP-005 — query enrichment: culture + profile (#3.2) (DEV recall gate, no Blind) — 2026-06-13
+Hypothesis:   EXP-003 isolated the QUERY (not the catalog vectors) as the suspect for why content
+              channels add no turn-1 reach. Enriching the retrieval query with preferred_musical_culture
+              + user_profile (raw_enriched) — beyond the listener_goal already in raw_with_goal — lifts
+              turn-1 recall@100 by surfacing taste/intent the dialog alone lacks. L4-safe, no LLM,
+              config-only (build_retrieval_query mode), nb74 cell 8 (#4-enr).
+Lever:        recall (query enrichment). nb74 cell 8, NO code diff.
+Pre-registered gate: turn-1 recall@100, raw_enriched vs raw_with_goal baseline (3-channel union, cell 8).
+Baseline:     raw_with_goal turn-1 recall@100 (printed by cell 8 as the baseline line).
+Decision rule: PASS if raw_enriched turn-1 recall@100 lifts ≥ +0.01 (beyond SE≈0.016/noise) → query
+              enrichment is a real lever → wire serve (build_retrieval_query raw_enriched) + retrain +
+              nDCG-conversion + Blind confirm.
+              INCONCLUSIVE/FAIL if lift < +0.01 → culture+profile add no cold reach → combined with
+              EXP-003 (catalog vectors flat) this DEFINITIVELY closes the retrieval/query side →
+              commit to the architectural build (#2: re-embed catalog with a stronger encoder).
+Budget:       0 Blind; no GPU model load (dense encoder cached), no LLM cost. Runnable now.
+Reviews:      code-review N/A (config-only built cell). RecSys-researcher REQUIRED on the verdict.
+--- run ---
+Result:       (pending human run: nb74 cell 8 #4-enr; warm session from EXP-003, else 1→3→4→8)
 Verdict:      (pending)
