@@ -24,6 +24,15 @@ Memory:       <file written/updated>
 
 ---
 
+## BUILD NOTES / open refinements (2026-06-13)
+- nb74 emitter reports a RETRIEVAL-ONLY composite (cat_div/lex_div = 0; it is the retrieval
+  gate). The loop MUST judge nb74 on `ndcg@20` (turn-1), not its `composite` field.
+- nb80 emitter records BLIND (Tier-2) metrics the human pastes from the CodaBench result page.
+  It is NOT the Tier-1 LLM signal — blind scores can't be computed locally.
+- FOLLOW-UP (before the first responder iteration): wire a RESULTS_JSON emitter onto the DEV
+  responder + OFFLINE Gemini judge path (gemini_judge_responses.py — likely nb79/nb75) so the
+  Tier-1 LLM-axis reward is captured locally and leak-free. The plan wired nb74+nb80 only.
+
 ## EXP-000 — example (do not run) — 2026-06-13
 Hypothesis:   Gemini responder on config-203 track_ids (nDCG 0.30, no Q*) lifts composite to ~0.47.
 Lever:        responder
