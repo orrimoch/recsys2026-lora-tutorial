@@ -54,10 +54,13 @@ Hypothesis:   Putting config-203 Blind-A track_ids (Blind nDCG 0.30, no intent_s
               (203 nDCG 0.30 from its 0.37 submission; Gemini LLM ~4.2 from the 204 submission),
               so this banks the best-known config to the leaderboard.
 Lever:        responder base / recall (drop intent_state Q* by using the 203 recall stack)
-Change:       config-203 Blind-A track_ids + nb80 Gemini responder swap (TOP_N=1 known-good,
-              BEST_OF=3, plain prompt, STRUCTURED_PERSONALITY=False). NO code change — track_ids
-              untouched, only predicted_response regenerated. (TOP_N=1 is the v5-kto-winning
-              setting that produced LLM ~4.2; TOP_N=3 was a speculative dilution risk + slower.)
+Change:       config-203 Blind-A track_ids + nb80 Gemini responder swap (TOP_N=1, BEST_OF=1,
+              gemini-2.5-pro, plain prompt, STRUCTURED_PERSONALITY=False). NO code change —
+              track_ids untouched, only predicted_response regenerated.
+              BEST_OF=1 chosen for fast iterations AND apples-to-apples: config 204's 0.44
+              baseline was itself produced with bo1 (zip ...204-full-gemini-bo1.zip), so this
+              isolates the recall/nDCG lever (203's 0.30 vs 204's 0.24), not the responder.
+              (TOP_N=1 is the v5-kto-winning setting; TOP_N=3 was a speculative dilution risk.)
 Pre-registered gate:  Blind-A composite (CodaBench) ≥ 0.44 (current best, config 204); target ≈ 0.47.
 Baseline:     config 204 = Blind 0.44 (nDCG 0.24 / Cat 0.03 / Lex 0.79 / LLM 4.2);
               config 203 = Blind 0.37 (nDCG 0.30 / LLM 2.85 v5-kto).
