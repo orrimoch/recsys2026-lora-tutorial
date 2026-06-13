@@ -155,3 +155,31 @@ Next lever:   PIVOT to the 42% new-artist recall WALL (the bigger nDCG bucket) �
               as EXP-003. Cheapest first probe: attributes-qwen3 orthogonal dense channel (training-free,
               cold-query-safe). Stronger option: a goal-seeded generate→retrieve propose-ground variant.
 Memory:       [[project_autonomous_research_loop_2026_06_13]] + [[project_ndcg_campaign_status_2026_06_08]].
+
+---
+
+## EXP-003 — attributes-qwen3 2nd dense channel (DEV recall gate, no Blind slot) — 2026-06-13
+Hypothesis:   Adding the orthogonal, precomputed attributes-qwen3 dense channel (use_attributes=True)
+              to union+SASRec lifts TURN-1 recall@100 (the cold/Blind proxy) beyond noise — reaching
+              new-artist wall golds the metadata-only content channel misses. attributes-qwen3 is
+              verified orthogonal to metadata-qwen3 (0.62 cosine, 3.6% top-10 overlap). Training-free,
+              config-only; channel + embeddings + tests already exist (report §3.1 "START HERE", un-run).
+Lever:        recall (orthogonal content channel). nb74 cell 7 (#4-attr), NO code diff.
+Pre-registered gate: nb74 cell 7 — TURN-1 recall@100 with use_attributes=True (best of w∈{0.3,0.4,0.7})
+              vs the union+SASRec baseline turn-1 recall@100 (printed by the same cell, by-turn table).
+Baseline:     union+SASRec recall@100 overall ≈ 0.4961; turn-1 baseline read from the cell-7 output.
+Decision rule: PASS if best-w turn-1 recall@100 lifts ≥ +0.01 AND consistent across ≥2 of the 3 weights
+              (robust, not a single-weight fluke) → proceed to the nDCG-CONVERSION check (campaign trap:
+              recall-up-but-Blind-nDCG-flat, so a recall PASS is necessary NOT sufficient). Conversion
+              test = Blind confirm (203-stack + use_attributes track_ids + Gemini responder; cheap @10/day).
+              INCONCLUSIVE if lift < +0.01 (within noise) → orthogonal vectors don't add turn-1 reach with
+              the EXISTING query → query is the bottleneck → next = structured content query (#3.1b cell 10)
+              or goal+culture enrichment (#3.2 cell 8).
+              FAIL if turn-1 recall DROPS at all weights → attributes injects RRF noise → don't use.
+Budget:       0 Blind (DEV gate). Blind conversion test only after a dev PASS.
+Reviews:      code-review N/A (config-only built cell). RecSys-researcher REQUIRED on the verdict — is
+              the turn-1 lift beyond N(turn-1) sampling noise, and likely to CONVERT vs the documented
+              recall-up/Blind-flat pattern?
+--- run ---
+Result:       (pending human run: nb74 cells 1→3→4→7)
+Verdict:      (pending)
