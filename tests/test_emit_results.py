@@ -5,7 +5,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.emit_results import build_results_json, format_results_block
+from scripts.emit_results import build_results_json, format_results_block, print_results_block
 
 
 def test_composite_matches_local_eval_with_llm():
@@ -40,3 +40,15 @@ def test_format_block_is_parseable():
     parsed = json.loads(block.split("\n", 1)[1])
     assert parsed["config"] == 205
     assert parsed["n_sessions"] == 80
+
+
+def test_print_results_block_round_trips(capsys):
+    payload = print_results_block(
+        exp="044", config=207, ndcg=0.30, cat_div=0.03, lex_div=0.79,
+        llm_judge=4.2, n_sessions=80, gate="turn1_cell49",
+    )
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("RESULTS_JSON\n")
+    parsed = json.loads(out.split("\n", 1)[1])
+    assert parsed == payload
+    assert payload["config"] == 207

@@ -45,7 +45,7 @@ def build_results_json(
         "lexical_diversity": float(lex_div),
     }
     composite = round(compute_composite_projected(scores, llm_judge), 4)
-    return {
+    payload = {
         "exp": exp,
         "config": int(config),
         "ndcg@20": round(float(ndcg), 4),
@@ -56,14 +56,17 @@ def build_results_json(
         "n_sessions": int(n_sessions),
         "gate": gate,
     }
+    assert set(payload) == set(REQUIRED_FIELDS), f"results payload keys {set(payload)} != REQUIRED_FIELDS"
+    return payload
 
 
 def format_results_block(payload: dict[str, Any]) -> str:
-    """Render the fenced block the human pastes back."""
+    """Render the sentinel-tagged block (RESULTS_JSON + a JSON line) the human pastes back."""
     return "RESULTS_JSON\n" + json.dumps(payload)
 
 
 def print_results_block(**kwargs: Any) -> dict[str, Any]:
+    """Build + print the RESULTS_JSON block; accepts the same kwargs as build_results_json."""
     payload = build_results_json(**kwargs)
     print(format_results_block(payload))
     return payload
