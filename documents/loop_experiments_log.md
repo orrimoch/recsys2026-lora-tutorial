@@ -224,9 +224,48 @@ Decision rule: PASS if LLM(cs+pg) − LLM(cs) > +0.005 → pg CONVERTS → fold 
 Budget:       0 Blind (DEV gate). ~$0.6-0.9 Gemini. Blind confirm only after a dev PASS.
 Reviews:      code-review N/A Phase 1 (built cell). RecSys-researcher REQUIRED on the verdict.
 --- run ---
-Result:       DEFERRED (operator opted not to run). The generative pg conversion remains THE untested
-              open question — revisit if the cheaper query-side probes (EXP-005) also close out.
-Verdict:      (deferred)
+Result:       (operator ran it after all) cell 14 #4-pg-conv, flash pg (gemini-2.5-flash, 20 prop):
+              turn-1 recall@100 cs 0.4950 → union(cs,pg) 0.5030 (+0.008); recall-only cs nDCG@20 0.1763;
+              LLM-rank cs 0.2256 → LLM-rank union(cs,pg) 0.2349 = +0.0093.
+Verdict:      PASS (per gate, +0.0093 > +0.005) — pg CONVERTS: FIRST nDCG lever to crack the wall AND rank
+              the rescued golds into top-20. RecSys corrections: (1) VALIDATES the mechanism, NOT a new gain
+              — config 203 (=0.4673 best) already has pg (same flash/20/llm-listwise). (2) UPPER BOUND for
+              203: cell-14 cs = union+SASRec ONLY (no ColBERT/CLAP); 203's richer pool already competes for
+              the same wall golds → pg net marginal in 203 ≤ +0.0093 (maybe ~0). Phase-2 stronger-pg LOW-EV:
+              doubling pg → ~+0.0045 composite ≈ 0.17 SE = invisible; the wall is structural.
+Reviews:      RecSys-researcher = APPROVE-WITH-CORRECTIONS. KEY REDIRECT: the LLM RANKER is the DOMINANT
+              nDCG driver — recall-only 0.1763 → LLM-rank 0.2256 = +0.0493 (5× pg's marginal +0.0093). A
+              STRONGER ranker (flash-lite → flash/pro) applies to ALL ~5000 pool golds, not pg's ~2% margin
+              → highest-EV unexplored lever (plausible +0.01-0.03 nDCG). → EXP-006.
+Decision:     BANK PASS (validation). DROP Phase-2 stronger-pg (structural ceiling). NEXT = EXP-006: upgrade
+              the LLM listwise ranker model (gemini-2.5-flash-lite → flash → pro) via nb74 cell 55
+              (#12d-llm-listwise), dev turn-1 nDCG@20 gate vs 0.2256. EXP-005 (query enrichment) PARKED (lower prior).
+
+---
+
+## EXP-006 — LLM listwise ranker MODEL upgrade (DEV gate, no Blind) — 2026-06-13
+Hypothesis:   The LLM listwise ranker is the DOMINANT nDCG driver (recall-only 0.1763 → flash-lite 0.2256
+              = +0.0493, 5× pg's marginal +0.0093) and it runs on the WEAKEST tier (gemini-2.5-flash-lite).
+              A stronger ranker (flash, then pro) reasons better over the 50 candidates → ranks more golds
+              into top-20 → lifts turn-1 nDCG@20 over the 0.2256 baseline. Applies to ALL pool golds (not
+              pg's ~2% margin) → highest-EV unexplored lever (RecSys review on EXP-004).
+Lever:        reranker (LLM listwise MODEL). nb74 cell 55 (#12d), config-only (GEMINI_MODEL sweep, no diff
+              to serve logic). NOTE: config 203/204 already use llm_listwise=flash-lite — this upgrades it.
+Pre-registered gate: turn-1 nDCG@20 (cell 55, cs pool) of gemini-2.5-flash (then pro) vs the flash-lite
+              baseline 0.2256, with valid-index ≥ 0.7 (parse quality — a stronger model that parses worse
+              is a failure mode, not a win).
+Baseline:     flash-lite turn-1 nDCG@20 = 0.2256 (re-confirmed in the sweep as MODELS[0]).
+Decision rule: PASS if (flash or pro) − flash-lite ≥ +0.005 AND valid-idx ≥ 0.7 → upgrade serve ranker
+              (config reranker_model_path) → full-dev confirm → Blind confirm (cheap: only the ranker
+              model swaps; recall + responder unchanged).
+              INCONCLUSIVE if < +0.005 → ranker model isn't the bottleneck at K=50 → nDCG ceiling is the
+              recall/pool, not the ranker → commit to the retrieval architectural build (#2 re-embed).
+              FAIL if stronger model REGRESSES or valid-idx < 0.7 → keep flash-lite.
+Budget:       0 Blind. ~$0.25-0.5/model on turn-1 (flash-lite + flash); pro extra if escalated.
+Reviews:      code-review N/A (config sweep in built cell). RecSys-researcher REQUIRED on the verdict.
+--- run ---
+Result:       (pending human run: nb74 cell 55 #12d; warm session from cell 4, else 1→3→4→55)
+Verdict:      (pending)
 
 ---
 
