@@ -32,10 +32,27 @@ def _first(v):
     return v
 
 
-def render_candidate(idx: int, tid: str, meta_lookup: dict) -> str:
-    """Compact, index-keyed candidate line: "[idx] artist - title - album [- tags]".
+_YEAR = re.compile(r"\d{4}")
+
+
+def _year(release_date) -> str:
+    """First 4-digit run of a release_date ('2006-12-06' -> '2006'); '' if none.
+    Tolerates list-valued / int / None catalog shapes."""
+    v = _first(release_date)
+    if v is None:
+        return ""
+    m = _YEAR.search(str(v))
+    return m.group(0) if m else ""
+
+
+def render_candidate(idx: int, tid: str, meta_lookup: dict,
+                     max_tags: int = 5, include_year: bool = False) -> str:
+    """Compact, index-keyed candidate line: "[idx] artist - title - album [(year)] [- tags]".
     The UUID is dropped (wasted context the LLM can't use); unknown tids fall back
-    to the bare tid so the line is never empty."""
+    to the bare tid so the line is never empty. EXP-014: `include_year` adds the
+    release year (era cue) and `max_tags` widens the genre/mood tag list — extra
+    signal the LLM matches against the goal, esp. for tracks it doesn't already know.
+    Defaults reproduce the original lean line (config 205 unchanged)."""
     md = meta_lookup.get(tid)
     if not md:
         return f"[{idx}] {tid}"
@@ -43,9 +60,13 @@ def render_candidate(idx: int, tid: str, meta_lookup: dict) -> str:
     title = _first(md.get("track_name")) or ""
     album = _first(md.get("album_name")) or ""
     core = " - ".join(p for p in (artist, title, album) if p) or tid
+    if include_year:
+        y = _year(md.get("release_date"))
+        if y:
+            core += f" ({y})"
     tags = md.get("tag_list") or []
     if tags:
-        core += " - " + ", ".join(str(t) for t in tags[:5])
+        core += " - " + ", ".join(str(t) for t in tags[:max_tags])
     return f"[{idx}] {core}"
 
 
@@ -70,7 +91,8 @@ def _profile_block(profile: Optional[dict]) -> str:
 def build_listwise_prompt(query: str, tids: list[str], meta_lookup: dict, k: int,
                           system_prompt: str, profile: Optional[dict] = None,
                           goal_category: Optional[str] = None,
-                          goal_specificity: Optional[str] = None) -> tuple[str, str]:
+                          goal_specificity: Optional[str] = None,
+                          rich_candidates: bool = False) -> tuple[str, str]:
     """Return (system, user). The user content carries all three TalkPlay streams:
     UserID->DB (profile/taste), Text Query + Chat History (`query`, already
     `raw_with_goal` so it ends in the listener_goal line), then the numbered
@@ -80,6 +102,10 @@ def build_listwise_prompt(query: str, tids: list[str], meta_lookup: dict, k: int
     pb = _profile_block(profile)
     if pb:
         lines.append(pb)
+    # EXP-014: surface the structured goal_category (accepted but never rendered
+    # before) — only in rich mode so the default prompt (config 205) is unchanged.
+    if rich_candidates and goal_category:
+        lines.append(f"goal category: {goal_category}")
     # specificity calibration (HH/HL/LH/LL: first char ~ how specific the target is)
     if goal_specificity and str(goal_specificity).upper().startswith("H"):
         lines.append("the listener wants ONE specific track — commit decisively to your single best match at rank 1.")
@@ -87,8 +113,11 @@ def build_listwise_prompt(query: str, tids: list[str], meta_lookup: dict, k: int
     lines.append(query.strip())
     lines.append("")
     lines.append("Candidates:")
+    # EXP-014 rich context: add release year + a wider tag list per candidate.
+    _max_tags = 12 if rich_candidates else 5
     for j, tid in enumerate(tids[:k], start=1):
-        lines.append(render_candidate(j, tid, meta_lookup))
+        lines.append(render_candidate(j, tid, meta_lookup,
+                                      max_tags=_max_tags, include_year=rich_candidates))
     lines.append("")
     lines.append("Output the candidate indices in ranked order, most relevant first, comma-separated, each exactly once:")
     return system_prompt, "\n".join(lines)
@@ -142,7 +171,8 @@ class LLMListwiseReranker:
                  client=None, meta_lookup: Optional[dict] = None, k: int = 50,
                  max_output_tokens: int = 512, max_retries: int = 3,
                  batch_size: int = 16, system_prompt: Optional[str] = None,
-                 system_prompt_path: Optional[str] = None) -> None:
+                 system_prompt_path: Optional[str] = None,
+                 rich_candidates: bool = False) -> None:
         if meta_lookup is not None:
             self.meta_lookup = meta_lookup
         else:
@@ -161,6 +191,7 @@ class LLMListwiseReranker:
         else:
             self.system_prompt = Path(system_prompt_path or _DEFAULT_PROMPT).read_text(encoding="utf-8")
         self.k = int(k)
+        self.rich_candidates = bool(rich_candidates)
         self.max_retries = int(max_retries)
         self.batch_size = int(batch_size)
         self.max_output_tokens = int(max_output_tokens)
@@ -169,7 +200,8 @@ class LLMListwiseReranker:
 
     # ---- cache (keyed on query + pool-head + model + max_output_tokens) -------
     def _cache_path(self, query: str, head: list[str]) -> Path:
-        key = query + "\n" + "\n".join(head) + "\n" + self.model + "\n" + str(self.max_output_tokens)
+        key = (query + "\n" + "\n".join(head) + "\n" + self.model + "\n"
+               + str(self.max_output_tokens) + "\n" + str(self.rich_candidates))
         h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
         return self.cache_root / f"{h}.json"
 
@@ -231,7 +263,8 @@ class LLMListwiseReranker:
                 queries[i], heads[i], self.meta_lookup, self.k, self.system_prompt,
                 profile=_parse_user_profile(user_profiles_raw[i]),
                 goal_category=goal_categories[i],
-                goal_specificity=goal_specificities[i]) for i in todo]
+                goal_specificity=goal_specificities[i],
+                rich_candidates=self.rich_candidates) for i in todo]
             raws = self._generate_raw(payloads)
             for i, raw in zip(todo, raws):
                 parsed = parse_ranking(raw, len(heads[i]))

@@ -262,6 +262,9 @@ class CRS_BASELINE:
         # the reranker reads + reorders). Default 50 = bit-identical to every shipped
         # config; reranker_k: 100 lets it see wall golds at union rank 51-100.
         reranker_k: int = 50,
+        # EXP-014: richer per-candidate context for the LLM listwise reranker
+        # (release year + wider tag list + goal_category). Off = config 205 prompt.
+        reranker_rich_candidates: bool = False,
         retrieval_topk: int = 20,
         response_max_new_tokens: int = 64,
         top_n_for_prompt: int = 1,
@@ -361,6 +364,7 @@ class CRS_BASELINE:
             multimodal_artifacts=reranker_multimodal_artifacts,
             max_output_tokens=reranker_max_output_tokens,
             k=reranker_k,
+            rich_candidates=reranker_rich_candidates,
         )
         # Tier-2 #4.1: lazily built when the reranker lists qwen_meta_cos/bm25_score.
         self._relevance_scorer = None

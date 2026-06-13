@@ -26,3 +26,16 @@ def test_cache_key_includes_max_output_tokens(tmp_path):
     # same budget + same query/head must be stable
     assert r512._cache_path(q, head) == _mk(tmp_path, 512)._cache_path(q, head)
     assert r2048.max_output_tokens == 2048
+
+
+def test_cache_key_includes_rich_candidates(tmp_path):
+    # EXP-014: rich vs lean produce DIFFERENT prompts -> must not collide in cache,
+    # or the lean/rich A/B reads stale results from the other arm.
+    lean = LLMListwiseReranker("db", ["all_tracks"], None, str(tmp_path),
+                               model_path="gemini-2.5-flash", client=object(),
+                               meta_lookup={}, system_prompt="p", rich_candidates=False)
+    rich = LLMListwiseReranker("db", ["all_tracks"], None, str(tmp_path),
+                               model_path="gemini-2.5-flash", client=object(),
+                               meta_lookup={}, system_prompt="p", rich_candidates=True)
+    q, head = "a query", ["t1", "t2", "t3"]
+    assert lean._cache_path(q, head) != rich._cache_path(q, head)

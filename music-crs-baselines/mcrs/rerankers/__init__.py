@@ -22,6 +22,7 @@ def load_reranker_module(
     multimodal_artifacts: Optional[str] = None,
     max_output_tokens: int = 512,
     k: int = 50,
+    rich_candidates: bool = False,
 ) -> Optional[Any]:
     """Return a reranker instance or None if reranker_type is falsy.
 
@@ -69,6 +70,7 @@ def load_reranker_module(
             model_path=model_path,
             max_output_tokens=max_output_tokens,
             k=k,
+            rich_candidates=rich_candidates,
         )
     if reranker_type == "pro_rank":
         # W3 default reranker — last-token-logit-diff scoring over Qwen-0.5B.

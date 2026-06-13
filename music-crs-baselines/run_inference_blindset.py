@@ -87,6 +87,7 @@ def main(args):
     reranker_chain_cfg = config.get("reranker_chain", None)
     reranker_max_output_tokens = int(config.get("reranker_max_output_tokens", 512))
     reranker_k = int(config.get("reranker_k", 50))
+    reranker_rich_candidates = bool(config.get("reranker_rich_candidates", False))
     retrieval_topk = int(config.get("retrieval_topk", 20))
     response_max_new_tokens = int(config.get("response_max_new_tokens", 64))
     top_n_for_prompt = int(config.get("top_n_for_prompt", 1))
@@ -151,6 +152,7 @@ def main(args):
         reranker_multimodal_artifacts=reranker_multimodal_artifacts,
         reranker_max_output_tokens=reranker_max_output_tokens,
         reranker_k=reranker_k,
+        reranker_rich_candidates=reranker_rich_candidates,
         retrieval_topk=retrieval_topk,
         response_max_new_tokens=response_max_new_tokens,
         top_n_for_prompt=top_n_for_prompt,
