@@ -17,7 +17,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -35,14 +35,15 @@ def poll_until_scored(
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> dict:
     """Poll an injected get_status(submission_id) until finished/failed or tries exhausted."""
-    for _ in range(max_tries):
+    for i in range(max_tries):
+        if i > 0:
+            sleep_fn(wait_s)
         status = get_status(submission_id)
         state = str(status.get("status", "")).lower()
         if state in _FINISHED:
             return status
         if state in _FAILED:
             raise RuntimeError(f"submission {submission_id} failed: {status}")
-        sleep_fn(wait_s)
     raise TimeoutError(f"submission {submission_id} not scored after {max_tries} tries")
 
 
@@ -69,3 +70,8 @@ def submit_zip(zip_path: Path, competition_id: str, phase_id: str) -> str:
 def _default_status_getter(submission_id: str) -> dict:
     """GET submission status from CodaBench. ENDPOINTS PENDING DISCOVERY."""
     raise NotImplementedError("fill in after the DISCOVERY step (see module docstring)")
+
+
+def poll_submission(submission_id: str, **kwargs: Any) -> dict:
+    """Poll the live CodaBench status endpoint. Wires _default_status_getter (PENDING DISCOVERY)."""
+    return poll_until_scored(_default_status_getter, submission_id, **kwargs)
