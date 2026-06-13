@@ -294,6 +294,10 @@ Verdict:      PASS (clean, trustworthy). +0.0344 ≫ +0.005 gate; valid-idx 0.46
               valid Blind proxy. THE biggest single-change nDCG lever of the campaign.
 Translation:  +0.0344 dev turn-1 → ~+0.046 Blind nDCG (×1.33) → ~+0.023 composite → 0.4673 → ~0.49 (upper
               end; Blind n=80 SE±0.07 so one submission is a production-gate BET, not statistical proof).
+BLIND CONFIRM: 🔴 RUNNING (2026-06-13) — nb82 #82-blindA-205 (config 205, flash ranker @2048 + Gemini bo1,
+              top-n 1 = the 0.4673 baseline → ONLY the ranker changed). Serve wiring code-reviewed = GO.
+              AWAITING the CodaBench score → JUDGE vs 0.4673 → RecSys review → record + [blindA] budget row
+              (submission 2/wk; real cap 10/day). FRESH-SESSION RESUME = this line.
 Decision:     BANK PASS. NEXT = Blind confirm via config 205 = 203 + reranker_model_path: gemini-2.5-flash
               + reranker_max_output_tokens: 2048 + Gemini responder. CRITICAL FIX FIRST (review): the serve
               path (run_inference_blindset → CRS_BASELINE → load_reranker_module → LLMListwiseReranker) does
