@@ -181,5 +181,21 @@ Reviews:      code-review N/A (config-only built cell). RecSys-researcher REQUIR
               the turn-1 lift beyond N(turn-1) sampling noise, and likely to CONVERT vs the documented
               recall-up/Blind-flat pattern?
 --- run ---
-Result:       (pending human run: nb74 cells 1→3→4→7)
-Verdict:      (pending)
+Result:       turn-1 recall@100: baseline(union+SASRec)=0.4950; +attributes w=0.3→0.4960(+0.0010),
+              w=0.4→0.4960(+0.0010), w=0.7→0.4980(+0.0030). Overall(flat): 0.5062→~0.5086-0.5092.
+              Channel fired (dense_attributes_qwen3_instruct ran, 8000/8000 query-cache hits).
+Verdict:      INCONCLUSIVE (flat). Best turn-1 lift +0.003 << +0.01 bar; SE(n=1000)≈0.016 → ~0.2 SE = noise.
+              Weight-INVARIANT (0.496/0.496/0.498 across w=0.3→0.7) → hits REDUNDANT at recall@100 despite
+              EMBEDDING orthogonality (0.62 cos / 3.6% overlap ≠ retrieved-set orthogonality). Channel
+              new-candidate contribution not directly measured; assumed redundant by weight-invariance.
+Reviews:      RecSys-researcher = APPROVE-WITH-CORRECTIONS. STRATEGIC: 6th flat turn-1 retrieval lever
+              (after bge, CLAP, lyrics, cf-bpr, related-artist) → turn-1 recall is near a HARD CEILING for
+              retrieval-only methods. The 43% wall is a REACHABILITY problem (98.8% new-artist, no
+              similarity path @100); query/channel quality can't create a path that doesn't exist. Only
+              GENERATIVE retrieval (LLM hypothesizes the new artist → retrieve against it) can.
+Decision:     BANK INCONCLUSIVE. attributes-qwen3 CLOSED (config-only, leave off). Retrieval-only nDCG is
+              near-ceiling. NEXT = pivot to the GENERATIVE lever: propose-ground is already in config 203
+              (gemini-flash, 20 proposals) yet the wall persists at nDCG 0.30 → test a STRONGER pg
+              (gemini-2.5-pro / more proposals / goal-seeded) on the wall + nDCG conversion via nb74
+              cells 13 (#4-pg) + 14 (#4-pg-conv). Cheaper alt (lower prior): #3.2 goal+culture probe
+              (cell 8) — but listener_goal is already in raw_with_goal, so it only adds culture+profile.
