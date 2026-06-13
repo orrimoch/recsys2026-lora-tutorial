@@ -48,3 +48,29 @@ def test_packages_when_ok(tmp_path, monkeypatch):
     assert Path(plan.zip_path).exists()
     with zipfile.ZipFile(plan.zip_path) as z:
         assert z.namelist() == ["prediction.json"]
+
+
+def test_schema_error_does_not_touch_budget(tmp_path, monkeypatch):
+    pred = _write_pred(tmp_path)
+    monkeypatch.setattr(ls, "load_prediction", lambda p: json.loads(Path(p).read_text()))
+    monkeypatch.setattr(ls, "validate_schema", lambda preds, split: ["missing field"])
+
+    def _boom(*a, **kw):
+        raise AssertionError("check_budget must not be called when schema fails")
+
+    monkeypatch.setattr(ls, "check_budget", _boom)
+    plan = ls.prepare_submission(pred, tmp_path / "out.zip")
+    assert plan.ok is False
+    assert "schema" in plan.reason
+
+
+def test_blocked_when_prediction_unloadable(tmp_path, monkeypatch):
+    missing = tmp_path / "nope.json"  # does not exist
+
+    def _raise(p):
+        raise FileNotFoundError(str(p))
+
+    monkeypatch.setattr(ls, "load_prediction", _raise)
+    plan = ls.prepare_submission(missing, tmp_path / "out.zip")
+    assert plan.ok is False
+    assert "load" in plan.reason

@@ -8,6 +8,7 @@ budget gate is enforced regardless of how the final upload happens.
 """
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,8 +22,9 @@ from scripts.validate_prediction import (  # noqa: E402
     validate_schema,
     check_budget,
     package_zip,
-    _default_submission_log,
 )
+
+_DEFAULT_LOG = REPO_ROOT / "documents" / "submissions_log.md"
 
 
 @dataclass
@@ -41,9 +43,12 @@ def prepare_submission(
     weekly_cap: int = 3,
     submission_log: Optional[Path] = None,
 ) -> SubmissionPlan:
-    log = Path(submission_log) if submission_log else _default_submission_log()
+    log = Path(submission_log) if submission_log else _DEFAULT_LOG
 
-    preds = load_prediction(prediction_path)
+    try:
+        preds = load_prediction(prediction_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return SubmissionPlan(False, f"could not load prediction: {exc}", None, "")
     errors = validate_schema(preds, split)
     if errors:
         return SubmissionPlan(False, f"schema invalid: {list(errors)[:3]}", None, "")
