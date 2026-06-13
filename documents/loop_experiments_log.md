@@ -670,3 +670,48 @@ Decision:     BANK FAIL. NEXT = run the $0 salvage probe (nb74 #4-quota-diag, e5
               solo-channel quota (reserve e5 items found by no other channel) as one more cheap dev gate.
               config 205 = 0.50 REMAINS BEST. quota code stays in repo (off by default, symmetric path
               bit-identical) — reusable if a future channel's solo rescues live at shallow rank.
+
+--- SALVAGE PROBE (#4-quota-diag) ---
+Result:       e5 finds 97/505 wall golds in its top-100; the e5-union surfaces 54 @100; 43 are LOST (e5
+              finds, union drops <100). e5-rank of the 43 lost: rank 1-10 = 0, 11-20 = 0, 21-50 = 19 (44%),
+              51-100 = 24 (56%); MEDIAN e5-rank = 54.
+Verdict:      SOLO-CHANNEL QUOTA = DEAD (no dev gate needed — probe is decisive). ZERO lost golds at e5
+              shallow rank (1-20); all 43 at rank ≥21, median 54. Any reservation catching them must reserve
+              e5's rank 21-100 (overwhelmingly non-gold) → precision blowup. FUSION IS EXHAUSTED as a wall
+              lever (the dropped wall golds are a genuinely weak deep signal; nothing surfaces them without
+              injecting more noise than gold). EXP-012 fully closed.
+KEY PIVOT:    The probe also quantified a SEPARATE, still-open lever = the RERANKER WINDOW (bucket B, NOT
+              fusion): of e5-union wall golds, survive@50=32 vs @100=54 → 22 wall golds at UNION rank 51-100;
+              on the 0.6B ship pool, recall@50 0.4310 vs recall@100 0.4950 → ~6.4% of turn-1 golds at pool
+              rank 51-100 that the k=50 reranker NEVER reads. Widening k=50→100 lets the proven 87.5%-
+              conversion reranker reach them. → EXP-013.
+
+---
+
+## EXP-013 — reranker WINDOW widen k=50→100 (DEV gate, no Blind slot) — 2026-06-13
+Hypothesis:   nDCG loss is two buckets: A=reachability (the wall, STRUCTURAL, exhausted) and B=conversion
+              (gold in pool, not top-20). The reranker is excellent (87.5% in-window) so most of B is "gold
+              in the pool at rank 51-100 that the k=50 reranker never reads." Dev: 0.6B ship pool recall@50
+              0.4310 vs @100 0.4950 → ~6.4% of turn-1 golds sit at pool rank 51-100. Widening the reranker
+              window k=50→100 (with max_output_tokens 4096 so flash, a thinking model, doesn't truncate the
+              longer list) lets the reranker convert them → lifts turn-1 nDCG@20. ONE knob vs the 0.50 best.
+Lever:        reranker INPUT COVERAGE (window k) — distinct from reranker QUALITY (tapped) and from fusion
+              (exhausted). Lower stripped-proxy risk than fusion levers: window doesn't depend on channel
+              competition, only on whether golds sit at 51-100 (they do) + whether flash degrades at k=100
+              (reranker-intrinsic, faithfully reproduced in dev).
+Change:       nb74 cell `#12d-rwin` — rerank the 0.6B ship pool (cs) at k=50 (=config 205) vs k=100
+              (max_output_tokens 4096), flash, turn-1; report nDCG@20 + valid-idx (truncation guard) +
+              conversion of the rank-51-100 golds into top-20. No code change (reranker_k already threaded).
+Pre-registered gate: turn-1 nDCG@20(k=100) − nDCG@20(k=50, same pool/run) ≥ +0.005 AND valid-idx ≥ 0.6.
+Baseline:     flash@k50 on the 0.6B pool, printed in-run (within-run A/B; ≈0.2602 historical ref).
+Decision rule: PASS → config 209 = config 205 + reranker_k 100 + reranker_max_output_tokens 4096 (ONE change
+                  vs the 0.50 best) → Blind (PRO responder unchanged). Expected ~0.50-0.52.
+               INCONCLUSIVE/valid-idx<0.6 → flash truncates/degrades at 100 candidates → escalate the RANKER
+                  to gemini-2.5-pro at k=100 (handles 100 better) as EXP-014 before abandoning the window.
+               FAIL (k=100 ≤ k=50, valid-idx ok) → no convertible golds at 51-100 → window tapped → pivot to
+                  the RESPONDER/LLM axis (RecSys: the only remaining real-headroom lever).
+Budget:       0 Blind. ~$2-4 flash (two k arms, turn-1). Blind only after a dev PASS.
+Reviews:      code-review N/A (config-only dev cell). RecSys-researcher on the verdict (+ design review queued).
+--- run ---
+Result:       (pending human run: nb74 #12d-rwin; requires cell 4 + GEMINI_API_KEY)
+Verdict:      (pending)
