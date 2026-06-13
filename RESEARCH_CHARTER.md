@@ -35,8 +35,13 @@ from memory + benchmarks. Prior: responder near ceiling, recall = the wall, rera
 tapped out — but re-evaluate per the Tier-3 watch.
 
 ## Submission budget
-Weekly blind cap (validate_prediction.check_budget, default weekly_cap=3). Confirm the real
-CodaBench cap during setup and set it here: WEEKLY_CAP = <confirm>.
+Real CodaBench cap = 10 submissions/DAY (confirmed 2026-06-13). Blind is NOT scarce — but the
+80-session blind set is noisy (±0.05) and over-probing it = leaderboard overfitting. So Tier-2
+stays a CONFIRMATION channel, NEVER the search signal: gate the SEARCH on Tier-1 (local/dev),
+spend Blind to CONFIRM dev-gated winners + small variant sets, stay well under 10/day.
+NOTE: validate_prediction.check_budget still enforces a conservative weekly_cap=3 (self-imposed,
+not the real limit). Pass weekly_cap=10 (or add a daily-10 gate) when a run needs >3/week —
+follow-up code change (TDD + review).
 
 ## Pre-registration rule
 Before every run, write the loop_experiments_log.md entry (hypothesis + exact gate + honest
