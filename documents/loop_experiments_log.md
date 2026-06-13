@@ -264,8 +264,22 @@ Decision rule: PASS if (flash or pro) − flash-lite ≥ +0.005 AND valid-idx �
 Budget:       0 Blind. ~$0.25-0.5/model on turn-1 (flash-lite + flash); pro extra if escalated.
 Reviews:      code-review N/A (config sweep in built cell). RecSys-researcher REQUIRED on the verdict.
 --- run ---
-Result:       (pending human run: nb74 cell 55 #12d; warm session from cell 4, else 1→3→4→55)
-Verdict:      (pending)
+Result:       (after key fix) turn-1 nDCG@20: flash-lite 0.2259 (valid-idx 0.82, ≈ baseline 0.2256);
+              gemini-2.5-flash 0.2450 (+0.0191, valid-idx 0.136). [first run was broken: both 0.1763 /
+              valid-idx 0.0 = GEMINI key not reaching the cell → pure passthrough; fixed cell to self-set key.]
+Verdict:      INCONCLUSIVE-PROMISING. flash beats the +0.005 nDCG gate by a lot (+0.0191) BUT FAILS the
+              valid-idx≥0.7 parse-quality bar (0.136). Per RecSys review: the +0.0191 is REAL in the data
+              but UNVERIFIED in cause — most likely flash (verbose) outputs a format/length the parser
+              (tuned for flash-lite's terse comma-list) mostly drops → we see only ~7 top picks (which
+              dominate nDCG@20) + tail passthrough. Real top-position win OR parse artifact. The
+              pre-registered valid-idx≥0.7 gate is too blunt (over-penalizes benign tail passthrough);
+              better gate = nDCG@20 on parsed-subset vs passthrough-subset + top-10 commit rate.
+Reviews:      RecSys-researcher = INCONCLUSIVE-PROMISING. NEXT = inspect flash's RAW output (cell 12d-diag,
+              max_output_tokens=2048, 5 queries): format mismatch vs truncation vs genuine short list.
+              Then fix parser/tokens, re-run; if valid-idx recovers AND nDCG holds → real win
+              (+0.0191 nDCG ≈ +0.0096 composite; on Blind maybe +0.012-0.025 — worth a Blind confirm).
+Decision:     DON'T bank as PASS. The ranker-upgrade lever is OPEN + the most promising of the session.
+              NEXT = DIAG (nb74 #12d-diag raw-output inspection) → fix parser → re-run EXP-006.
 
 ---
 
