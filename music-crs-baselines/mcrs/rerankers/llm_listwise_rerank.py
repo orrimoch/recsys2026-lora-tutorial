@@ -163,12 +163,13 @@ class LLMListwiseReranker:
         self.k = int(k)
         self.max_retries = int(max_retries)
         self.batch_size = int(batch_size)
+        self.max_output_tokens = int(max_output_tokens)
         self.cache_root = Path(cache_dir) / "llm_listwise"
         self.cache_root.mkdir(parents=True, exist_ok=True)
 
-    # ---- cache (keyed on query + pool-head + model) --------------------------
+    # ---- cache (keyed on query + pool-head + model + max_output_tokens) -------
     def _cache_path(self, query: str, head: list[str]) -> Path:
-        key = query + "\n" + "\n".join(head) + "\n" + self.model
+        key = query + "\n" + "\n".join(head) + "\n" + self.model + "\n" + str(self.max_output_tokens)
         h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
         return self.cache_root / f"{h}.json"
 
