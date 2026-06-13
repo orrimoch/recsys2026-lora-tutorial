@@ -387,3 +387,33 @@ Queued:       EXP-009 = instruction-tuned asymmetric retriever (e5-large-instruc
 --- run ---
 Result:       (pending human run: nb74 cells 1→3→4→8 #4-qwen3-4b; warm session from EXP-006 reuses 4)
 Verdict:      (pending)
+
+---
+
+## EXP-009 — instruction-tuned ASYMMETRIC dense encoder (multilingual-e5-large-instruct) — 2026-06-13
+Hypothesis:   The lever on this asymmetric conv->metadata task is QUERY FRAMING, not encoder scale
+              (the instruct prefix alone gave the 0.6B a 2x recall jump). An instruction-tuned
+              asymmetric retriever (e5, different family) should beat scaling the same Qwen3 (4B).
+              Ran AHEAD of EXP-008/4B (user call; RecSys highest-EV rec). Same #4-dense-probe harness.
+Lever:        retrieval/recall (dense encoder, asymmetric). ~560M, fp16, multilingual.
+Pre-registered gate: (A0) e5-alone>0.6B-alone; (D BINDING) wall-rescue>=5% net-new; (B/C) best of
+              additive/replacement Δturn-1 recall@100 >= +0.02 w/ bootstrap CI excl 0.
+--- run (DEV Phase A) ---
+Result:       (A0) e5-alone turn-1 recall@100 = 0.4380 > 0.6B ~0.22 (~2x, PASS). (D) wall-rescue
+              97/505 = 19.2% NET-NEW (PASS by ~4x — best wall-crack of the campaign; ColBERT was ~10%).
+              (B/C) additive 0.5200 (+0.0250) CI[+0.012,+0.039] SIG; replacement 0.5150 (+0.0200)
+              CI[+0.006,+0.034] SIG. Both clear +0.02 w/ CI excl 0.
+Verdict:      Phase A PASS (all 3 conditions). e5-alone ~2x the 0.6B from the SAME metadata = the
+              "query framing > param count" thesis confirmed in data. RecSys review = PASS-WITH-CONDITIONS:
+              (1) not leakage — e5 is frozen/off-the-shelf + 19.2% net-new proves orthogonality not
+              duplication; (2) ship REPLACEMENT not additive (statistical tie +0.005 overlapping CIs;
+              additive double-weights the dense-text axis -> Blind risk of demoting orthogonal ColBERT/
+              CLAP wall-crackers; replacement cheaper + carries 100% of the wall-rescue); (3) nDCG
+              conversion prior ~45% — net-new wall golds have the WEAKEST in-pool relevance so the flash
+              ranker may strand them at rank 21-100 (nDCG@20 zero); BINDING Phase-B check = the rescued-
+              gold rerank-rank distribution. Do NOT skip to Blind on recall alone.
+Decision:     BANK Phase A PASS = e5 is a VALIDATED recall lever (the wall-rescue is real). NEXT = Phase B
+              nDCG conversion (#12d-e5 cell) on REPLACEMENT (+ additive for comparison) + the rank-dist
+              check; gate turn-1 nDCG@20 >= 0.2652 (0.2602 + 0.005) w/ bootstrap CI excl 0 -> only THEN
+              Blind (config 207, e5 replacement, lite responder). If recall rose but nDCG flat -> rescued
+              golds stranded >rank20 -> the wall is rerank-bound not recall-bound -> pivot.

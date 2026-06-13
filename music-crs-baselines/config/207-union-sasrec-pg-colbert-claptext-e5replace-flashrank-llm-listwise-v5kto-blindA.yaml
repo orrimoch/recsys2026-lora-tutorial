@@ -1,0 +1,77 @@
+# 207 — config 205 + EXP-009 e5-instruct dense channel in REPLACEMENT mode (0.6B -> e5).
+# ⚠️ GATED: do NOT submit until EXP-009 Phase B passes (nb74 #12d-e5: turn-1 nDCG@20 >= 0.2652
+#   AND the rescued net-new wall golds actually reach top-20). Phase A PASSED (e5-alone 0.438 vs
+#   0.6B ~0.22; wall-rescue 19.2% net-new; union replacement +0.020 recall@100, CI excl 0).
+# REPLACEMENT (use_base_dense: false) per RecSys review: don't double-weight the dense-text axis in
+#   RRF (it would demote the orthogonal ColBERT/CLAP wall-crackers on Blind); e5 carries 100% of the
+#   wall-rescue, and dropping the 0.6B is cheaper to serve. Everything else = config 205.
+# NOTE: Blind responder set in the run cell via GEMINI_RESPONDER_MODEL = 'gemini-2.5-flash-lite'.
+
+lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
+lora_path: null
+lora_max_rank: 32
+
+retrieval_type: "wrrf_union_v1"
+
+# EXP-009 REPLACEMENT: drop the provided 0.6B dense, use multilingual-e5-large-instruct instead.
+# Catalog embeddings: scripts/embed_catalog.py --model intfloat/multilingual-e5-large-instruct
+#   --label e5-mli-metadata --dtype auto --max-seq-len 256 (one-time, fp16, G4-safe).
+use_base_dense: false
+use_e5_instruct: true
+w_e5_instruct: 0.7
+
+use_sasrec: true
+w_sasrec: 1.0
+sasrec_model_dir: "sasrec_v1"
+
+use_propose_ground: true
+w_propose_ground: 0.5
+pg_model: "gemini-2.5-flash"
+pg_n_proposals: 20
+pg_batch_size: 4
+pg_inner_dense: "dense_metadata_qwen3_instruct"
+
+# ColBERT full-catalog late-interaction recall channel (text).
+use_colbert: true
+w_colbert: 1.0
+colbert_index_folder: null
+colbert_index_name: "colbert-music-v1"
+colbert_model: null
+
+# CLAP text->audio recall channel (audio, P4) — the orthogonal wall lever.
+use_clap_text: true
+w_clap_text: 1.0
+clap_text_model: "laion/larger_clap_music"
+
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+retrieval_topk: 100
+reranker_type: "llm_listwise"
+reranker_model_path: "gemini-2.5-flash"
+reranker_max_output_tokens: 2048
+
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 320
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw_with_goal"
+
+use_vllm: false
+
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+use_cmqr: false
