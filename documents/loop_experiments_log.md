@@ -67,8 +67,8 @@ Decision rule: PASS if composite ≥ 0.46 → new best (update benchmarks.md + m
               (its nDCG edge is Blind-proven) but flag the LLM axis didn't separate; counts
               toward the switch rule.
               FAIL if < 0.42 → responder regressed on 203 tracks; investigate before next submit.
-De-risk:      nb80 SMOKE (--limit 5) first to confirm the Gemini responder fires cleanly on 203
-              tracks before the full 80-row run + submit (protects the scarce Blind slot).
+De-risk:      SMOKE pass WAIVED by operator (2026-06-13) — full 80-row run directly. Risk accepted:
+              known-good Gemini responder + per-row API-failure fallback keeps the original response.
 Budget:       1 of 3 weekly Blind slots (0/3 used as of 2026-06-13).
 Smoke:        n/a (no code change; harness pytest suite already green, 17/17).
 Reviews:      code-review N/A (no diff); RecSys-researcher review REQUIRED on the verdict before banking.
