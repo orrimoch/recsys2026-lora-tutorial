@@ -51,7 +51,7 @@ def prepare_submission(
         return SubmissionPlan(False, f"could not load prediction: {exc}", None, "")
     errors = validate_schema(preds, split)
     if errors:
-        return SubmissionPlan(False, f"schema invalid: {list(errors)[:3]}", None, "")
+        return SubmissionPlan(False, f"schema invalid: {list(errors)[:3]}", None, "not checked (schema failed)")
 
     ok, budget_msg = check_budget(log, weekly_cap=weekly_cap)
     if not ok:

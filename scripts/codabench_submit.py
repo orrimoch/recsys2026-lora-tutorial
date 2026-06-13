@@ -22,7 +22,7 @@ from typing import Any, Callable
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-_FINISHED = {"finished", "scored", "done", "complete"}
+_FINISHED = {"finished", "scored", "done", "complete"}  # "done"/"complete" speculative — confirm during endpoint discovery
 _FAILED = {"failed", "error", "cancelled"}
 
 

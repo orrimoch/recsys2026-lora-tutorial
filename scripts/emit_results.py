@@ -65,6 +65,21 @@ def format_results_block(payload: dict[str, Any]) -> str:
     return "RESULTS_JSON\n" + json.dumps(payload)
 
 
+def parse_results_block(text: str) -> dict[str, Any]:
+    """Parse a pasted RESULTS_JSON block (inverse of format_results_block).
+
+    Tolerates surrounding whitespace/prose: finds the RESULTS_JSON sentinel line and
+    json-decodes the line that follows it.
+    """
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == "RESULTS_JSON":
+            if i + 1 >= len(lines):
+                raise ValueError("RESULTS_JSON sentinel has no following JSON line")
+            return json.loads(lines[i + 1])
+    raise ValueError("no RESULTS_JSON sentinel found in text")
+
+
 def print_results_block(**kwargs: Any) -> dict[str, Any]:
     """Build + print the RESULTS_JSON block; accepts the same kwargs as build_results_json."""
     payload = build_results_json(**kwargs)

@@ -5,7 +5,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.emit_results import build_results_json, format_results_block, print_results_block
+from scripts.emit_results import build_results_json, format_results_block, parse_results_block, print_results_block
 
 
 def test_composite_matches_local_eval_with_llm():
@@ -52,3 +52,28 @@ def test_print_results_block_round_trips(capsys):
     parsed = json.loads(out.split("\n", 1)[1])
     assert parsed == payload
     assert payload["config"] == 207
+
+
+def test_parse_results_block_round_trips():
+    payload = build_results_json(
+        "042", 205, ndcg=0.30, cat_div=0.03, lex_div=0.79,
+        llm_judge=4.2, n_sessions=80, gate="turn1_cell49",
+    )
+    block = format_results_block(payload)
+    assert parse_results_block(block) == payload
+
+
+def test_parse_results_block_tolerates_surrounding_prose():
+    payload = build_results_json(
+        "042", 205, ndcg=0.30, cat_div=0.03, lex_div=0.79,
+        llm_judge=4.2, n_sessions=80, gate="turn1_cell49",
+    )
+    block = format_results_block(payload)
+    wrapped = "some colab log line\n" + block + "\nDone.\n"
+    assert parse_results_block(wrapped) == payload
+
+
+def test_parse_results_block_raises_when_absent():
+    import pytest
+    with pytest.raises(ValueError):
+        parse_results_block("no sentinel here\njust text")
