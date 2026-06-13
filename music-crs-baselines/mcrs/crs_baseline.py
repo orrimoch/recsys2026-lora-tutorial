@@ -257,6 +257,7 @@ class CRS_BASELINE:
         reranker_type: Optional[str] = None,
         reranker_model_path: Optional[str] = None,
         reranker_multimodal_artifacts: Optional[str] = None,
+        reranker_max_output_tokens: int = 512,
         retrieval_topk: int = 20,
         response_max_new_tokens: int = 64,
         top_n_for_prompt: int = 1,
@@ -348,10 +349,12 @@ class CRS_BASELINE:
         self.retrieval = load_retrieval_module(self.retrieval_type, self.item_db_name, self.track_split_types, self.corpus_types, self.cache_dir, extra_config=self.extra_config)
         self.reranker_type = reranker_type
         self.reranker_model_path = reranker_model_path
+        self.reranker_max_output_tokens = reranker_max_output_tokens
         self.reranker = load_reranker_module(
             reranker_type, self.item_db_name, self.track_split_types, self.corpus_types, self.cache_dir,
             model_path=reranker_model_path,
             multimodal_artifacts=reranker_multimodal_artifacts,
+            max_output_tokens=reranker_max_output_tokens,
         )
         # Tier-2 #4.1: lazily built when the reranker lists qwen_meta_cos/bm25_score.
         self._relevance_scorer = None
