@@ -51,7 +51,7 @@ Per spec §2.2, two gates are mandatory and non-negotiable:
 | `scripts/codabench_submit.py` | CodaBench HTTP layer (auth/upload/poll); discovery-gated live wiring + testable poll/parse | **new** |
 | `tests/test_codabench_submit.py` | Tests for the endpoint-independent poll/parse logic | **new** |
 | `RESEARCH_CHARTER.md` | The loop constitution (re-read every iteration) | **new** |
-| `documents/experiments_log.md` | Pre-registration journal | **new** |
+| `documents/loop_experiments_log.md` | Pre-registration journal | **new** |
 | `colab/74_e2e_sasrec_union_lgbm_ndcg.ipynb` | Add `RESULTS_JSON` emitter cell | modify |
 | `colab/80_blindA_gemini_responder.ipynb` | Add `RESULTS_JSON` emitter cell | modify |
 
@@ -339,7 +339,7 @@ Weekly blind cap (validate_prediction.check_budget, default weekly_cap=3). Confi
 CodaBench cap during setup and set it here: WEEKLY_CAP = <confirm>.
 
 ## Pre-registration rule
-Before every run, write the experiments_log.md entry (hypothesis + exact gate + honest
+Before every run, write the loop_experiments_log.md entry (hypothesis + exact gate + honest
 baseline + decision rule) and commit it. The verdict can ONLY be marked against criteria
 already committed. INCONCLUSIVE (|Δ| < noise band) is a first-class outcome, never a nudge
 to keep a config.
@@ -367,14 +367,14 @@ git commit -m "docs: research charter (constitution) for the autonomous loop"
 
 ---
 
-## Task 4: Seed `documents/experiments_log.md`
+## Task 4: Seed `documents/loop_experiments_log.md`
 
 **Files:**
-- Create: `documents/experiments_log.md`
+- Create: `documents/loop_experiments_log.md`
 
 - [ ] **Step 1: Create the journal with the template + a worked example**
 
-Create `documents/experiments_log.md`:
+Create `documents/loop_experiments_log.md`:
 
 ```markdown
 # Experiments Log — Pre-Registration Journal
@@ -416,7 +416,7 @@ Verdict:      (n/a)
 - [ ] **Step 2: Commit**
 
 ```bash
-git add documents/experiments_log.md
+git add documents/loop_experiments_log.md
 git commit -m "docs: seed experiments_log pre-registration journal"
 ```
 
@@ -775,14 +775,14 @@ git commit -m "docs: confirm submission cap in charter"
 
 ## Task 8: First live iteration (dry-run of the 6-phase protocol)
 
-**Files:** appends to `documents/experiments_log.md`, `documents/benchmarks.md`, memory
+**Files:** appends to `documents/loop_experiments_log.md`, `documents/benchmarks.md`, memory
 
 - [ ] **Step 1: Run one full protocol cycle on a cheap experiment**
 
 Execute the protocol once, end to end, to validate the loop:
 1. HYPOTHESIZE — read charter + memory + benchmarks; pick a cheap, high-confidence lever
    (e.g. the EXP-000 example: Gemini responder on config-203 track_ids).
-2. PRE-REGISTER — write + commit the `experiments_log.md` entry (hypothesis, gate, baseline,
+2. PRE-REGISTER — write + commit the `loop_experiments_log.md` entry (hypothesis, gate, baseline,
    decision rule) BEFORE running.
 3. PREPARE — create the config; write/with tests; run `python -m pytest -q` (all green);
    **dispatch the code-review agent on the diff (leak-safety + correctness)** and address

@@ -96,7 +96,7 @@ file-based memory system. The discipline lives in a charter document re-read eve
 | Artifact | Purpose | New? |
 |---|---|---|
 | `RESEARCH_CHARTER.md` | The constitution — re-read at the top of every iteration | **new** |
-| `documents/experiments_log.md` | Pre-registration journal; one entry per experiment, written **before** the run | **new** |
+| `documents/loop_experiments_log.md` | Pre-registration journal; one entry per experiment, written **before** the run | **new** |
 | `documents/benchmarks.md` | Trusted-gate results table | exists |
 | `documents/submissions_log.md` | Blind submission ledger + daily-budget tracker | exists |
 | Memory files (`.../memory/*.md` + `MEMORY.md`) | Durable conclusions | exists |
@@ -119,7 +119,7 @@ file-based memory system. The discipline lives in a charter document re-read eve
 
 1. **HYPOTHESIZE** — read charter + `MEMORY.md` + `benchmarks.md`; pick the highest-ROI
    lever; state a *falsifiable* claim with an expected metric delta.
-2. **PRE-REGISTER** — write the `experiments_log.md` entry **before running**: hypothesis,
+2. **PRE-REGISTER** — write the `loop_experiments_log.md` entry **before running**: hypothesis,
    the exact Tier-1 gate, the honest baseline it must beat (with source), and the decision
    rule (PASS / FAIL / INCONCLUSIVE bands, including the ±noise band). Commit it.
 3. **PREPARE** — make the config/code change; write tests (TDD) + run the full `pytest`
@@ -136,7 +136,7 @@ file-based memory system. The discipline lives in a charter document re-read eve
 7. **RECORD + DECIDE** — append to `benchmarks.md`; write/update memory per the memory
    protocol; keep-or-revert; if a config clears the gate and budget allows, submit (§6).
 
-### 4.1 Pre-registration entry format (`experiments_log.md`)
+### 4.1 Pre-registration entry format (`loop_experiments_log.md`)
 
 ```
 ## EXP-042 — <lever> — 2026-06-13
@@ -209,7 +209,7 @@ upload click differs. Submission packaging follows the existing protocol
    / secret (never committed).
 2. Add the `RESULTS_JSON` emitter cell to the key eval notebooks (at minimum `nb74`
    e2e dev gate, `nb80` blind Gemini responder).
-3. Write `RESEARCH_CHARTER.md` and seed `documents/experiments_log.md`.
+3. Write `RESEARCH_CHARTER.md` and seed `documents/loop_experiments_log.md`.
 4. Confirm the local Tier-1 gate is runnable end-to-end (`local_eval.py` +
    `gemini_judge_responses.py`) and reproduces a known baseline (config 204) within noise.
 
@@ -228,7 +228,7 @@ upload click differs. Submission packaging follows the existing protocol
 ## 9. Open items to resolve in the implementation plan
 
 - Confirm CodaBench submit/auth/score endpoint paths + quota `N`.
-- Decide the exact `experiments_log.md` ↔ `benchmarks.md` split (pre-registration vs
+- Decide the exact `loop_experiments_log.md` ↔ `benchmarks.md` split (pre-registration vs
   results table) to avoid duplication.
 - Define the noise band `Z` per metric on the 80-session blindset (memory suggests ±0.05
   composite) and the dev-gate noise band.
