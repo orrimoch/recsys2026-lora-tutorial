@@ -25,6 +25,7 @@ def load_crs_baseline(
     reranker_model_path: Optional[str] = None,
     reranker_multimodal_artifacts: Optional[str] = None,
     reranker_max_output_tokens: int = 512,
+    reranker_k: int = 50,  # EXP-010: LLM listwise reranker window (50=default; 100=see rank 51-100)
     retrieval_topk: int = 20,
     response_max_new_tokens: int = 64,
     top_n_for_prompt: int = 1,
@@ -74,6 +75,7 @@ def load_crs_baseline(
         reranker_model_path=reranker_model_path,
         reranker_multimodal_artifacts=reranker_multimodal_artifacts,
         reranker_max_output_tokens=reranker_max_output_tokens,
+        reranker_k=reranker_k,
         retrieval_topk=retrieval_topk,
         response_max_new_tokens=response_max_new_tokens,
         top_n_for_prompt=top_n_for_prompt,

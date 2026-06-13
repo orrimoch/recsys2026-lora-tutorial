@@ -1,10 +1,10 @@
-# 207 — config 205 + EXP-009 e5-instruct dense channel in REPLACEMENT mode (0.6B -> e5).
-# ⚠️ GATED: do NOT submit until EXP-009 Phase B passes (nb74 #12d-e5: turn-1 nDCG@20 >= 0.2652
-#   AND the rescued net-new wall golds actually reach top-20). Phase A PASSED (e5-alone 0.438 vs
-#   0.6B ~0.22; wall-rescue 19.2% net-new; union replacement +0.020 recall@100, CI excl 0).
-# REPLACEMENT (use_base_dense: false) per RecSys review: don't double-weight the dense-text axis in
-#   RRF (it would demote the orthogonal ColBERT/CLAP wall-crackers on Blind); e5 carries 100% of the
-#   wall-rescue, and dropping the 0.6B is cheaper to serve. Everything else = config 205.
+# 207 — config 205 + EXP-009/010 e5-instruct dense REPLACEMENT (0.6B -> e5) @ w=1.5 + reranker WINDOW k=100.
+# ⚠️ GATED: do NOT submit until the EXP-010 FULL-UNION confirm passes (w1.5/k100 on the union WITH
+#   ColBERT/CLAP/pg, turn-1 nDCG@20 >= baseline+0.008, bootstrap CI excl 0). EXP-010 Stage-2 on the
+#   stripped union: w1.5/k100 = 0.2730 (+0.0128) cleared the gate; the win is the reranker WINDOW
+#   (k=50->100 lets it see wall golds at union rank 51-100; +0.0205 at w=1.5). Stage-1 sweep: w=1.5
+#   maximizes wall-survive without collapsing recall once the window is wide (k=100).
+# REPLACEMENT (use_base_dense: false): single dense-text channel, no double-weighting the RRF axis.
 # NOTE: Blind responder set in the run cell via GEMINI_RESPONDER_MODEL = 'gemini-2.5-flash-lite'.
 
 lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
@@ -18,7 +18,7 @@ retrieval_type: "wrrf_union_v1"
 #   --label e5-mli-metadata --dtype auto --max-seq-len 256 (one-time, fp16, G4-safe).
 use_base_dense: false
 use_e5_instruct: true
-w_e5_instruct: 0.7
+w_e5_instruct: 1.5         # EXP-010 winner (with k=100; w=0.7/1.0 left less in the window)
 
 use_sasrec: true
 w_sasrec: 1.0
@@ -61,7 +61,8 @@ attn_implementation: "sdpa"
 retrieval_topk: 100
 reranker_type: "llm_listwise"
 reranker_model_path: "gemini-2.5-flash"
-reranker_max_output_tokens: 2048
+reranker_max_output_tokens: 4096   # EXP-010: k=100 needs more room (100-item ranking + thinking)
+reranker_k: 100                    # EXP-010: reranker WINDOW 50->100 = the win (see rank 51-100 wall golds)
 
 response_prompt_name: "response_generation_cot_user_state"
 response_max_new_tokens: 320
