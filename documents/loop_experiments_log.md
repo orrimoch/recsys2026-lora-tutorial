@@ -44,3 +44,33 @@ Smoke:        n/a (example)
 --- run ---
 Result:       (not run)
 Verdict:      (n/a)
+
+---
+
+## EXP-001 — responder base swap (203 tracks + Gemini) — 2026-06-13
+Hypothesis:   Putting config-203 Blind-A track_ids (Blind nDCG 0.30, no intent_state Q*) under
+              the SAME Gemini best-of-3 responder (LLM ~4.2) lifts Blind composite from 0.44
+              (config 204, nDCG 0.24) to ~0.47. Both axes are independently Blind-grounded
+              (203 nDCG 0.30 from its 0.37 submission; Gemini LLM ~4.2 from the 204 submission),
+              so this banks the best-known config to the leaderboard.
+Lever:        responder base / recall (drop intent_state Q* by using the 203 recall stack)
+Change:       config-203 Blind-A track_ids + nb80 Gemini responder swap (BEST_OF=3, plain prompt,
+              STRUCTURED_PERSONALITY=False). NO code change — track_ids untouched, only
+              predicted_response regenerated.
+Pre-registered gate:  Blind-A composite (CodaBench) ≥ 0.44 (current best, config 204); target ≈ 0.47.
+Baseline:     config 204 = Blind 0.44 (nDCG 0.24 / Cat 0.03 / Lex 0.79 / LLM 4.2);
+              config 203 = Blind 0.37 (nDCG 0.30 / LLM 2.85 v5-kto).
+              Source: memory project_blind_a_state_responder_lever_2026_06_11 + 203/204 yaml headers.
+Decision rule: PASS if composite ≥ 0.46 → new best (update benchmarks.md + memory).
+              INCONCLUSIVE if 0.42–0.46 (within ±0.05 noise of 0.44) → still adopt the 203 base
+              (its nDCG edge is Blind-proven) but flag the LLM axis didn't separate; counts
+              toward the switch rule.
+              FAIL if < 0.42 → responder regressed on 203 tracks; investigate before next submit.
+De-risk:      nb80 SMOKE (--limit 5) first to confirm the Gemini responder fires cleanly on 203
+              tracks before the full 80-row run + submit (protects the scarce Blind slot).
+Budget:       1 of 3 weekly Blind slots (0/3 used as of 2026-06-13).
+Smoke:        n/a (no code change; harness pytest suite already green, 17/17).
+Reviews:      code-review N/A (no diff); RecSys-researcher review REQUIRED on the verdict before banking.
+--- run ---
+Result:       (pending human run: nb80 Gemini swap on config-203 Blind-A track_ids)
+Verdict:      (pending)
