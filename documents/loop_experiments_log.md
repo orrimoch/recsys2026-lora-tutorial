@@ -712,6 +712,13 @@ Decision rule: PASS → config 209 = config 205 + reranker_k 100 + reranker_max_
                   the RESPONDER/LLM axis (RecSys: the only remaining real-headroom lever).
 Budget:       0 Blind. ~$2-4 flash (two k arms, turn-1). Blind only after a dev PASS.
 Reviews:      code-review N/A (config-only dev cell). RecSys-researcher on the verdict (+ design review queued).
+FREE ARM (run FIRST, $0): nb74 `#12d-cerank` uses the EXISTING free local cross-encoder
+              `BGE_RERANKER` (bge-reranker-v2-m3, reranker_type bge_reranker_v2_m3 — already in the repo;
+              do NOT write a new one) fed the pool top-50 vs top-100. Pointwise → no truncation → a CLEAN
+              window read + tests whether we can DROP Gemini (cost + reproducibility). Compares free@k50 to
+              flash@k50 0.2602: free≈/≥flash → ADOPT (free+reproducible) + window-for-free; free≪flash →
+              keep flash, run the paid `#12d-rwin` (SUBSET) for flash's own window. (2nd free option =
+              reranker_type `pro_rank`, Qwen-0.5B logit-diff.) No new code — used the ready reranker.
 --- run ---
-Result:       (pending human run: nb74 #12d-rwin; requires cell 4 + GEMINI_API_KEY)
+Result:       (pending human run: nb74 #12d-cerank [FREE, run first] then #12d-rwin [paid, only if needed])
 Verdict:      (pending)
