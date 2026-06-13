@@ -15,6 +15,7 @@ line, so put the date first if there could be ambiguity.
 ## Submissions
 
 2026-06-13 [blindA] tid=EXP-001-203-gemini-bo1 stage=loop score=4.15 ndcg20=0.30 composite=0.4673
+2026-06-13 [blindA] tid=EXP-006-205-flashrank2048-gemini-bo1 stage=loop score=4.25 ndcg20=0.33 composite=0.49
 
 <!-- Example row format (do NOT include a real date — the validator's
 _DATE_RE does not understand HTML comments and would count it against

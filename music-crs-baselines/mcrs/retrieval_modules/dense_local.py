@@ -29,6 +29,21 @@ _SHARED_ENCODER: dict[tuple, object] = {}
 _SHARED_QUERY_CACHE: dict[tuple, dict[str, np.ndarray]] = {}
 
 
+def resolve_st_dtype(device: str, override: str = "auto"):
+    """torch dtype for loading a SentenceTransformer encoder.
+
+    Default (`auto`): fp16 on CUDA, fp32 elsewhere. fp16 ~halves weight memory and
+    roughly doubles throughput — the difference between a 4B encoder fitting a 16 GB
+    T4/G4 vs OOM-ing in fp32. fp16 (not bf16) is deliberate: Turing/T4 has no bf16.
+    CPU/MPS stay fp32 (fp16 matmul is slow/unsupported there). `override` (e.g.
+    'float16', 'bfloat16', 'float32') forces a specific dtype on any device.
+    """
+    import torch
+    if override and override != "auto":
+        return getattr(torch, override)
+    return torch.float16 if device == "cuda" else torch.float32
+
+
 class DENSE_LOCAL:
     def __init__(
         self,
@@ -126,9 +141,11 @@ class DENSE_LOCAL:
             device = "mps"
         else:
             device = "cpu"
-        model = SentenceTransformer(self.model_name, device=device)
+        dtype = resolve_st_dtype(device)
+        model = SentenceTransformer(self.model_name, device=device,
+                                    model_kwargs={"torch_dtype": dtype})
         _SHARED_ENCODER[key] = model
-        print(f"[dense_local] loaded encoder {self.model_name} on {device}")
+        print(f"[dense_local] loaded encoder {self.model_name} on {device} ({dtype})")
         return model
 
     def _encode_queries(self, queries: list[str]) -> np.ndarray:

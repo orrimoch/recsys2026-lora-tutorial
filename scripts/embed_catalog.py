@@ -84,6 +84,14 @@ def main():
     parser.add_argument("--cache-root", default=str(REPO_ROOT / "experiments" / "cache" / "dense_local"))
     parser.add_argument("--max-tracks", type=int, default=None,
                         help="Smoke-test cap; encode only the first N tracks (default: full catalog).")
+    parser.add_argument("--dtype", default="auto",
+                        choices=["auto", "float16", "bfloat16", "float32"],
+                        help="Encoder load dtype. auto = fp16 on CUDA (≈2x faster, ~half memory — "
+                             "needed for a 4B model to fit a 16GB T4/G4), fp32 on CPU/MPS.")
+    parser.add_argument("--max-seq-len", type=int, default=0,
+                        help="Cap the encoder's max_seq_length (0 = leave the model default). "
+                             "Catalog metadata docs are short, so a small cap (e.g. 256) lets a "
+                             "LARGE --batch-size run without a rare long doc OOM-ing the batch.")
     args = parser.parse_args()
 
     from datasets import load_dataset
@@ -126,9 +134,20 @@ def main():
         device = "mps"
     else:
         device = "cpu"
-    model = SentenceTransformer(args.model, device=device)
-    print(f"[embed_catalog] device={device}", file=sys.stderr)
+    sys.path.insert(0, str(BASELINES_DIR))
+    from mcrs.retrieval_modules.dense_local import resolve_st_dtype
+    dtype = resolve_st_dtype(device, args.dtype)
+    model = SentenceTransformer(args.model, device=device, model_kwargs={"torch_dtype": dtype})
+    if args.max_seq_len > 0:
+        model.max_seq_length = args.max_seq_len
+    print(f"[embed_catalog] device={device} dtype={dtype} "
+          f"max_seq_len={getattr(model, 'max_seq_length', '?')} batch_size={args.batch_size}",
+          file=sys.stderr)
 
+    # Single batched encode — sentence-transformers sorts by length + batches internally,
+    # so this is one vectorized pass over the catalog (no per-track Python loop). fp16 on
+    # CUDA keeps the 47k-track pass within a 16GB T4/G4. Embeddings are stored fp32 (below)
+    # so the cached matrix dtype is unchanged regardless of compute dtype.
     embeddings = model.encode(
         doc_texts,
         batch_size=args.batch_size,

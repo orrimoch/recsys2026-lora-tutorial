@@ -294,10 +294,28 @@ Verdict:      PASS (clean, trustworthy). +0.0344 ≫ +0.005 gate; valid-idx 0.46
               valid Blind proxy. THE biggest single-change nDCG lever of the campaign.
 Translation:  +0.0344 dev turn-1 → ~+0.046 Blind nDCG (×1.33) → ~+0.023 composite → 0.4673 → ~0.49 (upper
               end; Blind n=80 SE±0.07 so one submission is a production-gate BET, not statistical proof).
-BLIND CONFIRM: 🔴 RUNNING (2026-06-13) — nb82 #82-blindA-205 (config 205, flash ranker @2048 + Gemini bo1,
+BLIND CONFIRM: ✅ DONE (2026-06-13) — nb82 #82-blindA-205 (config 205, flash ranker @2048 + Gemini bo1,
               top-n 1 = the 0.4673 baseline → ONLY the ranker changed). Serve wiring code-reviewed = GO.
-              AWAITING the CodaBench score → JUDGE vs 0.4673 → RecSys review → record + [blindA] budget row
-              (submission 2/wk; real cap 10/day). FRESH-SESSION RESUME = this line.
+Blind result: {"exp":"EXP-006","config":205,"ndcg@20":0.33,"cat_div":0.03,"lex_div":0.78,"llm_judge":4.25,"composite":0.49,"n_sessions":80,"gate":"blindA"}
+Blind verdict: PASS → NEW BEST 0.49 (was 0.4673). Gate was ≥~0.48. Composite +0.0227, almost EXACTLY the
+              pre-registered prediction (+0.023). The dev→Blind map held: dev turn-1 nDCG +0.0344 →
+              Blind nDCG 0.30→0.33 (+0.03). Per-axis contribution of the +0.0227: nDCG-led
+              0.50·(+0.03)=+0.015 (66%) + LLM 0.30·((4.25-4.15)/4)=+0.0075 (34%); Cat/Lex flat.
+              The LLM axis moved 4.15→4.25 with an IDENTICAL responder — plausible downstream effect of
+              top_n_for_prompt=1 (a better #1-ranked track gets explained), but minority contributor + in
+              judge-variance range, so not banked on its own. The nDCG-led majority is the trustworthy part.
+Blind review: RecSys-researcher = APPROVE-WITH-CAVEATS. Gain is 0.45× the ±0.05 half-noise-band → real-but-
+              unconfirmed on one n=80 draw; the 3-decimal dev↔Blind match is corroborating but carries mild
+              false-precision risk (don't over-update). Top risks: (1) serve-pool transfer (a reranker only
+              reorders what retrieval surfaced; Blind is ~99% new-artist-wall) (2) single-draw noise
+              (3) nDCG 0.33 still ≪ leaders 0.49-0.57 = reorder win inside a recall-bounded pool, diminishing
+              returns from further ranker polish. Recommendation: bank as PROVISIONAL best; let EXP-007
+              double as the soft confirmation run (if composite holds ≥0.48 it re-establishes 205's floor).
+Decision:     BANK PASS → NEW BEST = config 205 (composite 0.49). NEXT = EXP-007 (responder max_output_tokens;
+              fixes the same thinking-model truncation on the gemini-2.5-pro RESPONDER → attacks the 0.30 LLM
+              axis at ~$0 + doubles as the 205 confirmation). See EXP-006 original gate below.
+
+--- ORIGINAL DEV GATE (kept for record) ---
 Decision:     BANK PASS. NEXT = Blind confirm via config 205 = 203 + reranker_model_path: gemini-2.5-flash
               + reranker_max_output_tokens: 2048 + Gemini responder. CRITICAL FIX FIRST (review): the serve
               path (run_inference_blindset → CRS_BASELINE → load_reranker_module → LLMListwiseReranker) does
@@ -326,4 +344,46 @@ Budget:       0 Blind; no GPU model load (dense encoder cached), no LLM cost. Ru
 Reviews:      code-review N/A (config-only built cell). RecSys-researcher REQUIRED on the verdict.
 --- run ---
 Result:       (pending human run: nb74 cell 8 #4-enr; warm session from EXP-003, else 1→3→4→8)
+Verdict:      (pending)
+
+---
+
+## EXP-008 — Qwen3-Embedding-4B dense channel (re-embed the recall WALL) — 2026-06-13
+Hypothesis:   nDCG (0.50 wt) = the dominant lever + the entire leader gap (us 0.33 vs 0.49-0.57).
+              nDCG = recall × rerank; rerank just WON (flash, EXP-006, RecSys says near-tapped). So
+              nDCG now = RECALL: the ~43%-of-golds / ~99%-new-artist WALL. The dense content channel
+              is the only one that can reach a NEW artist by meaning, and it runs on the provided
+              Qwen3-Embedding-0.6B (the weak link). The 4B sibling (~+5.5 MTEB over 0.6B; 4B→8B is only
+              ~+1) should surface wall golds the 0.6B misses → lift union recall@100 → convert to nDCG.
+Lever:        retrieval / recall (dense encoder upgrade). ADDITIVE channel (use_qwen3_4b), not a replace.
+Change:       (1) use_qwen3_4b flag in _wrrf_union_v1_specs (factory dispatch dense_metadata_qwen3_4b_local
+              already existed) +3 tests. (2) embed_catalog.py + DENSE_LOCAL load encoder fp16 on CUDA
+              (resolve_st_dtype) +4 tests + --dtype/--max-seq-len — REQUIRED: 4B fp32 OOMs a 16GB G4/T4;
+              fp16+seq-cap+batch256 = ~5-10 min encode. (3) nb74 cell 8 #4-qwen3-4b (encode + recall A/B
+              + wall-rescue). (4) GATED config 206 (= 205 + 4B). Rules-checked OK (full-catalog all_tracks;
+              open Apache-2.0 encoder; project_competition_rules_check_2026_06_13).
+Pre-registered gate (Phase A, DEV recall — leak-free, NO Blind slot) — HARDENED per RecSys review:
+              PASS requires ALL of: (A0 precondition) dense-ALONE 4B turn-1 recall@100 > 0.6B-alone
+              (else a union gain is a fusion artifact); (D BINDING) 4B-dense rescues >= 5% of
+              union-missed turn-1 golds as NET-NEW (wall is likely COVERAGE not encoder-quality, so
+              net-new reach is the only thing that moves Blind); (B/C) best of the additive(w0.7) /
+              REPLACEMENT(0.6B->4B) arms lifts turn-1 recall@100 >= +0.02 with a paired-bootstrap 95%
+              CI excluding 0 (+0.01 is ~0.6σ at N~1000 = the 6-flat-lever noise band).
+Baseline:     dev union+SASRec turn-1 recall@100 (cell 4 `cs`); dense-0.6B-instruct ~0.22 alone.
+Decision rule: PASS Phase A -> Phase B nDCG conversion via #12d (cell 55) on the WINNING pool, gate
+              turn-1 nDCG@20 >= +0.005 vs 0.2602 -> only THEN Blind (config 206, REPLACEMENT arm if it
+              wins, lite responder). FLAT -> do NOT certify a reachability ceiling off ONE family: next
+              run the same harness on an instruction-tuned ASYMMETRIC retriever (EXP-009), THEN pivot
+              query-side (EXP-005). Do NOT escalate to 8B (~+1 MTEB can't crack coverage; 8B fp16 OOMs G4).
+Budget:       0 Blind. One-time 47k-track GPU encode (~5-10 min fp16 batch256 G4/T4). No API $ for Phase A.
+Caveat:       gate measures "4B-in-fp16" (G4/Turing has no bf16) — fp16 precision is a small confound if FLAT.
+Reviews:      code-review = GO (no blocking; blast radius VERIFIED clean — config 205 / DENSE_PRECOMPUTED
+              path untouched, the DENSE_LOCAL fp16 change is unreachable from the banked best). RecSys =
+              APPROVE-WITH-CORRECTIONS, all folded in (wall-rescue binding, +0.02+bootstrap, replacement
+              arm via use_base_dense, dense-alone precondition, softened FLAT). 14 tests green.
+Queued:       EXP-009 = instruction-tuned asymmetric retriever (e5-large-instruct / gte-Qwen2-instruct /
+              bge-large) on this harness — reviewer's highest-value rec; cheaper than 4B + may beat
+              scaling the same Qwen3 family on this asymmetric conv->metadata task. Raise to user.
+--- run ---
+Result:       (pending human run: nb74 cells 1→3→4→8 #4-qwen3-4b; warm session from EXP-006 reuses 4)
 Verdict:      (pending)

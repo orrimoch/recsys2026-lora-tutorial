@@ -17,6 +17,17 @@ QWEN3_MUSIC_INSTRUCT = (
     "retrieve tracks most relevant to the user's intent.\nQuery: "
 )
 
+# E5-instruct (intfloat/*-e5-*-instruct) asymmetric format: queries are wrapped
+# "Instruct: {task}\nQuery: {q}", passages (catalog docs) stay RAW — which matches
+# DENSE_LOCAL (prefix on query side only). EXP-009: the instruct-prefix gave the 0.6B
+# dense a 2x recall jump, so query framing (not param count) is the demonstrated lever;
+# an instruction-tuned ASYMMETRIC retriever probes that directly. multilingual-e5
+# also covers the catalog's non-ASCII (CJK/accented) artist+track names.
+E5_MUSIC_INSTRUCT = (
+    "Instruct: Given a conversational music request, "
+    "retrieve tracks most relevant to the user's intent.\nQuery: "
+)
+
 
 def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = None) -> list[dict]:
     """Sub-retriever specs for wrrf_union_v1. HyDE is opt-in via use_hyde.
@@ -31,17 +42,22 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
          "corpus_types": ["track_name", "artist_name", "album_name",
                           "release_date", "tag_list"],
          "topk_internal": 100, "weight": float(ec.get("w_bm25", 1.0))},
-        # dense content channel. Qwen3-Embedding-0.6B is ASYMMETRIC: the query
-        # side needs the instruct prefix or recall collapses (nb74 Stage 7: raw
-        # dev recall@100 0.0894 -> instruct 0.1789, 2x). Default to the instruct
-        # variant; dense_instruct=False restores the raw variant for ablation.
-        {"type": ("dense_metadata_qwen3" if ec.get("dense_instruct") is False
-                  else "dense_metadata_qwen3_instruct"),
-         "corpus_types": corpus_types,
-         "topk_internal": 100, "weight": float(ec.get("w_qwen", 0.7))},
-        {"type": "same_artist", "topk_internal": 100,
-         "weight": float(ec.get("w_artist", 1.0))},
     ]
+    # dense content channel. Qwen3-Embedding-0.6B is ASYMMETRIC: the query
+    # side needs the instruct prefix or recall collapses (nb74 Stage 7: raw
+    # dev recall@100 0.0894 -> instruct 0.1789, 2x). Default to the instruct
+    # variant; dense_instruct=False restores the raw variant for ablation.
+    # use_base_dense=False DROPS it entirely — used by EXP-008's REPLACEMENT arm
+    # (swap 0.6B -> 4B) so the dense-text axis isn't double-weighted in the RRF
+    # fusion (a redundant extra dense channel can demote orthogonal channels).
+    if ec.get("use_base_dense", True):
+        specs.append(
+            {"type": ("dense_metadata_qwen3" if ec.get("dense_instruct") is False
+                      else "dense_metadata_qwen3_instruct"),
+             "corpus_types": corpus_types,
+             "topk_internal": 100, "weight": float(ec.get("w_qwen", 0.7))})
+    specs.append({"type": "same_artist", "topk_internal": 100,
+                  "weight": float(ec.get("w_artist", 1.0))})
     # Segment-aware routing (2026-06-08): cold queries (no played history) lean on
     # CONTENT channels; warm queries lean on the SESSION channel. The RRF layer
     # picks each query's weights by history presence. Opt-in via
@@ -235,6 +251,26 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
             "type": "dense_metadata_bge_base_local", "topk_internal": 100,
             "weight": float(ec.get("w_bge", 0.5)),
         })
+    # EXP-008 (2026-06-13): Qwen3-Embedding-4B dense channel — the SAME family as the
+    # provided 0.6B (the weak link), so the asymmetric music instruct prefix + DENSE_LOCAL
+    # loader carry over (catalog embeddings computed once via scripts/embed_catalog.py).
+    # The recall-WALL probe: "is the dense just under-powered?" (factory comment at the
+    # dense_metadata_qwen3_4b_local dispatch). Default weight mirrors the 0.6B dense (w_qwen
+    # 0.7). Opt-in via use_qwen3_4b; gate on DEV recall@100 + wall-rescue THEN nDCG before
+    # spending a Blind slot (a stronger-but-flat encoder = 7th flat recall lever -> pivot).
+    if ec.get("use_qwen3_4b"):
+        specs.append({
+            "type": "dense_metadata_qwen3_4b_local", "topk_internal": 100,
+            "weight": float(ec.get("w_qwen3_4b", 0.7)),
+        })
+    # EXP-009: instruction-tuned asymmetric retriever (multilingual-e5-large-instruct).
+    # Same DENSE_LOCAL machinery as use_qwen3_4b; opt-in via use_e5_instruct. Pair with
+    # use_base_dense=False for the REPLACEMENT arm (single dense-text channel, no double-weight).
+    if ec.get("use_e5_instruct"):
+        specs.append({
+            "type": "dense_metadata_e5_instruct_local", "topk_internal": 100,
+            "weight": float(ec.get("w_e5_instruct", 0.7)),
+        })
     return specs
 
 
@@ -338,6 +374,16 @@ def load_retrieval_module(
             model_name="Qwen/Qwen3-Embedding-4B",
             embed_label="qwen3-4b-metadata",
             instruct=QWEN3_MUSIC_INSTRUCT, instruct_label="instruct-music-v1",
+        )
+    # EXP-009 — instruction-tuned ASYMMETRIC retriever (the reviewer's highest-EV lever:
+    # query framing > param count). multilingual-e5-large-instruct = ~560M, asymmetric by
+    # design (instruct on query, raw passage), multilingual (non-ASCII catalog names).
+    elif retrieval_type == "dense_metadata_e5_instruct_local":
+        return DENSE_LOCAL(
+            dataset_name, track_split_types, corpus_types, cache_dir,
+            model_name="intfloat/multilingual-e5-large-instruct",
+            embed_label="e5-mli-metadata",
+            instruct=E5_MUSIC_INSTRUCT, instruct_label="e5-instruct-music-v1",
         )
     # RRF hybrids. Each key pins a specific sub-retriever combination so the
     # config file needs only one field, per the existing factory signature.
