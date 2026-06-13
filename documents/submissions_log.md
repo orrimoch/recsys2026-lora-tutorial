@@ -14,7 +14,7 @@ line, so put the date first if there could be ambiguity.
 
 ## Submissions
 
-(none yet — log starts post deep-review fix wave 2026-05-02)
+2026-06-13 [blindA] tid=EXP-001-203-gemini-bo1 stage=loop score=4.15 ndcg20=0.30 composite=0.4673
 
 <!-- Example row format (do NOT include a real date — the validator's
 _DATE_RE does not understand HTML comments and would count it against

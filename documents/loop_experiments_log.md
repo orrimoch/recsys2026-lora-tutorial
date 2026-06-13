@@ -76,5 +76,19 @@ Budget:       1 of 3 weekly Blind slots (0/3 used as of 2026-06-13).
 Smoke:        n/a (no code change; harness pytest suite already green, 17/17).
 Reviews:      code-review N/A (no diff); RecSys-researcher review REQUIRED on the verdict before banking.
 --- run ---
-Result:       (pending human run: nb80 Gemini swap on config-203 Blind-A track_ids)
-Verdict:      (pending)
+Result:       {"exp":"EXP-001","config":203,"ndcg@20":0.30,"cat_div":0.03,"lex_div":0.78,"llm_judge":4.15,"composite":0.4673,"n_sessions":80,"gate":"blindA"}
+Verdict:      PASS (per gate, 0.4673 ≥ 0.46) → NEW BEST-KNOWN (was 0.44), NOT a statistically
+              confirmed win. Gain +0.025 over config 204 is ~1σ on 80 sessions (SE≈0.026, p≈0.17,
+              ~22% by noise) → inside the ±0.05 band. nDCG 0.30 vs 204's 0.24 is DIRECTIONALLY
+              consistent with the Q*-harms-nDCG hypothesis (two independent Blind measurements,
+              pre-predicted direction) — supported, NOT proven at 80 sessions. LLM held 4.2→4.15
+              (within noise; responder is NOT isolated — 203 tracks yield their own LLM). Both axes
+              moved: recall +~0.03, LLM −~0.004.
+Local→Blind:  projected ~0.47, blind 0.4673. Tight — BUT the nDCG projection is an algebraic identity
+              for unchanged track_ids (not a calibration win); do not over-read one data point.
+Reviews:      RecSys-researcher = APPROVE-WITH-CORRECTIONS (framing above is the corrected version).
+              No code diff → code-review N/A.
+Decision:     ADOPT "config-203 track_ids + Gemini-pro bo1" as new benchmark (best-known 0.4673).
+              Budget spent: 1/3 weekly. Next lever = in-pool SASRec reranker (dev gate, turn-1
+              STRATIFIED per review) — see EXP-002 plan.
+Memory:       [[project_autonomous_research_loop_2026_06_13]] + benchmarks.md + submissions_log.md updated.
