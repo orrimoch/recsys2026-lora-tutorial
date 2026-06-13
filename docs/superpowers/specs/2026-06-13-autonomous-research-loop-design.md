@@ -54,6 +54,22 @@ The design's core is therefore an **anti-self-deception discipline**, not plumbi
   harder; it is an automatic trigger to **switch levers**. The charter encodes this as a
   stop/switch rule.
 
+### 2.2 Mandatory review gates (every iteration)
+
+No iteration is "done" until two reviews pass — both run as dispatched subagents so they
+have independent context, not the optimizer's:
+
+- **Code-review agent** — runs on every code/config diff *before handoff*. Checks
+  correctness and, critically, **leak-safety**: does any new feature/metric score a model on
+  a split it trained on? (This is the gate that would have caught `sasrec_rank_inv` and CLAP.)
+- **RecSys-researcher agent** — runs on every verdict *before it is banked to memory*.
+  Adversarially reviews the experimental reasoning: is the gate leak-free and pre-registered?
+  Is the PASS/FAIL/INCONCLUSIVE call justified by the data and the noise band? Is this a
+  known trap from memory? Is a banned (in-sample) signal contaminating the conclusion?
+
+**Tests are always written** (TDD) for any new code — the test *is* part of the deliverable,
+not an afterthought. A task with code and no test is incomplete.
+
 ## 3. Architecture (Approach A — charter + pre-registered protocol over existing harness)
 
 No new orchestration infrastructure. The loop runs through normal chat turns, leaning on
@@ -91,14 +107,18 @@ file-based memory system. The discipline lives in a charter document re-read eve
 2. **PRE-REGISTER** — write the `experiments_log.md` entry **before running**: hypothesis,
    the exact Tier-1 gate, the honest baseline it must beat (with source), and the decision
    rule (PASS / FAIL / INCONCLUSIVE bands, including the ±noise band). Commit it.
-3. **PREPARE** — make the config/code change; run `pytest` smoke locally (no GPU);
-   assemble the run-package.
+3. **PREPARE** — make the config/code change; write tests (TDD) + run the full `pytest`
+   suite green (no GPU); **dispatch the code-review agent on the diff (§2.2)** and address
+   its findings; then assemble the run-package.
 4. **HANDOFF** — give the human the run-package (§5); they run it in Colab and paste back
    the `RESULTS_JSON` block.
 5. **JUDGE** — parse results; compare against the **pre-registered** gate (no post-hoc
    storytelling). If a submission occurred, log *(local Δ, blind Δ)* and update the Tier-3
    correlation watch.
-6. **RECORD + DECIDE** — append to `benchmarks.md`; write/update memory per the memory
+6. **REVIEW** — **dispatch the RecSys-researcher agent on the verdict (§2.2)**; it must
+   sign off that the conclusion is leak-free, justified by the data + noise band, and not a
+   known trap *before* anything is banked.
+7. **RECORD + DECIDE** — append to `benchmarks.md`; write/update memory per the memory
    protocol; keep-or-revert; if a config clears the gate and budget allows, submit (§6).
 
 ### 4.1 Pre-registration entry format (`experiments_log.md`)
