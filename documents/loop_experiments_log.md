@@ -839,3 +839,35 @@ Reviews:      code-review on the diff (module + cell); RecSys-researcher on the 
 --- run ---
 Result:       (pending human run: nb74 cells 1->3->4->#15-artisthyp; free Qwen, ~8-15 min G4, no API key)
 Verdict:      (pending)
+
+---
+
+## EXP-016 — doc2query catalog enrichment (document expansion) — 2026-06-14
+Root cause (data audit 2026-06-14): the wall is a RICH-QUERY / SPARSE-DOC mismatch — users describe
+              tracks by attributes ("energetic late-90s electronic dance party") but catalog docs are thin
+              (name/artist/album/few tags), so similarity buries the CANONICAL answer (Daft Punk pop 82,
+              Green Day pop 84 are IN the wall). Cold golds are median-pop 50 = NOT obscurity. 74% of cold
+              golds have a tag-word overlapping the request, but tags are low-precision; the mapping
+              attribute->canonical track lives in world-knowledge, not the catalog text.
+Hypothesis:   doc2query/document expansion: an LLM writes a rich description + example listener-requests per
+              track; APPEND to the original metadata (expansion, not replacement); re-index. Makes every
+              track attribute-matchable -> lifts wall recall AND helps the reranker, at serve-time $0 (the
+              LLM cost is paid ONCE, offline). Famous canonical answers (the wall) are exactly what an LLM
+              enriches well -> de-risked.
+Lever:        recall (catalog-side, document expansion). Then conversion gate (recall-up != nDCG-up).
+Method (correct doc2query): generate (gemini-2.5-flash-lite, one-time ~$5, RESUMABLE -> Drive) -> doc_text
+              = metadata + enrichment -> index TWO ways: BM25 on doc_text (lexical, classic doc2query) +
+              DENSE bi-encoder on doc_text. Encoder = e5-large-instruct (our best recall encoder, EXP-009),
+              NOT the bge CROSS-encoder (a reranker — can't pre-index docs). Query + enriched doc embedded
+              by the SAME encoder (same space).
+Build:        scripts/enrich_catalog.py (meta_text / build_enrich_prompt[desc + n example requests, anti-
+              hallucination system] / clean_enrichment / enriched_document[APPEND] / select_pending[resume];
+              main: GeminiClient flash-lite, ThreadPool, parquet checkpoint every 2000, skip done) + 7 tests
+              (green). nb74 #8b-enrich-catalog (SMOKE=50 first, then full 47k, saves to Drive).
+Cost:         ~$3-6 one-time (flash-lite, ~12M in + ~6M out tokens), reusable forever; $0 at serve.
+Gate (after enrichment runs): re-embed doc_text w/ e5 -> dev turn-1 recall@100 on the wall vs the 0.6B
+              baseline (free); if recall up -> conversion gate (turn-1 nDCG@20) -> Blind.
+Reviews:      code-review on the diff; RecSys on the post-enrichment recall/conversion verdict.
+--- run ---
+Result:       (pending human run: nb74 #8b-enrich-catalog; SMOKE then full; then re-embed + recall gate)
+Verdict:      (pending)
