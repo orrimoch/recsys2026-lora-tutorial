@@ -390,3 +390,52 @@ def test_cached_response_no_cache_dir_always_generates(tmp_path):
     gr.cached_response(None, "p", "m", 1, gen, "fb")
     gr.cached_response(None, "p", "m", 1, gen, "fb")
     assert calls["n"] == 2  # caching off -> always generate
+
+
+# ---- --reuse-from: warm-start responses from a prior prediction.json ----------
+import json as _json
+
+
+def test_load_reuse_map_indexes_by_session_and_turn(tmp_path):
+    f = tmp_path / "prior.json"
+    f.write_text(_json.dumps([
+        {"session_id": "s1", "user_id": "u", "turn_number": 1,
+         "predicted_track_ids": ["a", "b"], "predicted_response": "R1"},
+        {"session_id": "s2", "user_id": "u", "turn_number": 1,
+         "predicted_track_ids": ["c"], "predicted_response": "R2"},
+    ]))
+    m = gr.load_reuse_map(str(f))
+    assert m[("s1", 1)]["resp"] == "R1" and m[("s1", 1)]["ids"] == ["a", "b"]
+    assert ("s2", 1) in m
+
+
+def test_load_reuse_map_missing_path_is_empty():
+    assert gr.load_reuse_map(None) == {}
+
+
+def test_reuse_response_hits_when_shown_tracks_unchanged():
+    m = {("s1", 1): {"ids": ["a", "b", "c"], "resp": "R"}}
+    # top_n=2: only [:2] is shown to the responder, and it matches -> reuse
+    assert gr.reuse_response(m, "s1", 1, ["a", "b", "z"], top_n=2) == "R"
+
+
+def test_reuse_response_misses_when_a_shown_track_changed():
+    m = {("s1", 1): {"ids": ["a", "b"], "resp": "R"}}
+    assert gr.reuse_response(m, "s1", 1, ["x", "b"], top_n=1) is None   # #1 track changed
+
+
+def test_reuse_response_misses_unknown_or_empty():
+    m = {("s1", 1): {"ids": ["a"], "resp": ""}}
+    assert gr.reuse_response({}, "s1", 1, ["a"], top_n=1) is None       # not in map
+    assert gr.reuse_response(m, "s1", 1, ["a"], top_n=1) is None        # empty prior response
+
+
+def test_load_reuse_map_reads_prediction_json_from_a_zip(tmp_path):
+    import zipfile
+    zf = tmp_path / "sub.zip"
+    with zipfile.ZipFile(zf, "w") as z:
+        z.writestr("prediction.json", _json.dumps([
+            {"session_id": "s1", "user_id": "u", "turn_number": 1,
+             "predicted_track_ids": ["a"], "predicted_response": "R"}]))
+    m = gr.load_reuse_map(str(zf))   # pass the saved Drive submission zip directly
+    assert m[("s1", 1)]["resp"] == "R"

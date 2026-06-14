@@ -48,6 +48,45 @@ def _resp_cache_path(cache_dir: str, prompt: str, model: str, best_of: int) -> P
     return Path(cache_dir) / f"{h}.json"
 
 
+def load_reuse_map(path) -> dict:
+    """Map {(session_id, turn_number): {'ids': [...], 'resp': str}} from a PRIOR
+    prediction.json — to warm-start responses so only changed rows hit Gemini.
+    Accepts a .json file OR a .zip (reads its `prediction.json` member, e.g. a saved
+    submission on Drive). Missing / empty path -> {}."""
+    if not path:
+        return {}
+    if str(path).endswith(".zip"):
+        import zipfile
+        with zipfile.ZipFile(path) as z:
+            member = next((n for n in z.namelist() if n.endswith("prediction.json")), None)
+            if member is None:
+                raise ValueError(f"{path}: no prediction.json inside the zip")
+            rows = json.loads(z.read(member))
+    else:
+        with open(path, encoding="utf-8") as f:
+            rows = json.load(f)
+    m: dict = {}
+    for r in rows:
+        m[(r.get("session_id"), r.get("turn_number"))] = {
+            "ids": r.get("predicted_track_ids") or [],
+            "resp": r.get("predicted_response") or "",
+        }
+    return m
+
+
+def reuse_response(reuse_map: dict, session_id, turn_number, track_ids, top_n: int):
+    """Prior response IFF the responder-visible tracks (the top_n shown) are unchanged
+    vs the prior run, else None. ctx + goal are deterministic from (session_id,
+    turn_number), so identical shown-tracks => identical responder input => safe reuse.
+    (Pass a reuse file produced by the SAME responder config: model / top_n / best_of.)"""
+    prior = reuse_map.get((session_id, turn_number))
+    if not prior or not prior["resp"]:
+        return None
+    if list(prior["ids"][:top_n]) == list((track_ids or [])[:top_n]):
+        return prior["resp"]
+    return None
+
+
 def cached_response(cache_dir, prompt: str, model: str, best_of: int,
                     gen_fn, fallback: str) -> str:
     """Disk-cache the responder output so reruns don't re-pay Gemini. `gen_fn()`
@@ -432,6 +471,11 @@ def main():
     ap.add_argument("--cache-dir", default=None,
                     help="disk cache for responses (rerun-free); keyed by prompt+model+best_of. "
                          "Point it at a persistent path (e.g. Drive) to skip re-paying on reruns.")
+    ap.add_argument("--reuse-from", default=None,
+                    help="a PRIOR prediction.json (or a saved submission .zip, e.g. on Drive); "
+                         "reuse its predicted_response for any row whose top_n track_ids are "
+                         "unchanged -> only genuinely changed rows hit Gemini. Use a file from the "
+                         "SAME responder config (model/top_n/best_of).")
     ap.add_argument("--structured-personality", action="store_true",
                     help="structured_personality (CoT) mode: the model fills personalization axes "
                          "(mood/intent/energy/sonic_pref/era_pref/familiarity) + a per-axis track "
@@ -468,15 +512,26 @@ def main():
     sess_by_id = {s["session_id"]: s for s in ds}
     item_db_meta = _load_item_meta()
 
-    out_rows, n_gen, n_fallback = [], 0, 0
+    reuse_map = load_reuse_map(args.reuse_from)
+    if reuse_map:
+        print(f"[responder] reuse-from: {len(reuse_map)} prior rows loaded from {args.reuse_from}")
+
+    out_rows, n_gen, n_fallback, n_reused = [], 0, 0, 0
     for i, p in enumerate(preds):
         # Per-row guard: a single malformed session (unexpected schema, missing
         # conversations, bad goal shape) falls back to the original response
         # instead of aborting the whole run. Row count is always conserved.
         fallback = p.get("predicted_response", "") or ""
+        prior = None
         try:
             sess = sess_by_id.get(p["session_id"])
-            if sess is None:
+            # Warm-start: reuse a prior response when the shown (top_n) tracks are
+            # unchanged -> no Gemini call for that row.
+            prior = reuse_response(reuse_map, p["session_id"], p.get("turn_number"),
+                                   p.get("predicted_track_ids"), args.top_n)
+            if prior is not None:
+                new_resp = prior
+            elif sess is None:
                 new_resp = fallback
             else:
                 ctx = render_context(sess["conversations"], item_db_meta, p["turn_number"])
@@ -502,25 +557,28 @@ def main():
         except Exception as e:  # noqa: BLE001 — never let one row kill the run
             print(f"  row {i} ({p.get('session_id')}): error, keeping original response: {e!r}")
             new_resp = fallback
-        if new_resp == fallback:
+            prior = None
+        if prior is not None:
+            n_reused += 1            # warm-started from --reuse-from, no Gemini call
+        elif new_resp == fallback:
             n_fallback += 1
         else:
             n_gen += 1
         out_rows.append(build_output_row(p, new_resp))
-        if args.sleep:
-            time.sleep(args.sleep)
+        if args.sleep and prior is None and new_resp != fallback:
+            time.sleep(args.sleep)   # only pace actual API calls (skip reused/fallback rows)
         if (i + 1) % 25 == 0:
-            print(f"  {i+1}/{len(preds)} (generated={n_gen}, fallback={n_fallback})")
+            print(f"  {i+1}/{len(preds)} (generated={n_gen}, reused={n_reused}, fallback={n_fallback})")
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     json.dump(out_rows, open(args.out, "w"), ensure_ascii=False)
     print(f"\n[responder] wrote {len(out_rows)} rows -> {args.out} "
-          f"(generated={n_gen}, fallback={n_fallback})")
-    # Loud guard: if NOTHING was generated, every row silently kept its original
-    # response — most likely the API/SDK rejected the request (e.g. the best-of-N
-    # generation_config). Surface it so an all-fallback no-op isn't mistaken for a
-    # successful run.
-    if n_gen == 0:
+          f"(generated={n_gen}, reused={n_reused}, fallback={n_fallback})")
+    # Loud guard: if NOTHING was generated OR reused, every row silently kept its
+    # original response — most likely the API/SDK rejected the request (e.g. the
+    # best-of-N generation_config). Surface it so an all-fallback no-op isn't
+    # mistaken for a successful run. (All-reused is a legit no-API run, not a no-op.)
+    if n_gen == 0 and n_reused == 0:
         print("\n*** WARNING: 0 rows generated — ALL fell back to the original "
               "response. This output is a no-op (not the Gemini responder). "
               "Check the API key / model / "
