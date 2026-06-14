@@ -345,3 +345,48 @@ def test_generate_response_falls_back_when_resp_text_raises():
     out = gr.generate_response(_Model(), "prompt", fallback="ORIG",
                                max_attempts=3, sleep_fn=lambda *_: None)
     assert out == "ORIG"
+
+
+# ---- response disk cache (don't re-pay Gemini on reruns) ----------------------
+def test_cached_response_hits_second_time(tmp_path):
+    calls = {"n": 0}
+
+    def gen():
+        calls["n"] += 1
+        return "hello"
+
+    r1 = gr.cached_response(str(tmp_path), "prompt", "m", 1, gen, "fb")
+    r2 = gr.cached_response(str(tmp_path), "prompt", "m", 1, gen, "fb")
+    assert r1 == r2 == "hello"
+    assert calls["n"] == 1  # second call served from disk, no regeneration
+
+
+def test_cached_response_key_separates_model_and_best_of(tmp_path):
+    gr.cached_response(str(tmp_path), "p", "m1", 1, lambda: "A", "fb")
+    assert gr.cached_response(str(tmp_path), "p", "m2", 1, lambda: "B", "fb") == "B"   # diff model
+    assert gr.cached_response(str(tmp_path), "p", "m1", 3, lambda: "C", "fb") == "C"   # diff best_of
+    assert gr.cached_response(str(tmp_path), "p", "m1", 1, lambda: "Z", "fb") == "A"   # original still cached
+
+
+def test_cached_response_does_not_cache_fallback(tmp_path):
+    calls = {"n": 0}
+
+    def gen():
+        calls["n"] += 1
+        return "fb"  # generation failed -> returned the fallback
+
+    gr.cached_response(str(tmp_path), "p", "m", 1, gen, "fb")
+    gr.cached_response(str(tmp_path), "p", "m", 1, gen, "fb")
+    assert calls["n"] == 2  # fallback not cached -> retried when the API is fixed
+
+
+def test_cached_response_no_cache_dir_always_generates(tmp_path):
+    calls = {"n": 0}
+
+    def gen():
+        calls["n"] += 1
+        return "x"
+
+    gr.cached_response(None, "p", "m", 1, gen, "fb")
+    gr.cached_response(None, "p", "m", 1, gen, "fb")
+    assert calls["n"] == 2  # caching off -> always generate

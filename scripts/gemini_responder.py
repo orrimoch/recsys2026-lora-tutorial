@@ -26,15 +26,48 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import sys
 import time
+from pathlib import Path
 
 import pandas as pd
 
 MODEL = os.environ.get("GEMINI_RESPONDER_MODEL", "gemini-2.5-flash")
+
+
+def _resp_cache_path(cache_dir: str, prompt: str, model: str, best_of: int) -> Path:
+    """Cache key = (prompt, model, best_of). The prompt already encodes ctx + the
+    rendered tracks + goal + top_n + plain/structured mode, so only model + best_of
+    must be added (best_of changes generation, not the prompt)."""
+    key = "\n".join([prompt, str(model), str(best_of)])
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
+    return Path(cache_dir) / f"{h}.json"
+
+
+def cached_response(cache_dir, prompt: str, model: str, best_of: int,
+                    gen_fn, fallback: str) -> str:
+    """Disk-cache the responder output so reruns don't re-pay Gemini. `gen_fn()`
+    returns the freshly generated response. A FALLBACK (generation failed -> kept
+    the original) is NOT cached, so a fixed API/key regenerates next run (the same
+    rule the listwise reranker uses for empty parses). cache_dir falsy -> no cache."""
+    cp = None
+    if cache_dir:
+        cp = _resp_cache_path(cache_dir, prompt, model, best_of)
+        if cp.exists():
+            try:
+                return json.loads(cp.read_text(encoding="utf-8"))["response"]
+            except (OSError, json.JSONDecodeError, KeyError, ValueError):
+                pass
+    resp = gen_fn()
+    if cp is not None and resp and resp != fallback:
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        cp.write_text(json.dumps({"response": resp}, ensure_ascii=False),
+                      encoding="utf-8")
+    return resp
 # best-of-N judge: cheaper/faster model scores candidates (generate with the
 # strong responder model, judge with this one to keep cost down).
 JUDGE_MODEL = os.environ.get("GEMINI_JUDGE_MODEL", "gemini-2.5-flash")
@@ -396,6 +429,9 @@ def main():
     ap.add_argument("--top-n", type=int, default=1, help="how many reranked tracks the responder sees")
     ap.add_argument("--limit", type=int, default=0, help="cap rows (0 = all)")
     ap.add_argument("--sleep", type=float, default=0.2, help="seconds between API calls")
+    ap.add_argument("--cache-dir", default=None,
+                    help="disk cache for responses (rerun-free); keyed by prompt+model+best_of. "
+                         "Point it at a persistent path (e.g. Drive) to skip re-paying on reruns.")
     ap.add_argument("--structured-personality", action="store_true",
                     help="structured_personality (CoT) mode: the model fills personalization axes "
                          "(mood/intent/energy/sonic_pref/era_pref/familiarity) + a per-axis track "
@@ -453,12 +489,16 @@ def main():
                     prompt = build_prompt(ctx, tracks, goal)
                     parse_fn = None
                 if args.best_of > 1:
-                    new_resp = generate_best_of_n(model, judge_model, prompt, ctx, tracks,
+                    def _gen():
+                        return generate_best_of_n(model, judge_model, prompt, ctx, tracks,
                                                   fallback, n=args.best_of,
                                                   temperatures=list(DEFAULT_TEMPS),
                                                   parse_fn=parse_fn)
                 else:
-                    new_resp = generate_response(model, prompt, fallback, parse_fn=parse_fn)
+                    def _gen():
+                        return generate_response(model, prompt, fallback, parse_fn=parse_fn)
+                new_resp = cached_response(args.cache_dir, prompt, MODEL, args.best_of,
+                                           _gen, fallback)
         except Exception as e:  # noqa: BLE001 — never let one row kill the run
             print(f"  row {i} ({p.get('session_id')}): error, keeping original response: {e!r}")
             new_resp = fallback
