@@ -75,11 +75,10 @@ def build_enrich_prompt(meta: dict, n_requests: int = 4) -> tuple[str, str]:
         + (f" (album: {album})" if album else "")
         + (f", {y}" if y else "")
         + f". Tags: {tags}." + (f" Popularity: {pop}." if pop is not None else "")
-        + "\n\nWrite, as plain text:\n"
-        "1) 2-3 sentences describing genre, era, mood, instrumentation/energy, and 2-3 "
-        "similar artists.\n"
-        f"2) {n_requests} short, varied example listener requests this track answers "
-        "(by mood, activity, genre, and era — phrased like a person talking to a music app)."
+        + "\n\nBe concise. Plain text, no preamble. Write:\n"
+        "1) 2 sentences: genre, era, mood, energy/instrumentation, and 2 similar artists.\n"
+        f"2) exactly {n_requests} short example listener requests (max ~8 words each), "
+        "varied by mood, activity, genre, and era — phrased like a person talking to a music app."
     )
     return _SYSTEM, user
 
@@ -133,7 +132,7 @@ def main(argv=None) -> int:
     ap.add_argument("--split", default="all_tracks")
     ap.add_argument("--model", default="gemini-2.5-flash-lite")
     ap.add_argument("--n-requests", type=int, default=4)
-    ap.add_argument("--max-output-tokens", type=int, default=320)
+    ap.add_argument("--max-output-tokens", type=int, default=512)  # flash-lite thinking + ~180 output
     ap.add_argument("--batch-size", type=int, default=24, help="concurrent API calls")
     ap.add_argument("--limit", type=int, default=0, help="cap rows (0=all; for a smoke run)")
     args = ap.parse_args(argv)
