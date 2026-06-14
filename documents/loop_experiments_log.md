@@ -871,3 +871,24 @@ Reviews:      code-review on the diff; RecSys on the post-enrichment recall/conv
 --- run ---
 Result:       (pending human run: nb74 #8b-enrich-catalog; SMOKE then full; then re-embed + recall gate)
 Verdict:      (pending)
+
+### EXP-016 wiring + RecSys review (2026-06-14)
+Enrichment RAN (47k, flash-lite thinking-off, ~$4, doc_text on Drive). Reused the PRE-EXISTING
+doc-enrichment pipeline (enrich_track_docs.py + use_doc_enriched channel + embed_catalog --doc-source)
+instead of duplicating; my additions vs the existing one = doc2query example-requests + thinking-off.
+Wiring: embed_catalog --doc-col (reads doc_text); factory _doc_enriched_instruct picks the query prefix
+BY MODEL FAMILY (e5 vs Qwen3 — the channel hardcoded Qwen3, would mis-encode e5). +4 tests.
+RecSys review = SOUND-WITH-CONCERNS. Diagnosis→method fit is the best of the 8 recall levers (only one
+attacking doc TEXT content, not just encoding; differs from flat EXP-003 attributes channel by injecting
+query-distribution vocabulary). HIGHEST RISK: recall@100 can only KILL the lever, never bank it (recall-up
+is the 7x-flat-trap signature). Fixes folded: (a) #8d-convert-enriched = the BINDING nDCG@20 conversion
+gate (enriched union vs baseline, flash@2048 k=50, turn-1); (b) #8c hardened — recall@20 + wall-rescue@20
+(selection-problem check: gold in @100 but not @20 = reranker faces 100 lookalikes, which doc2query can
+WORSEN), loud warning if the e5-raw isolation arm is missing, --max-seq-len 256->384 (the enrichment tail
+= the query-aligned example-requests was at truncation risk), union number labeled upper-bound-not-serve.
+Open concerns to watch: pool-flooding/precision (recall-up/nDCG-flat), channel weight 0.7 redundancy with
+existing dense (sweep / use_base_dense=False=replace), hallucination on obscure tracks (spot-audit), style
+gap (terse requests vs narrative queries) = measure v1 first; if flat-vs-e5-raw, small v2 few-shot re-enrich
+as a false-negative check before declaring dead.
+GATE SEQUENCE: #8c recall kill-check (FREE) -> if enriched wall-rescue >> e5-raw -> #8d conversion (~$2-4,
+BINDING) -> if nDCG +>=0.005 -> wire use_doc_enriched config -> Blind (frozen responder).
