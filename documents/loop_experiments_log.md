@@ -783,6 +783,30 @@ Change:       `rich_candidates` flag (OFF by default → config 205 bit-identica
               change invalidates the 205 cache → first rerun recomputes, safe).
 Pre-registered gate: nb74 #12d-rich, flash@2048 k=50 turn-1: nDCG@20(rich) − nDCG@20(lean) ≥ +0.005
               AND valid-idx ≥ 0.6 → config 210 (one flag) → Blind; else drop, focus responder best-of-N/top_n.
---- run ---
-Result:       (pending human run: nb74 #12d-rich [cells 1→3→4→#12d-rich, GEMINI_API_KEY, ~$2-4 SUBSET=400])
-Verdict:      (pending)
+--- run (EXP-014a: rich reranker context) ---
+Result:       dev turn-1, N=400, flash@2048 k=50:
+                lean (config 205):           nDCG@20 = 0.2701 | valid-idx 0.47
+                rich (year+12tags+goalcat):  nDCG@20 = 0.2646 | valid-idx 0.46
+                rich − lean = −0.0055 (gate ≥ +0.005)
+Verdict:      FAIL (gate not cleared). FRAMING (RecSys): this is FLAT / no-gain, NOT "worse" — −0.0055
+              ≈ 0.4-0.5 SE at N=400 (paired-diff SE ≈ 0.010-0.0125) → statistically indistinguishable
+              from zero. valid-idx parity (0.46 vs 0.47) rules OUT the truncation/token-budget confound
+              (the good negative control) → the extra context genuinely did nothing. Mechanism (hypothesis,
+              not proven): for IN-POOL tracks the flash ranker is near-oracle from conversation+title/artist
+              alone, so candidate-side era/genre/goal_category is redundant. 4th corroboration that the
+              nDCG/reranker line is TAPPED (after fusion EXP-012, bge EXP-013b, + reranker-near-oracle).
+Reviews:      RecSys = CONFIRM-FAIL. Salvage-1 (year-only): SKIP (≤+0.005 sub-noise upside on a tapped
+              lever; needs N≈1500-2500 to even resolve). Salvage-2 (targeted enrichment for OBSCURE/low-pop
+              candidates the LLM doesn't know): the only variant with a real mechanism, but DEFER (more code,
+              small in-pool slice, low EV vs responder) — parked as a note, not a next action. KEEP
+              rich_candidates code (off by default; do NOT ship config 210) for a FUTURE responder-grounding
+              test (richer track block may aid Explanation — the LLM axis — which this nDCG-only gate can't
+              measure).
+Decision:     BANK FAIL. Drop rich_candidates for nDCG; config 210 NOT shipped. config 205 = 0.50 BEST.
+              🔴 PIVOT CONFIRMED → the RESPONDER/LLM axis is the only above-noise composite headroom
+              (0.30 wt × (4.35→4.45-4.95) ≈ +0.03-0.18). NEXT = build the OFFLINE GEMINI JUDGE first (the
+              Tier-1 measurement instrument; without it every responder lever is unmeasurable + leak-prone),
+              THEN top_n_for_prompt + best-of-N A/Bs. CAVEAT (bank it): offline judge = Gemini AND Blind
+              judge = Gemini → guard against JUDGE-OVERFIT (the internal-val trap that burned the nDCG
+              campaign) via a human spot-check + judge prompt/temperature variation. Untested nDCG ideas
+              (flash window #12d-rwin, pro ranker) = lower-EV fallback only if the responder axis stalls.
