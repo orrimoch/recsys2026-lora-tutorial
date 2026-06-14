@@ -892,3 +892,20 @@ gap (terse requests vs narrative queries) = measure v1 first; if flat-vs-e5-raw,
 as a false-negative check before declaring dead.
 GATE SEQUENCE: #8c recall kill-check (FREE) -> if enriched wall-rescue >> e5-raw -> #8d conversion (~$2-4,
 BINDING) -> if nDCG +>=0.005 -> wire use_doc_enriched config -> Blind (frozen responder).
+
+### EXP-016 #8c recall + #8d conversion RESULTS + RecSys verdict (2026-06-14)
+#8c recall kill-check (free, 505 wall golds): e5-ENRICHED wall-rescue@100=120 @20=49 vs e5-RAW 97/36
+(+23/+13) — enrichment beats the SAME encoder on raw metadata -> doc2query mechanism ALIVE. (baseline cs
+r@100=0.495; e5-enriched alone 0.482 < cs, value is additive. proxy line rescue=0 = the predicted concat
+artifact, ignore.)
+#8d conversion (flash@2048 k=50, turn-1 N=400): baseline union(cs) nDCG@20=0.2676 -> union+doc-enriched
+0.2785 = +0.0110 (gate >=+0.005 PASS); wall->top20 0->8/195. FIRST lever to crack wall AND convert.
+RecSys = CONFIRM-FIRST (do NOT ship yet). (1) magnitude ~+0.005 composite = inside ±0.05 Blind noise
+(+0.0110 ~1 SE, no CI) BUT the 0->8 wall->top20 is a trustworthy mechanism signal. (2) STRIPPED-UNION
+confound = config-207 verbatim: #8d baseline lacks pg/ColBERT/CLAP (all attack the same wall); doc-enriched
+= same e5 on same wall -> redundancy risk -> +0.0110 may shrink/flip on full union (e5 did: +0.0128 dev ->
+-0.025 Blind). (3) NEXT = #8e +pg dev confirm (pg = highest-overlap wall channel, loadable in nb74 per
+EXP-004): union(cs+pg) vs union(cs+pg+doc), gate Δ>+0.005 AND wall->top20 net-new>=~5. (4) ADD-vs-REPLACE
+from the same run: doc rescues overlap pg's >=6/8 -> REPLACE pg with doc-enriched (cheaper: precomputed
+embeds, no per-query Gemini pg; keeps channel count flat = no k=100 crowding). enriched catalog BANKED as
+a structural asset regardless.
