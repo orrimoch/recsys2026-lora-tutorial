@@ -28,10 +28,14 @@ class GeminiClient:
     """
 
     def __init__(self, model: str = "gemini-2.5-flash-lite", api_key: str | None = None,
-                 temperature: float = 0.0, max_output_tokens: int = 320):
+                 temperature: float = 0.0, max_output_tokens: int = 320,
+                 thinking_budget: int | None = None):
         self.model = model
         self.temperature = float(temperature)
         self.max_output_tokens = int(max_output_tokens)
+        # thinking_budget=0 disables "thinking" tokens (cheaper + no budget-eating on
+        # non-reasoning tasks like catalog enrichment). None = SDK default (unchanged).
+        self.thinking_budget = thinking_budget
         self._api_key = (api_key or os.environ.get("GEMINI_API_KEY")
                          or os.environ.get("GOOGLE_API_KEY"))
         self._client = None
@@ -47,14 +51,17 @@ class GeminiClient:
 
     def generate(self, system_instruction: str, user_content: str) -> str:
         from google.genai import types
+        cfg = dict(
+            system_instruction=system_instruction,
+            temperature=self.temperature,
+            max_output_tokens=self.max_output_tokens,
+        )
+        if self.thinking_budget is not None:
+            cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=self.thinking_budget)
         resp = self._ensure().models.generate_content(
             model=self.model,
             contents=user_content,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=self.temperature,
-                max_output_tokens=self.max_output_tokens,
-            ),
+            config=types.GenerateContentConfig(**cfg),
         )
         return getattr(resp, "text", None) or ""
 

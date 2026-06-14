@@ -132,7 +132,7 @@ def main(argv=None) -> int:
     ap.add_argument("--split", default="all_tracks")
     ap.add_argument("--model", default="gemini-2.5-flash-lite")
     ap.add_argument("--n-requests", type=int, default=4)
-    ap.add_argument("--max-output-tokens", type=int, default=512)  # flash-lite thinking + ~180 output
+    ap.add_argument("--max-output-tokens", type=int, default=320)  # thinking OFF -> ~180 output fits
     ap.add_argument("--batch-size", type=int, default=24, help="concurrent API calls")
     ap.add_argument("--limit", type=int, default=0, help="cap rows (0=all; for a smoke run)")
     args = ap.parse_args(argv)
@@ -159,7 +159,10 @@ def main(argv=None) -> int:
     pending = select_pending(rows, set(done))
     print(f"[enrich] {len(rows)} tracks total | {len(pending)} pending | model={args.model}")
 
-    client = GeminiClient(model=args.model, max_output_tokens=args.max_output_tokens)
+    # thinking_budget=0: enrichment is descriptive, not reasoning -> no thinking tokens
+    # (cheaper, faster, and avoids thinking eating the output budget -> no truncation).
+    client = GeminiClient(model=args.model, max_output_tokens=args.max_output_tokens,
+                          thinking_budget=0)
     by_id = {r["track_id"]: r for r in rows}
 
     def _one(r):
