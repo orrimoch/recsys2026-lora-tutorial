@@ -810,3 +810,32 @@ Decision:     BANK FAIL. Drop rich_candidates for nDCG; config 210 NOT shipped. 
               judge = Gemini → guard against JUDGE-OVERFIT (the internal-val trap that burned the nDCG
               campaign) via a human spot-check + judge prompt/temperature variation. Untested nDCG ideas
               (flash window #12d-rwin, pro ranker) = lower-EV fallback only if the responder axis stalls.
+
+---
+
+## EXP-015 — artist-hypothesis generative recall of the WALL (free local Qwen) — 2026-06-14
+Hypothesis:   nDCG = recall × conversion. The wall (~43% turn-1 golds, ~99% new-artist) has recall=0
+              and is the dominant gap. Data audit (2026-06-14) confirmed there is NO user listening-history
+              to exploit, so the ONLY path to a new artist is EXTERNAL music knowledge: an LLM names ARTISTS
+              the listener would enjoy -> ground EXACTLY (artist_name -> catalog tracks). Artist granularity
+              is far more groundable than track-level propose-ground (no fuzzy title match). Free local Qwen
+              (user: avoid Gemini cost; the production channel must be free).
+Lever:        recall (generative, wall). Then CONVERSION gate (recall-up != nDCG-up = the campaign trap).
+Phase A (this probe, $0, nb74 #15-artisthyp): can a FREE model even NAME the walled gold's artist?
+              Self-interpreting: reports (1) no-model baseline = gold artist NAMED in the conversation
+              (BM25 likely already gets these) and (2) Qwen artist-hit on the NOT-named subset = THE number
+              (can a free model reach artists the convo never mentions). Qwen-7B, fallback 14B-4bit.
+Pre-registered gate (Phase A): Qwen artist-hit on the NOT-named (true-wall) subset >= ~15% -> proceed.
+              ~0% -> retry 14B; still ~0% -> wall unreachable even generatively+free -> nDCG CLOSED -> pivot
+              to the responder/LLM axis (proof-by-exhaustion).
+Phase B (only if A passes): build the `artist_hypothesis` recall channel (Qwen artists -> artist_name
+              catalog lookup -> their tracks -> fuse into union), then the BINDING CONVERSION gate: do the
+              rescued wall golds reach the reranker window AND convert to turn-1 nDCG@20 (>= +0.005 vs the
+              0.6B baseline, bootstrap CI excl 0)? recall-up-but-nDCG-flat = FAIL (rescued golds stranded
+              outside the k=50 window = the fusion-retention wall) -> needs rescue-aware fusion, not just recall.
+Blind-safety:  artist-hypothesis uses ONLY the conversation (no `thought`/gold) -> Blind-safe. (Confirmed:
+              Blind-A has the `thought` field but only on HISTORY turns; the predicted turn has none.)
+Reviews:      code-review on the diff (module + cell); RecSys-researcher on the Phase A verdict.
+--- run ---
+Result:       (pending human run: nb74 cells 1->3->4->#15-artisthyp; free Qwen, ~8-15 min G4, no API key)
+Verdict:      (pending)
