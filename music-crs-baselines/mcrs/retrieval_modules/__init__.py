@@ -29,6 +29,18 @@ E5_MUSIC_INSTRUCT = (
 )
 
 
+def _doc_enriched_instruct(model_name: str, enabled: bool):
+    """Pick the query-instruct prefix for an enriched-doc dense channel BY MODEL FAMILY.
+    e5 and Qwen3-Embedding are asymmetric (need their own query prefix); bge-m3 etc. are
+    symmetric (no prefix -> set enabled=False). enabled=False -> no instruct. Returns
+    (instruct_prefix_or_None, instruct_label)."""
+    if not enabled:
+        return None, "raw"
+    if "e5" in (model_name or "").lower():
+        return E5_MUSIC_INSTRUCT, "e5-instruct-music-v1"
+    return QWEN3_MUSIC_INSTRUCT, "instruct-music-v1"
+
+
 def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = None) -> list[dict]:
     """Sub-retriever specs for wrrf_union_v1. HyDE is opt-in via use_hyde.
 
@@ -357,13 +369,13 @@ def load_retrieval_module(
     # extra_config: embed_model (default bge-m3, symmetric), embed_label, instruct.
     elif retrieval_type == "dense_doc_enriched_local":
         ec = extra_config or {}
-        _use_instruct = bool(ec.get("instruct", False))
+        model_name = ec.get("embed_model", "BAAI/bge-m3")
+        instr, instr_label = _doc_enriched_instruct(model_name, bool(ec.get("instruct", False)))
         return DENSE_LOCAL(
             dataset_name, track_split_types, corpus_types, cache_dir,
-            model_name=ec.get("embed_model", "BAAI/bge-m3"),
+            model_name=model_name,
             embed_label=ec.get("embed_label", "doc-enriched-v1"),
-            instruct=(QWEN3_MUSIC_INSTRUCT if _use_instruct else None),
-            instruct_label=("instruct-music-v1" if _use_instruct else "raw"),
+            instruct=instr, instruct_label=instr_label,
         )
     # Phase 1 Bundle B — Qwen3-Embedding-4B over track metadata.
     # Same family as the current 0.6B; tests "is the dense just under-powered?"

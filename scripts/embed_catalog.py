@@ -72,10 +72,13 @@ def main():
     )
     parser.add_argument(
         "--doc-source", default=None,
-        help="Track B: parquet from scripts/enrich_track_docs.py with columns "
-             "(track_id, enriched_doc). When set, the LLM-written enriched_doc is "
-             "the doc text (overrides --fields/--doc-format) -> a strong doc-side "
-             "dense channel. Tracks absent from the parquet fall back to build_doc_text.")
+        help="Track B: parquet from enrich_track_docs.py / enrich_catalog.py with a "
+             "track_id column + a doc-text column (see --doc-col). When set, the "
+             "LLM-written doc is the text (overrides --fields/--doc-format). Tracks "
+             "absent from the parquet fall back to build_doc_text.")
+    parser.add_argument(
+        "--doc-col", default="enriched_doc",
+        help="Column in --doc-source holding the doc text (enrich_catalog.py writes 'doc_text').")
     parser.add_argument("--catalog-dataset", default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata")
     parser.add_argument("--catalog-split", default="all_tracks")
     parser.add_argument("--batch-size", type=int, default=64)
@@ -104,7 +107,10 @@ def main():
     if args.doc_source:
         import pandas as pd
         doc_df = pd.read_parquet(args.doc_source)
-        doc_map = dict(zip(doc_df["track_id"], doc_df["enriched_doc"]))
+        if args.doc_col not in doc_df.columns:
+            raise SystemExit(f"--doc-col '{args.doc_col}' not in {args.doc_source} "
+                             f"(columns: {list(doc_df.columns)})")
+        doc_map = dict(zip(doc_df["track_id"], doc_df[args.doc_col]))
         n_have = sum(1 for r in ds if doc_map.get(r["track_id"]))
         print(f"[embed_catalog] doc-source: {n_have}/{len(ds)} tracks have an enriched_doc",
               file=sys.stderr)
