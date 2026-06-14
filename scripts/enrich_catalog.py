@@ -111,6 +111,20 @@ def select_pending(rows, done_ids) -> list:
     return [r for r in rows if r.get("track_id") not in done_ids]
 
 
+def build_records(done: dict, by_id: dict, prev_doc: dict | None = None) -> list:
+    """All enriched rows to persist. Recompute doc_text from metadata for tracks in this
+    run (by_id); carry forward the saved doc_text for prior-only tracks. This makes a
+    limited/SMOKE re-run over an existing full parquet NON-destructive (it preserves every
+    prior row instead of truncating to the current subset)."""
+    prev_doc = prev_doc or {}
+    recs = []
+    for tid, enr in done.items():
+        r = by_id.get(tid)
+        doc = enriched_document(r, enr) if r is not None else prev_doc.get(tid, "")
+        recs.append({"track_id": tid, "enriched_text": enr, "doc_text": doc})
+    return recs
+
+
 # ---- runner (IO; lazy imports so the pure helpers import without heavy deps) ----
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="doc2query catalog enrichment (resumable).")
@@ -137,10 +151,11 @@ def main(argv=None) -> int:
     if args.limit:
         rows = rows[: args.limit]
 
-    done = {}
+    done, prev_doc = {}, {}
     if os.path.exists(args.out):
         prev = pd.read_parquet(args.out)
         done = dict(zip(prev["track_id"], prev["enriched_text"]))
+        prev_doc = dict(zip(prev["track_id"], prev["doc_text"]))   # carry-forward for limited re-runs
         print(f"[enrich] resume: {len(done)} already enriched in {args.out}")
     pending = select_pending(rows, set(done))
     print(f"[enrich] {len(rows)} tracks total | {len(pending)} pending | model={args.model}")
@@ -160,15 +175,10 @@ def main(argv=None) -> int:
         return r["track_id"], ""        # failed -> empty, NOT cached (retried next run)
 
     def _flush():
-        recs = []
-        for tid, r in by_id.items():
-            enr = done.get(tid)
-            if enr is None:
-                continue
-            recs.append({"track_id": tid, "enriched_text": enr,
-                         "doc_text": enriched_document(r, enr)})
+        # code-review N1: emit EVERY enriched track (this run + prior) so a limited/SMOKE
+        # re-run over an existing full parquet never truncates it.
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-        pd.DataFrame(recs).to_parquet(args.out, index=False)
+        pd.DataFrame(build_records(done, by_id, prev_doc)).to_parquet(args.out, index=False)
 
     n_new = 0
     with ThreadPoolExecutor(max_workers=max(1, args.batch_size)) as ex:

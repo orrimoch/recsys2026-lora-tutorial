@@ -62,3 +62,17 @@ def test_select_pending_skips_already_done():
     rows = [{"track_id": "a"}, {"track_id": "b"}, {"track_id": "c"}]
     assert [r["track_id"] for r in ec.select_pending(rows, {"b"})] == ["a", "c"]
     assert ec.select_pending(rows, {"a", "b", "c"}) == []
+
+
+def test_build_records_carries_prior_rows_on_limited_rerun():
+    # full parquet already has a,b,c; a limited re-run only loaded track 'a' into by_id.
+    # build_records must still emit b and c (carried forward) -> no truncation (N1).
+    done = {"a": "ea", "b": "eb", "c": "ec"}
+    by_id = {"a": dict(META, track_id="a")}                 # only 'a' in this limited run
+    prev_doc = {"a": "old_a", "b": "doc_b", "c": "doc_c"}
+    recs = ec.build_records(done, by_id, prev_doc)
+    assert {r["track_id"] for r in recs} == {"a", "b", "c"}  # all preserved
+    da = next(r for r in recs if r["track_id"] == "a")
+    assert "Daft Punk" in da["doc_text"]                     # 'a' recomputed from metadata
+    db = next(r for r in recs if r["track_id"] == "b")
+    assert db["doc_text"] == "doc_b"                          # 'b' carried forward verbatim
