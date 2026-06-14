@@ -1,0 +1,80 @@
+# 209 — config 205 + EXP-016 doc2query doc-enriched dense channel (use_doc_enriched). #8e-pg-confirm
+# (nb74 cell 12) PASSED: doc-enriched over (sasrec+pg) gave turn-1 nDCG@20 +0.0359 with 12 net-new wall
+# rescues -> ORTHOGONAL to pg -> ADD as ONE change, responder FROZEN. The enriched catalog is re-embedded
+# with multilingual-e5-large-instruct over the doc2query catalog (label doc-enriched-e5; built by nb74
+# cell 10 #8c via scripts/embed_catalog.py --doc-source catalog_enriched.parquet --doc-col doc_text).
+# CAVEAT: #8e validated doc-enriched vs (sasrec+pg) only — NOT over this fuller stack's ColBERT+CLAP wall
+# channels. The add is the cell's recommended ship, but the doc x {colbert,clap} interaction is untested
+# (k=100 crowding risk). Everything else = config 205 (the 0.50 BEST). Responder reuse: serve track_ids
+# with --retrieval_only and graft predicted_response from the 0.50 file (nb74 Blind-A reuse cell).
+
+lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
+lora_path: null
+lora_max_rank: 32
+
+retrieval_type: "wrrf_union_v1"
+
+use_sasrec: true
+w_sasrec: 1.0
+sasrec_model_dir: "sasrec_v1"
+
+use_propose_ground: true
+w_propose_ground: 0.5
+pg_model: "gemini-2.5-flash"
+pg_n_proposals: 20
+pg_batch_size: 4
+pg_inner_dense: "dense_metadata_qwen3_instruct"
+
+# ColBERT full-catalog late-interaction recall channel (text).
+use_colbert: true
+w_colbert: 1.0
+colbert_index_folder: null
+colbert_index_name: "colbert-music-v1"
+colbert_model: null
+
+# CLAP text->audio recall channel (audio, P4) — the orthogonal wall lever.
+use_clap_text: true
+w_clap_text: 1.0
+clap_text_model: "laion/larger_clap_music"
+
+# EXP-016 doc2query doc-enriched dense channel (the #8e SHIP-gated add). Params match
+# nb74 cell 12 #8e pool_pgd exactly: e5-instruct encoder over the enriched catalog,
+# query-side instruct prefix on, default weight 0.7 (primary content channel).
+use_doc_enriched: true
+w_doc_enriched: 0.7
+doc_enriched_model: "intfloat/multilingual-e5-large-instruct"
+doc_enriched_label: "doc-enriched-e5"
+doc_enriched_instruct: true
+
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+retrieval_topk: 100
+reranker_type: "llm_listwise"
+reranker_model_path: "gemini-2.5-flash"
+reranker_max_output_tokens: 2048
+
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 320
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw_with_goal"
+
+use_vllm: false
+
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+use_cmqr: false

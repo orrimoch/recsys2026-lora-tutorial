@@ -628,13 +628,19 @@ class CRS_BASELINE:
             "response": response,
         }
 
-    def batch_chat(self, batch_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def batch_chat(self, batch_data: List[Dict[str, Any]],
+                   generate_response: bool = True) -> List[Dict[str, Any]]:
         """Run multiple CRS turns in batch: retrieve items and generate responses.
         Args:
             batch_data: List of dictionaries, each containing:
                 - user_query: The user's latest message or request.
                 - user_id: Optional user identifier for personalization.
                 - session_memory: List of chat history messages.
+            generate_response: When False, skip Stage 2 (the responder LM) and
+                return a schema-valid stub response ("ok") instead. retrieval_items
+                (the nDCG axis) is still fully computed via retrieval + rerank.
+                Used by run_inference_blindset.py --retrieval_only to get fresh
+                track_ids cheaply when reusing frozen responses (EXP-016).
         Returns:
             A list of dictionaries, each with keys:
                 - user_id: The user identifier (may be None).
@@ -911,8 +917,14 @@ class CRS_BASELINE:
             for items in batch_retrieval_items
         ]
 
-        # Stage 2: Batch response generation.
-        if self.response_reranker is not None and hasattr(self.lm, 'batch_response_generation_multi'):
+        # Stage 2: Batch response generation. Skipped in retrieval-only mode —
+        # the responder is the costly stage (~35-65 min on Blind-A) and EXP-016
+        # reuses frozen responses, so we emit a schema-valid stub and graft real
+        # responses downstream. retrieval_items (the nDCG axis) is fully computed
+        # above regardless. The stub mirrors run_inference_devset_retrieval_only.
+        if not generate_response:
+            responses = ["ok"] * len(batch_data)
+        elif self.response_reranker is not None and hasattr(self.lm, 'batch_response_generation_multi'):
             # Multi-candidate + reward-model rerank path (exp 026+).
             # Sample K responses per query, score each, ship the best one.
             candidates_per_query = self.lm.batch_response_generation_multi(
@@ -954,8 +966,8 @@ class CRS_BASELINE:
         # <response>...</response>. Gemini scores predicted_response, so
         # strip the user_state envelope before returning. Triggered by
         # naming convention: response_prompt_name starts with
-        # 'response_generation_cot_'.
-        if self.response_prompt_name.startswith("response_generation_cot_"):
+        # 'response_generation_cot_'. Skipped under the retrieval-only stub.
+        if generate_response and self.response_prompt_name.startswith("response_generation_cot_"):
             responses = [extract_cot_response(r) for r in responses]
 
         # Prepare results

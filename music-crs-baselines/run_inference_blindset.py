@@ -246,7 +246,7 @@ def main(args):
         for i in tqdm(range(0, len(batch_data), args.batch_size), desc="Batch inference"):
             batch = batch_data[i:i+args.batch_size]
             batch_metadata = metadata[i:i+args.batch_size]
-            results = music_crs.batch_chat(batch)
+            results = music_crs.batch_chat(batch, generate_response=not args.retrieval_only)
             for j, result in enumerate(results):
                 inference_results.append({
                     "session_id": batch_metadata[j]['session_id'],
@@ -333,6 +333,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--end_idx", type=int, default=-1,
         help="End index (exclusive). -1 means all. Used for subprocess chunking."
+    )
+    parser.add_argument(
+        "--retrieval_only", action="store_true",
+        help="Skip the responder (Stage 2): compute retrieval + rerank to get "
+             "predicted_track_ids and emit predicted_response='ok' as a stub. "
+             "Use when reusing frozen responses (EXP-016) — grafting real responses "
+             "from a prior submission downstream avoids the ~35-65 min responder run."
     )
     args = parser.parse_args()
     main(args)
