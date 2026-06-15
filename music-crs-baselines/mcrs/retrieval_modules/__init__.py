@@ -175,7 +175,7 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
     # world knowledge — outside the collaborative/content graph — to reach the
     # new-artist wall. Opt-in via use_propose_ground (loads Qwen2.5-7B like HyDE).
     if ec.get("use_propose_ground"):
-        specs.append({
+        pg_spec = {
             "type": "propose_ground", "topk_internal": 100,
             "weight": float(ec.get("w_propose_ground", 0.5)),
             "extra_config": {
@@ -184,7 +184,18 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
                 "batch_size": int(ec.get("pg_batch_size", 16)),
                 "inner_dense": ec.get("pg_inner_dense", "dense_metadata_qwen3_instruct"),
             },
-        })
+        }
+        # Segment routing (set here, NOT in the block above, which runs before pg is
+        # appended): pg is a cold-firable generative WALL channel (LLM proposes answer
+        # tracks from world knowledge) -> route to COLD, where the session channels are
+        # absent; on WARM (history present) same_artist/sasrec carry recall, so pg
+        # defaults OFF for warm (w_pg_warm=0.0). NOTE: the weight only gates FUSION —
+        # pg still GENERATES for every query, so warm_weight=0 is a QUALITY route, not a
+        # serve-cost saving (skipping warm generation would need conditional retrieval).
+        if ec.get("use_segment_routing"):
+            pg_spec["cold_weight"] = float(ec.get("w_pg_cold", ec.get("w_propose_ground", 0.5)))
+            pg_spec["warm_weight"] = float(ec.get("w_pg_warm", 0.0))
+        specs.append(pg_spec)
     if ec.get("use_sasrec"):
         specs.append({
             "type": "sasrec_seq", "topk_internal": 100,

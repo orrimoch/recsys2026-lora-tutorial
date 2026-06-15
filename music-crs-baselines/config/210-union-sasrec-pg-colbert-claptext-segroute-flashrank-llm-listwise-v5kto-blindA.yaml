@@ -23,8 +23,13 @@ w_qwen_cold: 0.7      # dense: keep (cold-strong)
 w_qwen_warm: 0.4      # dense: DOWN on warm (new finding — warm-weak/diluting)
 # same_artist auto-routes cold=0.0 / warm=1.5; bm25 stays symmetric (1.0).
 
+# pg = cold-firable generative WALL channel -> segment-routed to COLD only (warm carried by
+# same_artist/sasrec). w_pg_warm=0.0 zeroes pg's FUSION on warm (pg still generates for all queries
+# -> a QUALITY route, not a serve-cost cut). Applied because use_segment_routing is on (above).
 use_propose_ground: true
 w_propose_ground: 0.5
+w_pg_cold: 0.5
+w_pg_warm: 0.0
 pg_model: "gemini-2.5-flash"
 pg_n_proposals: 20
 pg_batch_size: 4

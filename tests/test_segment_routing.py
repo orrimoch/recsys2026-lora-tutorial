@@ -82,3 +82,21 @@ def test_segment_routing_sets_cold_warm_weights():
     art = specs["same_artist"]
     assert dense["cold_weight"] >= dense["warm_weight"]
     assert art["warm_weight"] > art["cold_weight"]
+
+
+def test_segment_routing_pg_is_cold_only():
+    # pg is a cold-firable generative wall channel -> routed to COLD (warm off) when
+    # segment routing is on. Without routing it stays symmetric (no cold/warm keys).
+    routed = {s["type"]: s for s in _wrrf_union_v1_specs(
+        {"use_segment_routing": True, "use_propose_ground": True})}["propose_ground"]
+    assert routed["cold_weight"] > routed["warm_weight"]
+    assert routed["warm_weight"] == 0.0
+    plain = {s["type"]: s for s in _wrrf_union_v1_specs(
+        {"use_propose_ground": True})}["propose_ground"]
+    assert "cold_weight" not in plain  # symmetric unless routing is on
+
+
+def test_segment_routing_pg_warm_weight_override():
+    specs = {s["type"]: s for s in _wrrf_union_v1_specs(
+        {"use_segment_routing": True, "use_propose_ground": True, "w_pg_warm": 0.3})}
+    assert specs["propose_ground"]["warm_weight"] == 0.3
