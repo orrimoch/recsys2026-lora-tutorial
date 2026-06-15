@@ -18,6 +18,35 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+
+def resolve_sub_queries(
+    default_queries: list[str],
+    batch_context: Optional[list[dict]],
+    query_key: Optional[str],
+) -> list[str]:
+    """Per-channel query routing (Option B).
+
+    Most sub-retrievers share the one `default_queries` string. A channel may
+    instead read its query from `batch_context[i][query_key]` — e.g. ColBERT reads
+    a compact 'colbert_query' pre-built at the call site (serve / train / nb74) via
+    build_retrieval_query(mode="compact_colbert"), so the same humble query is used
+    in BOTH training and Blind-A inference. Falls back to default_queries[i] when the
+    context row is missing, the key is absent, or its value is blank. When query_key
+    is falsy the default list is returned unchanged (the common path — no per-channel
+    override), so existing channels are byte-for-byte unaffected.
+    """
+    if not query_key or not batch_context:
+        return default_queries
+    out: list[str] = []
+    for i, q in enumerate(default_queries):
+        ctx = batch_context[i] if i < len(batch_context) else None
+        alt = ctx.get(query_key) if isinstance(ctx, dict) else None
+        if isinstance(alt, str) and alt.strip():
+            out.append(alt)
+        else:
+            out.append(q)
+    return out
+
 # EXP-012 — channel-quota fusion default targets: the ORTHOGONAL wall-cracker
 # channels whose single-channel rescues get drowned by weighted-RRF (3 channels
 # @ rank30 outscore 1 channel @ rank5). NOT bm25 / 0.6b-dense / same_artist /
@@ -97,6 +126,10 @@ class RRF_MODEL:
                 "retriever": sub, "topk": sub_topk,
                 "weight": weight, "cold_weight": cold_weight,
                 "warm_weight": warm_weight, "label": retriever_type,
+                # Option B per-channel query: when set, this sub reads its query
+                # from batch_context[i][query_key] instead of the shared query
+                # (e.g. ColBERT -> 'colbert_query'). None = shared query (default).
+                "query_key": spec.get("query_key"),
             })
         print(f"[rrf] ready — k={self.k}, {len(self.subs)} sub-retriever(s)")
 
@@ -114,20 +147,33 @@ class RRF_MODEL:
         per_sub: list[list[list[str]]] = []
         for sub in self.subs:
             print(f"[rrf] running sub: {sub['label']}")
+            # Option B: a channel with a query_key reads its own query from
+            # batch_context (e.g. ColBERT's compact query); others get the shared one.
+            qk = sub.get("query_key")
+            sub_queries = resolve_sub_queries(queries, batch_context, qk)
+            if qk:
+                # C2 guard: surface whether the per-channel query actually arrived, so a
+                # flag/checkpoint mismatch (routing on but caller never set the key ->
+                # silent fallback to the shared full query) is VISIBLE, not silent.
+                routed = sub_queries is not queries and (not queries or sub_queries[0] != queries[0])
+                sample = (sub_queries[0] if sub_queries else "")[:160].replace("\n", " ⏎ ")
+                print(f"[rrf] sub {sub['label']}: query_key='{qk}' "
+                      f"{'ROUTED per-channel query' if routed else 'FELL BACK to shared query (key missing/blank!)'}"
+                      f" | sample: {sample!r}")
             try:
                 sub_results = sub["retriever"].batch_text_to_item_retrieval(
-                    queries, topk=sub["topk"],
+                    sub_queries, topk=sub["topk"],
                     batch_context=batch_context, user_ids=user_ids,
                 )
             except TypeError:
                 # Back-compat: sub-retriever doesn't accept batch_context yet.
                 try:
                     sub_results = sub["retriever"].batch_text_to_item_retrieval(
-                        queries, topk=sub["topk"], user_ids=user_ids,
+                        sub_queries, topk=sub["topk"], user_ids=user_ids,
                     )
                 except TypeError:
                     sub_results = sub["retriever"].batch_text_to_item_retrieval(
-                        queries, topk=sub["topk"],
+                        sub_queries, topk=sub["topk"],
                     )
             per_sub.append(sub_results)
         return per_sub, [sub["label"] for sub in self.subs]

@@ -247,6 +247,12 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
         specs.append({
             "type": "colbert_index", "topk_internal": 100,
             "weight": float(ec.get("w_colbert", 1.0)),
+            # Option B: ColBERT reads its own compact query (goal+culture+last user
+            # turn) from batch_context['colbert_query'], built at the call site via
+            # build_retrieval_query(mode="compact_colbert"). Other channels keep the
+            # shared raw_enriched query. Opt-in: only routed when the call site
+            # populates the key, else falls back to the shared query (back-compat).
+            "query_key": "colbert_query" if ec.get("colbert_compact_query") else None,
             "extra_config": {
                 "colbert_index_folder": ec.get("colbert_index_folder"),
                 "colbert_index_name": ec.get("colbert_index_name", "colbert-music-v1"),

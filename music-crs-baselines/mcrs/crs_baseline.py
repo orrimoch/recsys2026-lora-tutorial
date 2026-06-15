@@ -68,6 +68,16 @@ def build_retrieval_query(
       'last_user_with_goal': last_user + ' || goal: <listener_goal>' when
                            goal_text is provided. Adds light context useful
                            when the user query is short.
+      'compact_colbert'  : The 512-ceiling concession for ColBERT. High-signal
+                           slice only: 'goal: <g>' + 'culture: <c>' (labelled,
+                           FIRST for truncation-safety) + the bare most-recent
+                           user turn (no role prefix). goal/culture omitted when
+                           absent -> degrades to bare last_user. No demographics.
+                           The SHARED builder for serve + the ColBERT train-data
+                           builder so the query is byte-identical between training
+                           and inference. (nb74 DEV harness NOT yet wired to this —
+                           DEV ColBERT recall is not a valid gate for this mode until
+                           it is.)
       'raw_with_goal'    : 'raw' (full newline-joined history) plus a trailing
                            '\\ngoal: <listener_goal>' line when goal_text is
                            provided. Matches the nb74 cell-4 dev recall harness
@@ -128,6 +138,42 @@ def build_retrieval_query(
             last_user = str(session_memory[i].get("content", "")).strip()
             last_user_idx = i
             break
+    if mode == "compact_colbert":
+        # "Humble" ColBERT query (the 512-ceiling concession): feed only the
+        # high-signal slice — goal + culture + the most recent user turn — instead
+        # of the full dialog, which truncates to noise (75-88% of real queries
+        # exceed any feasible q_len). goal/culture are labelled and placed FIRST so
+        # right-truncation on a rare long user turn drops only the query tail, never
+        # the durable intent/taste. The user turn carries NO role prefix (role labels
+        # are retrieval noise, cf. mode="last_user"). Lines are omitted when absent,
+        # so the format degrades to bare last_user. No demographics (intentional).
+        # SHARED by serve + the ColBERT train-data builder so the query is byte-identical
+        # between training and inference (nb74 DEV harness not yet wired — see docstring).
+        lines = []
+        gt = (goal_text or "").strip()
+        if gt:
+            lines.append(f"goal: {gt}")
+        # Self-defending profile parse (I1): a caller may hand a JSON/repr STRING
+        # instead of a dict; parse it so 'culture' survives regardless of caller —
+        # else serve (string) drops culture while train (dict) keeps it -> a silent
+        # train/serve skew on the ~75% warm sessions this query exists to help.
+        up = user_profile
+        if isinstance(up, str):
+            import json as _json
+            try:
+                up = _json.loads(up)
+            except Exception:
+                try:
+                    import ast as _ast
+                    up = _ast.literal_eval(up)
+                except Exception:
+                    up = {}
+        up = up if isinstance(up, dict) else {}
+        culture = str(up.get("preferred_musical_culture") or "").strip()
+        if culture:
+            lines.append(f"culture: {culture}")
+        lines.append(last_user)
+        return "\n".join(lines)
     if mode == "bge_m3_structured":
         # User block (age/country/gender from user_profile if present).
         up = user_profile if isinstance(user_profile, dict) else {}
@@ -658,6 +704,11 @@ class CRS_BASELINE:
         # Prepare batch inputs
         sys_prompts = []
         retrieval_inputs = []
+        # Option B: per-row compact ColBERT query (goal+culture+last user turn),
+        # built via the SAME build_retrieval_query(mode="compact_colbert") as the
+        # train builder. Threaded into batch_context['colbert_query']; the union
+        # routes it to ColBERT only when colbert_compact_query is set (else ignored).
+        colbert_queries: list[str] = []
         session_memories = []
         user_ids: list[Optional[str]] = []
         goal_categories: list[Optional[str]] = []
@@ -714,6 +765,12 @@ class CRS_BASELINE:
                 except Exception as e:
                     print(f"[CRS_BASELINE] intent_state failed on session={sid[:8]} turn={tn}: {e!r}")
             retrieval_inputs.append(retrieval_input)
+            # Compact ColBERT query from the SAME session_memory (includes the current
+            # user turn -> "last user turn") + parsed profile. Independent of the Q*
+            # rewrite above (that only affects the shared raw_enriched query).
+            colbert_queries.append(build_retrieval_query(
+                session_memory, mode="compact_colbert",
+                goal_text=goal_text, user_profile=user_profile_for_query))
             session_memories.append(session_memory)
             user_ids.append(user_id)
             # Session-level side channels for task-aware rerankers (A1 LGBM).
@@ -764,7 +821,13 @@ class CRS_BASELINE:
         # query (it was appended above into session_memories but batch_data holds
         # the original pre-append list — use data.get("session_memory") for prior).
         batch_context = []
-        for data in batch_data:
+        # colbert_queries is built positionally in the first loop (one append per
+        # batch_data row, no skips); pin that so a future early-continue there can't
+        # silently misalign the compact query to the wrong session.
+        assert len(colbert_queries) == len(batch_data), (
+            f"colbert_queries ({len(colbert_queries)}) misaligned with batch_data "
+            f"({len(batch_data)}) — first-loop appends must be 1:1 with batch_data")
+        for _i, data in enumerate(batch_data):
             prior_history = data.get("session_memory", [])  # {role, content} dicts
             # Recover RAW played track_ids via the shared helper (bug #1 fix):
             # the old inline filter checked role=="music", but the inference
@@ -777,6 +840,8 @@ class CRS_BASELINE:
                 "user_profile": data.get("user_profile_raw"),
                 "conversation_goal": data.get("conversation_goal"),
                 "history_tids": _played,
+                # Option B per-channel query (built in the first loop, same index).
+                "colbert_query": colbert_queries[_i],
                 # SASRec was trained on user-turns-only dialog that INCLUDES the
                 # current user request (train_sasrec._walk_split). prior_history
                 # is the pre-append history, so rebuild the training turn list via

@@ -68,11 +68,19 @@ def _prior_slice(conversations: list[dict], tn: int) -> list[dict]:
 
 
 def iter_positive_turns(
-    session: dict, id_to_metadata: Callable[[str], str]
+    session: dict, id_to_metadata: Callable[[str], str],
+    compact_query: bool = False,
 ) -> list[dict[str, Any]]:
     """Yield one positive-training row per qualifying music turn: {query, gold_tid,
-    turn_number, session_id, user_id, played_tids}. Query is the nb74-parity dialog
-    query.
+    turn_number, session_id, user_id, played_tids}.
+
+    Query construction:
+      compact_query=False (default): legacy nb74-parity full-dialog query
+        (build_dialog_query — music turns rendered as metadata, goal appended).
+      compact_query=True: the SHARED compact ColBERT query (goal + culture + last
+        user turn) via build_retrieval_query(mode="compact_colbert") — byte-identical
+        to serve/Blind-A, so the retrain has no train/serve skew. Needs the session's
+        user_profile (for culture); both train and Blind-A carry it.
 
     TURN-1 IS ALWAYS INCLUDED (gold-direct), regardless of label — real turn-1 has
     NO goal_progress_assessment, so the MOVES_TOWARD_GOAL filter used to drop 100%
@@ -81,6 +89,11 @@ def iter_positive_turns(
     """
     goal_txt = ((session.get("conversation_goal") or {}).get("listener_goal") or "").strip()
     convos = session.get("conversations") or []
+    user_profile = session.get("user_profile")
+    if compact_query:
+        # Lazy import: keeps the script's pure functions import-light (mirrors the
+        # in-main() mcrs imports); only paid when actually building compact data.
+        from mcrs.crs_baseline import build_retrieval_query
     rows: list[dict[str, Any]] = []
     for t in convos:
         if t["role"] != "music":
@@ -89,8 +102,14 @@ def iter_positive_turns(
         if tn != 1 and goal_progress_label(session, tn) != LABEL_POS:
             continue
         prior = _prior_slice(convos, tn)
+        if compact_query:
+            query = build_retrieval_query(
+                prior, mode="compact_colbert", goal_text=goal_txt,
+                user_profile=user_profile)
+        else:
+            query = build_dialog_query(prior, goal_txt, id_to_metadata)
         rows.append({
-            "query": build_dialog_query(prior, goal_txt, id_to_metadata),
+            "query": query,
             "gold_tid": t["content"],
             "turn_number": tn,
             "session_id": session.get("session_id") or session.get("id"),
@@ -144,6 +163,10 @@ def main():  # pragma: no cover
     ap.add_argument("--k-negs", type=int, default=15, help="Hard negatives per query")
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--max-rows", type=int, default=0, help="Smoke cap; 0 = all")
+    ap.add_argument("--compact-query", action="store_true",
+                    help="Build the compact ColBERT query (goal+culture+last user turn, "
+                         "shared build_retrieval_query mode='compact_colbert') instead of "
+                         "the legacy full-dialog query. MUST match serve (colbert_compact_query).")
     args = ap.parse_args()
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "music-crs-baselines"))
@@ -164,7 +187,7 @@ def main():  # pragma: no cover
     conv = load_dataset(args.train_conv_hf, split="train")
     rows: list[dict] = []
     for sess in tqdm(conv, desc="sessions"):
-        rows.extend(iter_positive_turns(sess, id2meta))
+        rows.extend(iter_positive_turns(sess, id2meta, compact_query=args.compact_query))
         if args.max_rows and len(rows) >= args.max_rows:
             rows = rows[: args.max_rows]
             break
