@@ -3,8 +3,8 @@
 # fuse_per_sub_segmented, is_warm = has played tracks): same_artist OFF for cold (it's 0.000 cold /
 # 0.276 warm) + the NEW 2026-06-15 finding = dense WARM-DOWN (w_qwen_warm 0.7->0.4: dense is cold-
 # strong r@20 0.215 but warm-weak 0.111, likely diluting the warm 88%). The 2026-06-08 routing test
-# got +0.0042 (same_artist cold=0) but never tried dense-warm-down; this bundles both. ColBERT/CLAP/pg
-# stay symmetric (routing only covers bm25/dense/same_artist). Everything else = config 205 (0.50 best).
+# got +0.0042 (same_artist cold=0) but never tried dense-warm-down; this bundles both + pg COLD-only.
+# ColBERT/CLAP stay SYMMETRIC (no segment data yet). Everything else = config 205 (0.50 best).
 # CAVEAT: Blind ±0.05 noise on 80 sessions can't confirm a small routing gain; read as "did NOT regress".
 
 lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
