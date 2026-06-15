@@ -265,6 +265,11 @@ class CRS_BASELINE:
         # EXP-014: richer per-candidate context for the LLM listwise reranker
         # (release year + wider tag list + goal_category). Off = config 205 prompt.
         reranker_rich_candidates: bool = False,
+        # EXP: disable the LLM-listwise reranker's "thinking" tokens (gemini-2.5
+        # thinking_config). None = default (thinking on); 0 = no thinking (direct
+        # ranking). Hypothesis: thinking hurts the terse listwise task (pro@2048
+        # regressed). Plumbed to GeminiClient via load_reranker_module.
+        reranker_thinking_budget: Optional[int] = None,
         retrieval_topk: int = 20,
         response_max_new_tokens: int = 64,
         top_n_for_prompt: int = 1,
@@ -365,6 +370,7 @@ class CRS_BASELINE:
             max_output_tokens=reranker_max_output_tokens,
             k=reranker_k,
             rich_candidates=reranker_rich_candidates,
+            thinking_budget=reranker_thinking_budget,
         )
         # Tier-2 #4.1: lazily built when the reranker lists qwen_meta_cos/bm25_score.
         self._relevance_scorer = None

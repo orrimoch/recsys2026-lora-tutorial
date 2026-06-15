@@ -172,7 +172,8 @@ class LLMListwiseReranker:
                  max_output_tokens: int = 512, max_retries: int = 3,
                  batch_size: int = 16, system_prompt: Optional[str] = None,
                  system_prompt_path: Optional[str] = None,
-                 rich_candidates: bool = False) -> None:
+                 rich_candidates: bool = False,
+                 thinking_budget: Optional[int] = None) -> None:
         if meta_lookup is not None:
             self.meta_lookup = meta_lookup
         else:
@@ -185,7 +186,8 @@ class LLMListwiseReranker:
             self.client = client
         else:
             from ..query_rewriters.gemini_propose import GeminiClient
-            self.client = GeminiClient(model=self.model, max_output_tokens=max_output_tokens)
+            self.client = GeminiClient(model=self.model, max_output_tokens=max_output_tokens,
+                                       thinking_budget=thinking_budget)
         if system_prompt is not None:
             self.system_prompt = system_prompt
         else:
@@ -195,13 +197,15 @@ class LLMListwiseReranker:
         self.max_retries = int(max_retries)
         self.batch_size = int(batch_size)
         self.max_output_tokens = int(max_output_tokens)
+        self.thinking_budget = thinking_budget
         self.cache_root = Path(cache_dir) / "llm_listwise"
         self.cache_root.mkdir(parents=True, exist_ok=True)
 
     # ---- cache (keyed on query + pool-head + model + max_output_tokens) -------
     def _cache_path(self, query: str, head: list[str]) -> Path:
         key = (query + "\n" + "\n".join(head) + "\n" + self.model + "\n"
-               + str(self.max_output_tokens) + "\n" + str(self.rich_candidates))
+               + str(self.max_output_tokens) + "\n" + str(self.rich_candidates)
+               + "\n" + str(self.thinking_budget))
         h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
         return self.cache_root / f"{h}.json"
 

@@ -27,6 +27,7 @@ def load_crs_baseline(
     reranker_max_output_tokens: int = 512,
     reranker_k: int = 50,  # EXP-010: LLM listwise reranker window (50=default; 100=see rank 51-100)
     reranker_rich_candidates: bool = False,  # EXP-014: richer per-candidate context (year+tags+goal_category)
+    reranker_thinking_budget: Optional[int] = None,  # EXP: 0 = disable gemini "thinking" on the listwise reranker
     retrieval_topk: int = 20,
     response_max_new_tokens: int = 64,
     top_n_for_prompt: int = 1,
@@ -78,6 +79,7 @@ def load_crs_baseline(
         reranker_max_output_tokens=reranker_max_output_tokens,
         reranker_k=reranker_k,
         reranker_rich_candidates=reranker_rich_candidates,
+        reranker_thinking_budget=reranker_thinking_budget,
         retrieval_topk=retrieval_topk,
         response_max_new_tokens=response_max_new_tokens,
         top_n_for_prompt=top_n_for_prompt,

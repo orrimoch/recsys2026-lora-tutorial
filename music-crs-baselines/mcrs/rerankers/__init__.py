@@ -23,6 +23,7 @@ def load_reranker_module(
     max_output_tokens: int = 512,
     k: int = 50,
     rich_candidates: bool = False,
+    thinking_budget: Optional[int] = None,
 ) -> Optional[Any]:
     """Return a reranker instance or None if reranker_type is falsy.
 
@@ -71,6 +72,7 @@ def load_reranker_module(
             max_output_tokens=max_output_tokens,
             k=k,
             rich_candidates=rich_candidates,
+            thinking_budget=thinking_budget,
         )
     if reranker_type == "pro_rank":
         # W3 default reranker — last-token-logit-diff scoring over Qwen-0.5B.
