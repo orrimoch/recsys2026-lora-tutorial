@@ -75,7 +75,11 @@ def main():  # pragma: no cover
     )
 
     index = indexes.PLAID(
-        index_folder=args.index_folder, index_name=args.index_name, override=True
+        # override=args.force (defense-in-depth): the skip-guard above already
+        # returns unless --force, so reaching here means new index OR --force.
+        # Tying override to --force ensures even a path-layout mismatch in the
+        # guard can't silently clobber a live index in place.
+        index_folder=args.index_folder, index_name=args.index_name, override=args.force
     )
     index.add_documents(documents_ids=tids, documents_embeddings=doc_embeddings)
     print(f"[colbert-index] DONE -> {args.index_folder}/{args.index_name}", file=sys.stderr)

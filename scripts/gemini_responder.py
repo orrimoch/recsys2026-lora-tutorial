@@ -611,6 +611,10 @@ def main():
     for m in report["messages"]:
         print("\n" + m)
     if not report["ok"]:
+        # NOTE: this nonzero exit only halts a caller that checks the return code
+        # (subprocess.run(check=True)). A notebook `!`-magic line does NOT propagate
+        # it — there, precheck_prediction.py (run after, check=True) is the real gate
+        # (the output file is already written above, so precheck still sees the stubs).
         sys.exit(report["exit_code"])
 
 

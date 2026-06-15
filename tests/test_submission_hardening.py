@@ -68,6 +68,13 @@ def test_precheck_rejects_missing_response(tmp_path):
     assert any("predicted_response" in e for e in res["errors"])
 
 
+@pytest.mark.parametrize("bad", [None, ["ok"], 42])
+def test_precheck_rejects_non_str_response(tmp_path, bad):
+    res = precheck(_write(tmp_path, [_rec(response=bad)]), catalog=CATALOG, expected_n=1)
+    assert not res["ok"]
+    assert any("must be a string" in e for e in res["errors"])
+
+
 def test_precheck_response_is_required_field():
     assert "predicted_response" in __import__(
         "scripts.precheck_prediction", fromlist=["REQUIRED_FIELDS"]).REQUIRED_FIELDS
