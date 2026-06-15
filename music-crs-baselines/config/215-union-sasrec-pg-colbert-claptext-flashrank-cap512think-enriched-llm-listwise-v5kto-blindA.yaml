@@ -22,6 +22,7 @@ use_colbert: true
 w_colbert: 1.0
 colbert_index_folder: null
 colbert_index_name: "colbert-music-v1"
+colbert_q_len: 128      # raise query budget 96->128 so raw_enriched culture/profile reaches ColBERT on long queries (serve-only, no re-index)
 colbert_model: null
 
 # CLAP text->audio recall channel (audio, P4) — the orthogonal wall lever.

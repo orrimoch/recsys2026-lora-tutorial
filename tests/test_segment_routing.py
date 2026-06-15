@@ -100,3 +100,15 @@ def test_segment_routing_pg_warm_weight_override():
     specs = {s["type"]: s for s in _wrrf_union_v1_specs(
         {"use_segment_routing": True, "use_propose_ground": True, "w_pg_warm": 0.3})}
     assert specs["propose_ground"]["warm_weight"] == 0.3
+
+
+def test_colbert_q_len_flows_to_spec():
+    # colbert_q_len in config -> the colbert_index sub-spec's extra_config (so the
+    # serve-time query budget is raised; raw_enriched culture survives truncation).
+    from mcrs.retrieval_modules import _wrrf_union_v1_specs
+    specs = {s["type"]: s for s in _wrrf_union_v1_specs(
+        {"use_colbert": True, "colbert_q_len": 128})}
+    assert specs["colbert_index"]["extra_config"]["colbert_q_len"] == 128
+    # absent -> None (load_retrieval_module falls back to DEFAULT_Q_LEN=96)
+    specs2 = {s["type"]: s for s in _wrrf_union_v1_specs({"use_colbert": True})}
+    assert specs2["colbert_index"]["extra_config"]["colbert_q_len"] is None

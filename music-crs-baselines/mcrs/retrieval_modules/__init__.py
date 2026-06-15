@@ -251,6 +251,10 @@ def _wrrf_union_v1_specs(extra_config: dict, corpus_types: list[str] | None = No
                 "colbert_index_folder": ec.get("colbert_index_folder"),
                 "colbert_index_name": ec.get("colbert_index_name", "colbert-music-v1"),
                 "colbert_model": ec.get("colbert_model"),
+                # query-token budget (serve-only; doc index unaffected). Default 96;
+                # raise (e.g. 128) so raw_enriched culture/profile lines aren't
+                # right-truncated off long queries before ColBERT sees them.
+                "colbert_q_len": ec.get("colbert_q_len"),
             },
         })
     # CLAP text->audio RECALL channel (P4, 2026-06-11). Encodes the query TEXT into the
@@ -803,16 +807,20 @@ def load_retrieval_module(
         # ColBERT full-catalog recall channel over a prebuilt PyLate PLAID index
         # (Stage B). Defaults derive from the standard Drive cache layout.
         import os
-        from .colbert_late import ColbertIndexRetriever
+        from .colbert_late import ColbertIndexRetriever, DEFAULT_Q_LEN
         ec = extra_config or {}
         folder = ec.get("colbert_index_folder") or os.path.join(
             cache_dir, "retrieval_v2", "colbert", "plaid")
         model = ec.get("colbert_model") or os.path.join(
             cache_dir, "retrieval_v2", "colbert", "music-colbert-v1")
+        # q_len is the QUERY token budget (serve-only) — independent of the doc
+        # index (d_len), so raising it needs no re-index. Default 96.
+        q_len = int(ec.get("colbert_q_len") or DEFAULT_Q_LEN)
         return ColbertIndexRetriever(
             index_folder=folder,
             index_name=ec.get("colbert_index_name", "colbert-music-v1"),
             model_name=model,
+            q_len=q_len,
         )
     elif retrieval_type == "session_cf":
         from .session_cf import SessionCFRetriever
