@@ -1,0 +1,74 @@
+# 218 — config 215 + ONE change: the ColBERT channel points at the EXP-217 TAG-ENRICHED
+# index/model (curated genre/mood tags appended to each doc; doc-side only, query unchanged).
+# So 218-vs-215 isolates the tag-enrichment effect on Blind nDCG@20.
+#
+# DEV gate PASSED (nb90): enriched ColBERT turn-1&wall recall@100 0.370->0.423, union cold/wall
+# marginal +0.0010 (baseline) -> +0.0150 (enriched), wall golds RESCUED 46 -> 73. This config
+# tests whether that DEV wall gain survives to Blind. Responder SILENT (--retrieval_only) ->
+# read nDCG@20 only. Enrichment lives entirely in the index (built --enrich-tags --d-len 128);
+# serve just queries the enriched doc embeddings — no serve-side enrich flag, query unchanged.
+# REQUIRES the enriched artifacts on Drive: music-colbert-tagenriched-v1 + colbert-music-tagenriched-v1.
+
+lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
+lora_path: null
+lora_max_rank: 32
+
+retrieval_type: "wrrf_union_v1"
+
+use_sasrec: true
+w_sasrec: 1.0
+sasrec_model_dir: "sasrec_v1"
+
+use_propose_ground: true
+w_propose_ground: 0.5
+pg_model: "gemini-2.5-flash"
+pg_n_proposals: 20
+pg_batch_size: 4
+pg_inner_dense: "dense_metadata_qwen3_instruct"
+
+# ColBERT full-catalog late-interaction recall channel — EXP-217 TAG-ENRICHED index/model.
+use_colbert: true
+w_colbert: 1.0
+colbert_index_folder: null
+colbert_index_name: "colbert-music-tagenriched-v1"   # EXP-217 enriched PLAID index (nb90 --enrich-tags)
+colbert_q_len: 96       # query unchanged (doc-side enrichment only); model trained+indexed at d_len 128
+colbert_model: "../experiments/cache/retrieval_v2/colbert/music-colbert-tagenriched-v1"  # enriched checkpoint
+
+# CLAP text->audio recall channel (audio, P4) — the orthogonal wall lever.
+use_clap_text: true
+w_clap_text: 1.0
+clap_text_model: "laion/larger_clap_music"
+
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+retrieval_topk: 100
+reranker_type: "llm_listwise"
+reranker_model_path: "gemini-2.5-flash"
+reranker_max_output_tokens: 2048
+reranker_thinking_budget: 512    # flash WITH thinking but CAPPED (reduced from default dynamic)
+
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 320
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw_enriched"
+
+use_vllm: false
+
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+use_cmqr: false
