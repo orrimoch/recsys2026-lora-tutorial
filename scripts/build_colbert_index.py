@@ -64,27 +64,23 @@ def main():  # pragma: no cover
 
     from pylate import indexes, models
     from mcrs.db_item.music_catalog import MusicCatalogDB
-    from mcrs.retrieval_modules.colbert_late import (
-        DEFAULT_Q_LEN, strip_track_id_prefix, build_tag_vocab, colbert_doc_text,
-    )
+    from mcrs.retrieval_modules.colbert_late import DEFAULT_Q_LEN, make_colbert_doc_text_fn
 
     corpus = ["track_name", "artist_name", "album_name"]
     item_db = MusicCatalogDB(args.track_meta_hf, ["all_tracks"], corpus)
     tids = list(item_db.metadata_dict.keys())
-    if args.enrich_tags:
-        # EXP-217: vocab built over the WHOLE catalog (stable freq; identical to the
-        # train builder when --tag-min-freq matches) -> byte-identical enriched docs.
-        vocab = build_tag_vocab(
-            ((item_db.metadata_dict.get(t) or {}).get("tag_list") for t in tids),
-            min_freq=args.tag_min_freq)
-        docs = [colbert_doc_text(t, item_db.id_to_metadata, item_db.metadata_dict,
-                                 vocab, args.tag_top_k) for t in tids]
-        print(f"[colbert-index] {len(tids)} docs TAG-ENRICHED "
-              f"(vocab={len(vocab)} @min_freq={args.tag_min_freq}, top_k={args.tag_top_k})",
+    # SHARED factory — the DOC RECIPE printed here MUST match the one printed by
+    # build_colbert_train_data (same enrich/min_freq/top_k) or train and index desync.
+    doc_fn, _doc_recipe = make_colbert_doc_text_fn(
+        item_db, enrich_tags=args.enrich_tags,
+        tag_min_freq=args.tag_min_freq, tag_top_k=args.tag_top_k)
+    docs = [doc_fn(t) for t in tids]
+    if args.enrich_tags and args.d_len < 128:
+        print(f"[colbert-index] WARNING: --enrich-tags with --d-len {args.d_len} < 128 will "
+              f"right-truncate curated tags off long docs (enriched p99~92, max~184). Use 128.",
               file=sys.stderr)
-    else:
-        docs = [strip_track_id_prefix(item_db.id_to_metadata(t)) for t in tids]
-        print(f"[colbert-index] {len(tids)} catalog docs (UUID-stripped)", file=sys.stderr)
+    print(f"[colbert-index] {len(tids)} docs | DOC RECIPE: {_doc_recipe} | "
+          f"d_len={args.d_len} (MUST equal train_colbert --d-len)", file=sys.stderr)
 
     model = models.ColBERT(
         model_name_or_path=args.model_dir,

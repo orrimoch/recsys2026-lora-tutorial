@@ -180,28 +180,17 @@ def main():  # pragma: no cover
     from tqdm import tqdm
     from mcrs.db_item.music_catalog import MusicCatalogDB
     from mcrs.retrieval_modules import load_retrieval_module
-    from mcrs.retrieval_modules.colbert_late import (
-        strip_track_id_prefix, build_tag_vocab, colbert_doc_text,
-    )
+    from mcrs.retrieval_modules.colbert_late import make_colbert_doc_text_fn
 
     corpus = ["track_name", "artist_name", "album_name"]
     item_db = MusicCatalogDB(args.track_meta_hf, ["all_tracks"], corpus)
     id2meta = item_db.id_to_metadata  # raw (with track_id) — for the query/dialog rendering
-    # ColBERT DOC text strips the leading 'track_id: <uuid>' (RCA #4: UUID dilutes MaxSim).
-    if args.enrich_tags:
-        # EXP-217: vocab over the WHOLE catalog (same as build_colbert_index when
-        # --tag-min-freq matches) -> byte-identical enriched docs (doc-side parity).
-        _vocab = build_tag_vocab(
-            ((item_db.metadata_dict.get(t) or {}).get("tag_list") for t in item_db.metadata_dict),
-            min_freq=args.tag_min_freq)
-        print(f"[colbert-data] tag-enriched docs (vocab={len(_vocab)} "
-              f"@min_freq={args.tag_min_freq}, top_k={args.tag_top_k})", file=sys.stderr)
-        def doc_text(tid):
-            return colbert_doc_text(tid, item_db.id_to_metadata, item_db.metadata_dict,
-                                    _vocab, args.tag_top_k)
-    else:
-        def doc_text(tid):
-            return strip_track_id_prefix(item_db.id_to_metadata(tid))
+    # ColBERT DOC text via the SHARED factory (same recipe must be used by
+    # build_colbert_index + nb82 dev-eval/reprobe — print the recipe so a mismatch shows).
+    doc_text, _doc_recipe = make_colbert_doc_text_fn(
+        item_db, enrich_tags=args.enrich_tags,
+        tag_min_freq=args.tag_min_freq, tag_top_k=args.tag_top_k)
+    print(f"[colbert-data] DOC RECIPE: {_doc_recipe}", file=sys.stderr)
 
     # 1) Collect MOVES_TOWARD_GOAL rows from the TRAIN split.
     conv = load_dataset(args.train_conv_hf, split="train")

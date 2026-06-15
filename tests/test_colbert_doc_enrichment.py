@@ -7,7 +7,16 @@ data builder AND the index builder so the doc text is byte-identical (doc-side p
 """
 from mcrs.retrieval_modules.colbert_late import (
     build_tag_vocab, curate_tags, enrich_doc_text, colbert_doc_text,
+    make_colbert_doc_text_fn,
 )
+
+
+class _StubDB:
+    """Duck-types the bits of MusicCatalogDB the factory needs."""
+    def __init__(self, metadata_dict):
+        self.metadata_dict = metadata_dict
+    def id_to_metadata(self, tid):
+        return f"track_id: {tid}, name {tid}"
 
 
 # ---- build_tag_vocab: catalog-frequency filter (the noise killer) ----
@@ -28,6 +37,45 @@ def test_build_tag_vocab_drops_below_min_freq():
 def test_build_tag_vocab_ignores_blank_tags():
     vocab = build_tag_vocab([["", "  ", "jazz"]], min_freq=1)
     assert set(vocab) == {"jazz"}
+
+
+def test_build_tag_vocab_counts_document_frequency_not_occurrences():
+    # I2: a track listing a tag twice must count ONCE toward catalog frequency
+    # (document frequency = "appears on N tracks", not raw occurrence count).
+    vocab = build_tag_vocab([["jazz", "jazz", "Jazz"], ["jazz"]], min_freq=1)
+    assert vocab["jazz"] == 2          # 2 tracks, not 4 occurrences
+
+
+# ---- make_colbert_doc_text_fn: the SHARED factory (train + index + nb82 parity) ----
+def test_make_doc_text_fn_two_constructions_are_byte_identical():
+    db = _StubDB({"t1": {"tag_list": ["jazz", "chill", "goeiepoep"]},
+                  "t2": {"tag_list": ["jazz", "pop"]}})
+    fn1, r1 = make_colbert_doc_text_fn(db, enrich_tags=True, tag_min_freq=2, tag_top_k=10)
+    fn2, r2 = make_colbert_doc_text_fn(db, enrich_tags=True, tag_min_freq=2, tag_top_k=10)
+    assert fn1("t1") == fn2("t1")      # the train-vs-index parity invariant
+    assert r1 == r2
+
+
+def test_make_doc_text_fn_enriches_and_freq_filters():
+    db = _StubDB({"t1": {"tag_list": ["jazz", "chill", "goeiepoep"]},
+                  "t2": {"tag_list": ["jazz", "pop"]}})
+    fn, recipe = make_colbert_doc_text_fn(db, enrich_tags=True, tag_min_freq=2, tag_top_k=10)
+    # jazz appears on 2 tracks (kept @min_freq=2); chill/pop/goeiepoep freq 1 (dropped)
+    assert fn("t1") == "name t1, tags: jazz"
+    assert recipe["enrich"] is True and recipe["tag_min_freq"] == 2 and recipe["tag_top_k"] == 10
+
+
+def test_make_doc_text_fn_disabled_returns_bare_stripped_doc():
+    db = _StubDB({"t1": {"tag_list": ["jazz"]}})
+    fn, recipe = make_colbert_doc_text_fn(db, enrich_tags=False)
+    assert fn("t1") == "name t1"       # stripped base, no tags
+    assert recipe["enrich"] is False
+
+
+def test_colbert_doc_text_present_row_without_taglist_is_bare():
+    # M2: present row but tag_list None -> no tags, just stripped base.
+    out = colbert_doc_text("t1", lambda t: "track_id: t1, name", {"t1": {}}, {"jazz": 5}, 10)
+    assert out == "name"
 
 
 # ---- curate_tags: per-track dedup + top-K by catalog frequency ----

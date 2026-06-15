@@ -53,19 +53,20 @@ def strip_track_id_prefix(doc_text: str) -> str:
 # so the enriched doc text is byte-identical (doc-side parity, like the q_len rule).
 # --------------------------------------------------------------------------- #
 def build_tag_vocab(tag_rows, min_freq: int = 1) -> dict[str, int]:
-    """Normalized-tag -> catalog frequency, keeping tags with freq >= min_freq.
+    """Normalized-tag -> catalog DOCUMENT frequency, keeping tags with freq >= min_freq.
 
     Computed ONCE over the catalog. The frequency floor is the noise filter: real
     genres/moods recur across many tracks; idiosyncratic junk ('goeiepoep', '3 of 10
-    stars') appears once and is dropped. Tags are lowercased/stripped before counting.
+    stars') appears once and is dropped. Tags are lowercased/stripped, and DEDUPED
+    PER TRACK before counting — so a track listing 'jazz' twice contributes 1, not 2
+    (document frequency = "appears on N tracks", not raw occurrence count).
     """
     from collections import Counter
     counts: Counter = Counter()
     for row in tag_rows:
-        for t in (row or []):
-            n = str(t).strip().lower()
-            if n:
-                counts[n] += 1
+        seen = {str(t).strip().lower() for t in (row or [])}
+        seen.discard("")
+        counts.update(seen)
     return {t: f for t, f in counts.items() if f >= min_freq}
 
 
@@ -99,6 +100,32 @@ def colbert_doc_text(track_id, id_to_metadata, metadata_dict, vocab, top_k: int 
     base = strip_track_id_prefix(id_to_metadata(track_id))
     raw_tags = (metadata_dict.get(track_id) or {}).get("tag_list")
     return enrich_doc_text(base, curate_tags(raw_tags, vocab, top_k))
+
+
+def make_colbert_doc_text_fn(item_db, enrich_tags: bool = False,
+                             tag_min_freq: int = 50, tag_top_k: int = 15):
+    """SINGLE SOURCE for the ColBERT doc text — used by the train-data builder, the
+    index builder, AND the nb82 dev-eval/reprobe cells, so the doc string is identical
+    everywhere (the model trains, is selected, and is indexed on the same docs).
+
+    Returns (doc_text_fn, recipe). `doc_text_fn(tid) -> str`. `recipe` is a small dict
+    describing the doc construction — PRINT it in each script's banner so a flag mismatch
+    between the train run and the index run is visible (the train/index parity guard).
+    When enrich_tags=False, returns the legacy bare (UUID-stripped) doc.
+    """
+    if not enrich_tags:
+        def _bare(tid):
+            return strip_track_id_prefix(item_db.id_to_metadata(tid))
+        return _bare, {"enrich": False}
+    vocab = build_tag_vocab(
+        ((item_db.metadata_dict.get(t) or {}).get("tag_list") for t in item_db.metadata_dict),
+        min_freq=tag_min_freq)
+
+    def _enriched(tid):
+        return colbert_doc_text(tid, item_db.id_to_metadata, item_db.metadata_dict,
+                                vocab, tag_top_k)
+    return _enriched, {"enrich": True, "tag_min_freq": tag_min_freq,
+                       "tag_top_k": tag_top_k, "vocab_size": len(vocab)}
 
 
 def maxsim_score(query_emb: np.ndarray, doc_emb: np.ndarray) -> float:
