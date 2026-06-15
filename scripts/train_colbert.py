@@ -136,6 +136,15 @@ def _make_dev_eval_callback(pack: dict, eval_steps: int, dev_subset: int,
     return DevRecallCallback()
 
 
+def existing_artifact_blocks(path: str, force: bool) -> bool:
+    """True if `path` already exists and --force was NOT passed, i.e. the run
+    should SKIP to avoid clobbering a live artifact in place. The 2026-06-15
+    accident re-ran finetune and overwrote the 0.50 ColBERT model in place
+    (save_pretrained), making config-205/209 non-reproducible. Pure -> unit-tested."""
+    import os
+    return bool(path) and os.path.exists(path) and not force
+
+
 # --------------------------------------------------------------------------- #
 # Trainer wiring (GPU integration; run in the notebook, not unit-tested).
 # --------------------------------------------------------------------------- #
@@ -143,6 +152,10 @@ def main():  # pragma: no cover
     ap = argparse.ArgumentParser()
     ap.add_argument("--train-jsonl", required=True)
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--force", action="store_true",
+                    help="overwrite --out-dir if it already exists. WITHOUT this, an "
+                         "existing model dir SKIPS training (guards against the accidental "
+                         "in-place retrain that clobbered the 0.50 ColBERT).")
     ap.add_argument("--dev-eval-pack", default=None,
                     help="Pickle from nb82 #82-dev-eval-pack; enables dev model selection")
     ap.add_argument("--base-model", default="colbert-ir/colbertv2.0")
@@ -162,6 +175,11 @@ def main():  # pragma: no cover
     ap.add_argument("--k", type=int, default=20, help="recall@k for dev selection")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
+
+    if existing_artifact_blocks(args.out_dir, args.force):
+        print(f"[train-colbert] {args.out_dir} already exists — SKIPPING to avoid "
+              f"overwriting it in place. Pass --force to retrain.", file=sys.stderr)
+        return
 
     import pickle
     from datasets import Dataset

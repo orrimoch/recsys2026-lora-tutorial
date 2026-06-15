@@ -18,10 +18,19 @@ import sys
 from pathlib import Path
 
 
-REQUIRED_FIELDS = ["session_id", "user_id", "turn_number", "predicted_track_ids"]
+REQUIRED_FIELDS = ["session_id", "user_id", "turn_number", "predicted_track_ids",
+                   "predicted_response"]
+
+# Placeholder responses that must NEVER ship: the retrieval-only stub ("ok",
+# crs_baseline.py / run_inference_devset_retrieval_only.py) and empty strings.
+# A leaked stub scores ~1/5 on the LLM axis (the EXP-016 / config-209 regression).
+STUB_RESPONSES = {"ok", "n/a", "na", "none", "null", "todo", "tbd"}
+MIN_RESPONSE_LEN = 5
 
 
-def precheck(pred_path: Path, catalog: set[str], expected_n: int = 80) -> dict:
+def precheck(pred_path: Path, catalog: set[str], expected_n: int = 80,
+             min_response_len: int = MIN_RESPONSE_LEN,
+             stub_responses: set[str] | None = None) -> dict:
     """Validate a Blind-A prediction.json.
 
     Returns:
@@ -29,6 +38,7 @@ def precheck(pred_path: Path, catalog: set[str], expected_n: int = 80) -> dict:
     """
     errors: list[str] = []
     warnings: list[str] = []
+    stub_responses = STUB_RESPONSES if stub_responses is None else stub_responses
 
     try:
         records = json.loads(pred_path.read_text())
@@ -70,6 +80,24 @@ def precheck(pred_path: Path, catalog: set[str], expected_n: int = 80) -> dict:
         if len(tracks) != len(set(tracks)):
             dupes = [t for t in tracks if tracks.count(t) > 1]
             errors.append(f"record {i}: duplicate track ids: {set(dupes)}")
+        # predicted_response content: a leaked retrieval-only stub ("ok") or an
+        # empty/too-short response craters the LLM axis (config-209 regression).
+        resp = rec.get("predicted_response")
+        if not isinstance(resp, str):
+            errors.append(f"record {i} (session={rec.get('session_id', '?')}): "
+                          f"predicted_response must be a string, got {type(resp).__name__}")
+        else:
+            stripped = resp.strip()
+            if not stripped:
+                errors.append(f"record {i} (session={rec.get('session_id', '?')}): "
+                              f"predicted_response is empty")
+            elif stripped.lower() in stub_responses:
+                errors.append(f"record {i} (session={rec.get('session_id', '?')}): "
+                              f"predicted_response is a placeholder stub ({stripped!r}) — "
+                              f"the responder did not run/fill this row")
+            elif len(stripped) < min_response_len:
+                errors.append(f"record {i} (session={rec.get('session_id', '?')}): "
+                              f"predicted_response too short ({len(stripped)} chars < {min_response_len}): {stripped!r}")
 
     return {
         "ok": not errors,

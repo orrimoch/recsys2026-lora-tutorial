@@ -460,6 +460,29 @@ def _load_item_meta():
     return meta
 
 
+def summarize_run(n_gen: int, n_reused: int, fallback_sids: list, total: int,
+                  fail_on_fallback: bool) -> dict:
+    """Post-run report + abort decision. A 'fallback' row kept its ORIGINAL
+    predicted_response (no fresh Gemini output, no warm-start reuse). When the
+    input came from run_inference_blindset --retrieval_only, that original IS the
+    literal 'ok' stub, which scores ~1/5 on the LLM axis (the config-209
+    regression). Returns {ok, exit_code, messages}. Pure -> unit-tested."""
+    msgs: list[str] = []
+    n_fb = len(fallback_sids)
+    if n_gen == 0 and n_reused == 0:
+        msgs.append("*** WARNING: 0 rows generated AND 0 reused — ALL fell back to the "
+                    "original response. This output is a no-op (not the Gemini responder). "
+                    "Check API key / model / generation_config before submitting. ***")
+    if n_fb:
+        preview = ", ".join(str(s) for s in fallback_sids[:10])
+        msgs.append(f"*** {n_fb}/{total} rows FELL BACK to their original response "
+                    f"(no fresh/reused responder output) — sessions: {preview}"
+                    f"{' ...' if n_fb > 10 else ''}. If the input came from "
+                    f"--retrieval_only these are 'ok' stubs that score ~1/5 — DO NOT submit. ***")
+    ok = not (fail_on_fallback and n_fb)
+    return {"ok": ok, "exit_code": 0 if ok else 1, "messages": msgs}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pred", required=True, help="existing prediction.json (keeps predicted_track_ids)")
@@ -485,6 +508,11 @@ def main():
                          "judge model, submit the highest-scoring (1 = single shot, default)")
     ap.add_argument("--judge-model", default=JUDGE_MODEL,
                     help="model that scores best-of-N candidates (default: cheap flash)")
+    ap.add_argument("--fail-on-fallback", action="store_true",
+                    help="exit nonzero if ANY row falls back to its original response "
+                         "(no fresh Gemini output, no warm-start reuse). USE FOR SUBMISSIONS: "
+                         "with a --retrieval_only input the original is the 'ok' stub, which "
+                         "would silently ship and score ~1/5 on the LLM axis (config-209 bug).")
     args = ap.parse_args()
 
     if args.top_n < 1:
@@ -517,6 +545,7 @@ def main():
         print(f"[responder] reuse-from: {len(reuse_map)} prior rows loaded from {args.reuse_from}")
 
     out_rows, n_gen, n_fallback, n_reused = [], 0, 0, 0
+    fallback_sids: list = []
     for i, p in enumerate(preds):
         # Per-row guard: a single malformed session (unexpected schema, missing
         # conversations, bad goal shape) falls back to the original response
@@ -562,6 +591,7 @@ def main():
             n_reused += 1            # warm-started from --reuse-from, no Gemini call
         elif new_resp == fallback:
             n_fallback += 1
+            fallback_sids.append(p.get("session_id"))
         else:
             n_gen += 1
         out_rows.append(build_output_row(p, new_resp))
@@ -574,16 +604,14 @@ def main():
     json.dump(out_rows, open(args.out, "w"), ensure_ascii=False)
     print(f"\n[responder] wrote {len(out_rows)} rows -> {args.out} "
           f"(generated={n_gen}, reused={n_reused}, fallback={n_fallback})")
-    # Loud guard: if NOTHING was generated OR reused, every row silently kept its
-    # original response — most likely the API/SDK rejected the request (e.g. the
-    # best-of-N generation_config). Surface it so an all-fallback no-op isn't
-    # mistaken for a successful run. (All-reused is a legit no-API run, not a no-op.)
-    if n_gen == 0 and n_reused == 0:
-        print("\n*** WARNING: 0 rows generated — ALL fell back to the original "
-              "response. This output is a no-op (not the Gemini responder). "
-              "Check the API key / model / "
-              + ("generation_config (best-of-N) " if args.best_of > 1 else "")
-              + "before submitting. ***")
+    # Loud guard: surface fallback rows (kept their ORIGINAL response — a no-op for
+    # that row; a leaked 'ok' stub under --retrieval_only) and the all-fallback
+    # no-op. With --fail-on-fallback, abort so a stub/stale response can't ship.
+    report = summarize_run(n_gen, n_reused, fallback_sids, len(out_rows), args.fail_on_fallback)
+    for m in report["messages"]:
+        print("\n" + m)
+    if not report["ok"]:
+        sys.exit(report["exit_code"])
 
 
 if __name__ == "__main__":

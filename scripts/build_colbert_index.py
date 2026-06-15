@@ -24,7 +24,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "music-crs-baselines"))
 
 
+def existing_artifact_blocks(path: str, force: bool) -> bool:
+    """True if `path` already exists and --force was NOT passed, i.e. SKIP the
+    build to avoid clobbering a live index in place. PLAID's override=True silently
+    overwrote the 0.50 index during the 2026-06-15 retrain accident. Pure -> unit-tested."""
+    import os
+    return bool(path) and os.path.exists(path) and not force
+
+
 def main():  # pragma: no cover
+    import os
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", required=True,
                     help="Fine-tuned ColBERT dir (music-colbert-v1) or a hub name")
@@ -32,7 +41,17 @@ def main():  # pragma: no cover
     ap.add_argument("--index-name", default="colbert-music-v1")
     ap.add_argument("--track-meta-hf", default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata")
     ap.add_argument("--batch-size", type=int, default=256)
+    ap.add_argument("--force", action="store_true",
+                    help="overwrite the index if it already exists. WITHOUT this, an "
+                         "existing index SKIPS the build (guards against the accidental "
+                         "in-place rebuild that clobbered the 0.50 PLAID index).")
     args = ap.parse_args()
+
+    index_path = os.path.join(args.index_folder, args.index_name)
+    if existing_artifact_blocks(index_path, args.force):
+        print(f"[colbert-index] {index_path} already exists — SKIPPING to avoid "
+              f"overwriting it in place. Pass --force to rebuild.", file=sys.stderr)
+        return
 
     from pylate import indexes, models
     from mcrs.db_item.music_catalog import MusicCatalogDB
