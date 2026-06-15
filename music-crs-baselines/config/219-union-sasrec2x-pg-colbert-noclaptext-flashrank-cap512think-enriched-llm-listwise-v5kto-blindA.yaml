@@ -1,0 +1,72 @@
+# 219 — config 215 with TWO fusion changes (DEV sweep-confirmed, nb90 cold+warm):
+#   (1) DROP clap_text — it's RRF NOISE on BOTH segments: dropping it raised recall on cold
+#       (r@100 0.480->0.496) AND warm (r@100 0.487->0.501, wall@100 0.151->0.170).
+#   (2) w_sasrec 1.0 -> 2.0 — sasrec is underweighted; x2 lifts warm WALL recall@100
+#       0.151->0.199 (+0.047) and r@100 +0.022 with no r@20 cost (cold: r@100 up, r@20 -0.008).
+# Tests the "Blind flatness is a FUSION problem (too many channels / wrong weights)" hypothesis.
+# Baseline ColBERT (colbert-music-v1, NOT the enriched 218) + w_colbert=1.0 (boosting it HURT
+# both segments). FREE — no retrain. Responder SILENT (--retrieval_only) -> read nDCG@20 only.
+# Compare nDCG@20 to 215. pg kept (no warm data on it yet).
+
+lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
+lora_path: null
+lora_max_rank: 32
+
+retrieval_type: "wrrf_union_v1"
+
+use_sasrec: true
+w_sasrec: 2.0            # SWEEP: sasrec underweighted; x2 = biggest warm-WALL recall lever
+sasrec_model_dir: "sasrec_v1"
+
+use_propose_ground: true
+w_propose_ground: 0.5
+pg_model: "gemini-2.5-flash"
+pg_n_proposals: 20
+pg_batch_size: 4
+pg_inner_dense: "dense_metadata_qwen3_instruct"
+
+# ColBERT full-catalog late-interaction recall channel (baseline index; do NOT up-weight).
+use_colbert: true
+w_colbert: 1.0
+colbert_index_folder: null
+colbert_index_name: "colbert-music-v1"
+colbert_q_len: 96
+colbert_model: null
+
+# CLAP text->audio — DROPPED (SWEEP: RRF noise on both cold + warm; removing it raised recall).
+use_clap_text: false
+clap_text_model: "laion/larger_clap_music"
+
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+retrieval_topk: 100
+reranker_type: "llm_listwise"
+reranker_model_path: "gemini-2.5-flash"
+reranker_max_output_tokens: 2048
+reranker_thinking_budget: 512
+
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 320
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw_enriched"
+
+use_vllm: false
+
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+use_cmqr: false
