@@ -41,6 +41,15 @@ def main():  # pragma: no cover
     ap.add_argument("--index-name", default="colbert-music-v1")
     ap.add_argument("--track-meta-hf", default="talkpl-ai/TalkPlayData-Challenge-Track-Metadata")
     ap.add_argument("--batch-size", type=int, default=256)
+    ap.add_argument("--d-len", type=int, default=96,
+                    help="document token budget. 96 for raw metadata; raise (e.g. 128) for "
+                         "--enrich-tags so curated tags survive. MUST equal train_colbert --d-len.")
+    ap.add_argument("--enrich-tags", action="store_true",
+                    help="EXP-217: append curated genre/mood tags (catalog-freq filtered, "
+                         "top-k) to each doc. MUST match build_colbert_train_data --enrich-tags "
+                         "+ same --tag-min-freq/--tag-top-k (doc-side train/index parity).")
+    ap.add_argument("--tag-min-freq", type=int, default=50)
+    ap.add_argument("--tag-top-k", type=int, default=15)
     ap.add_argument("--force", action="store_true",
                     help="overwrite the index if it already exists. WITHOUT this, an "
                          "existing index SKIPS the build (guards against the accidental "
@@ -56,19 +65,31 @@ def main():  # pragma: no cover
     from pylate import indexes, models
     from mcrs.db_item.music_catalog import MusicCatalogDB
     from mcrs.retrieval_modules.colbert_late import (
-        DEFAULT_D_LEN, DEFAULT_Q_LEN, strip_track_id_prefix,
+        DEFAULT_Q_LEN, strip_track_id_prefix, build_tag_vocab, colbert_doc_text,
     )
 
     corpus = ["track_name", "artist_name", "album_name"]
     item_db = MusicCatalogDB(args.track_meta_hf, ["all_tracks"], corpus)
     tids = list(item_db.metadata_dict.keys())
-    docs = [strip_track_id_prefix(item_db.id_to_metadata(t)) for t in tids]
-    print(f"[colbert-index] {len(tids)} catalog docs (UUID-stripped)", file=sys.stderr)
+    if args.enrich_tags:
+        # EXP-217: vocab built over the WHOLE catalog (stable freq; identical to the
+        # train builder when --tag-min-freq matches) -> byte-identical enriched docs.
+        vocab = build_tag_vocab(
+            ((item_db.metadata_dict.get(t) or {}).get("tag_list") for t in tids),
+            min_freq=args.tag_min_freq)
+        docs = [colbert_doc_text(t, item_db.id_to_metadata, item_db.metadata_dict,
+                                 vocab, args.tag_top_k) for t in tids]
+        print(f"[colbert-index] {len(tids)} docs TAG-ENRICHED "
+              f"(vocab={len(vocab)} @min_freq={args.tag_min_freq}, top_k={args.tag_top_k})",
+              file=sys.stderr)
+    else:
+        docs = [strip_track_id_prefix(item_db.id_to_metadata(t)) for t in tids]
+        print(f"[colbert-index] {len(tids)} catalog docs (UUID-stripped)", file=sys.stderr)
 
     model = models.ColBERT(
         model_name_or_path=args.model_dir,
         query_length=DEFAULT_Q_LEN,
-        document_length=DEFAULT_D_LEN,
+        document_length=args.d_len,
     )
     doc_embeddings = model.encode(
         docs, batch_size=args.batch_size, is_query=False, show_progress_bar=True

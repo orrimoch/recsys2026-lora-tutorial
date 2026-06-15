@@ -46,6 +46,61 @@ def strip_track_id_prefix(doc_text: str) -> str:
     return doc_text
 
 
+# --------------------------------------------------------------------------- #
+# EXP-217: curated-tag doc enrichment (doc-side, deterministic). Raw tag_list is
+# noisy folksonomy + long (mean +111 tok); these three pure helpers curate it to a
+# short clean genre/mood suffix. SHARED by the train-data builder + the index builder
+# so the enriched doc text is byte-identical (doc-side parity, like the q_len rule).
+# --------------------------------------------------------------------------- #
+def build_tag_vocab(tag_rows, min_freq: int = 1) -> dict[str, int]:
+    """Normalized-tag -> catalog frequency, keeping tags with freq >= min_freq.
+
+    Computed ONCE over the catalog. The frequency floor is the noise filter: real
+    genres/moods recur across many tracks; idiosyncratic junk ('goeiepoep', '3 of 10
+    stars') appears once and is dropped. Tags are lowercased/stripped before counting.
+    """
+    from collections import Counter
+    counts: Counter = Counter()
+    for row in tag_rows:
+        for t in (row or []):
+            n = str(t).strip().lower()
+            if n:
+                counts[n] += 1
+    return {t: f for t, f in counts.items() if f >= min_freq}
+
+
+def curate_tags(raw_tags, vocab: dict[str, int], top_k: int = 15) -> list[str]:
+    """One track's raw tags -> curated list: normalize+dedup, keep only vocab tags,
+    sort by catalog frequency desc (alpha tie-break for determinism), cap at top_k."""
+    seen: set = set()
+    cand: list[str] = []
+    for t in (raw_tags or []):
+        n = str(t).strip().lower()
+        if n and n in vocab and n not in seen:
+            seen.add(n)
+            cand.append(n)
+    cand.sort(key=lambda t: (-vocab[t], t))
+    return cand[:top_k]
+
+
+def enrich_doc_text(base_text: str, tags: list[str]) -> str:
+    """Append ', tags: t1, t2, ...' to the base doc when tags present; else unchanged.
+    Tags go LAST (after title/artist/album); d_len must be sized so they survive."""
+    if not tags:
+        return base_text
+    return f"{base_text}, tags: {', '.join(tags)}"
+
+
+def colbert_doc_text(track_id, id_to_metadata, metadata_dict, vocab, top_k: int = 15) -> str:
+    """Per-track enriched ColBERT doc — the convenience SHARED by the train-data + index
+    builders (single source of truth for doc-side parity). Strips the track_id prefix off
+    the base metadata text, curates the track's tag_list against `vocab`, and appends them.
+    Falls back to the bare stripped doc when the track/tags are absent."""
+    base = strip_track_id_prefix(id_to_metadata(track_id))
+    raw_tags = (metadata_dict.get(track_id) or {}).get("tag_list")
+    return enrich_doc_text(base, curate_tags(raw_tags, vocab, top_k))
+
+
 def maxsim_score(query_emb: np.ndarray, doc_emb: np.ndarray) -> float:
     """ColBERT late-interaction score between one query and one document.
 

@@ -167,6 +167,12 @@ def main():  # pragma: no cover
                     help="Build the compact ColBERT query (goal+culture+last user turn, "
                          "shared build_retrieval_query mode='compact_colbert') instead of "
                          "the legacy full-dialog query. MUST match serve (colbert_compact_query).")
+    ap.add_argument("--enrich-tags", action="store_true",
+                    help="EXP-217: append curated genre/mood tags to each DOC (positives + "
+                         "negatives). MUST match build_colbert_index --enrich-tags + same "
+                         "--tag-min-freq/--tag-top-k (doc-side train/index parity).")
+    ap.add_argument("--tag-min-freq", type=int, default=50)
+    ap.add_argument("--tag-top-k", type=int, default=15)
     args = ap.parse_args()
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "music-crs-baselines"))
@@ -174,14 +180,28 @@ def main():  # pragma: no cover
     from tqdm import tqdm
     from mcrs.db_item.music_catalog import MusicCatalogDB
     from mcrs.retrieval_modules import load_retrieval_module
-    from mcrs.retrieval_modules.colbert_late import strip_track_id_prefix
+    from mcrs.retrieval_modules.colbert_late import (
+        strip_track_id_prefix, build_tag_vocab, colbert_doc_text,
+    )
 
     corpus = ["track_name", "artist_name", "album_name"]
     item_db = MusicCatalogDB(args.track_meta_hf, ["all_tracks"], corpus)
     id2meta = item_db.id_to_metadata  # raw (with track_id) — for the query/dialog rendering
     # ColBERT DOC text strips the leading 'track_id: <uuid>' (RCA #4: UUID dilutes MaxSim).
-    def doc_text(tid):
-        return strip_track_id_prefix(item_db.id_to_metadata(tid))
+    if args.enrich_tags:
+        # EXP-217: vocab over the WHOLE catalog (same as build_colbert_index when
+        # --tag-min-freq matches) -> byte-identical enriched docs (doc-side parity).
+        _vocab = build_tag_vocab(
+            ((item_db.metadata_dict.get(t) or {}).get("tag_list") for t in item_db.metadata_dict),
+            min_freq=args.tag_min_freq)
+        print(f"[colbert-data] tag-enriched docs (vocab={len(_vocab)} "
+              f"@min_freq={args.tag_min_freq}, top_k={args.tag_top_k})", file=sys.stderr)
+        def doc_text(tid):
+            return colbert_doc_text(tid, item_db.id_to_metadata, item_db.metadata_dict,
+                                    _vocab, args.tag_top_k)
+    else:
+        def doc_text(tid):
+            return strip_track_id_prefix(item_db.id_to_metadata(tid))
 
     # 1) Collect MOVES_TOWARD_GOAL rows from the TRAIN split.
     conv = load_dataset(args.train_conv_hf, split="train")
