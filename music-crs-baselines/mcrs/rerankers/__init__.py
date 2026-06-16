@@ -26,6 +26,7 @@ def load_reranker_module(
     thinking_budget: Optional[int] = None,
     k2: int = 24,
     stage1_model: str = "gemini-2.5-flash-lite",
+    bge_max_length: int = 256,
 ) -> Optional[Any]:
     """Return a reranker instance or None if reranker_type is falsy.
 
@@ -44,6 +45,7 @@ def load_reranker_module(
             corpus_types=corpus_types,
             cache_dir=cache_dir,
             model_name=model_path,  # None → keep default; Hub repo → override.
+            max_length=bge_max_length,
         )
     if reranker_type == "lgbm_rerank":
         from .lgbm_rerank import LGBM_RERANKER

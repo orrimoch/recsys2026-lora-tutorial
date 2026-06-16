@@ -20,6 +20,23 @@ import numpy as np
 MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 
 
+def build_tid_text_map(metadata_dict: dict, corpus_types: list[str]) -> dict[str, str]:
+    """Pipe-joined CE doc text: "name | artist | album | tag, tag". List fields
+    comma-joined; empty/None dropped. SINGLE source of truth shared by serve
+    (BGE_RERANKER) and the CE training-data builder so (query,doc) is identical."""
+    out: dict[str, str] = {}
+    for tid, row in metadata_dict.items():
+        parts: list[str] = []
+        for f in corpus_types:
+            v = row.get(f)
+            if isinstance(v, list):
+                v = ", ".join(str(x) for x in v if x is not None)
+            if v:
+                parts.append(str(v))
+        out[tid] = " | ".join(parts)
+    return out
+
+
 class BGE_RERANKER:
     def __init__(
         self,
@@ -28,6 +45,7 @@ class BGE_RERANKER:
         corpus_types: list[str],
         cache_dir: str = "./cache",
         model_name: Optional[str] = None,
+        max_length: int = 256,
     ) -> None:
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -43,6 +61,7 @@ class BGE_RERANKER:
             self.device = "cpu"
             dtype = torch.float32
         self.dtype = dtype
+        self.max_length = max_length
 
         # Default to MODEL_NAME (public BGE reranker); override via `model_name`
         # to load our fine-tuned Hub weights.
@@ -82,17 +101,8 @@ class BGE_RERANKER:
         print(f"[bge-rerank] building tid-text map from {item_db_name}[{track_split_types}] fields={corpus_types}")
         ds = load_dataset(item_db_name)
         concat = concatenate_datasets([ds[s] for s in track_split_types])
-        tid_to_text: dict[str, str] = {}
-        for row in concat:
-            tid = row["track_id"]
-            parts: list[str] = []
-            for f in corpus_types:
-                v = row.get(f)
-                if isinstance(v, list):
-                    v = ", ".join(str(x) for x in v if x is not None)
-                if v:
-                    parts.append(str(v))
-            tid_to_text[tid] = " | ".join(parts)
+        metadata_dict = {row["track_id"]: row for row in concat}
+        tid_to_text = build_tid_text_map(metadata_dict, corpus_types)
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         with open(cache_path, "wb") as f:
             pickle.dump(tid_to_text, f)
@@ -106,7 +116,7 @@ class BGE_RERANKER:
         docs = [p[1] for p in pairs]
         inputs = self.tokenizer(
             queries, docs,
-            padding=True, truncation=True, max_length=256, return_tensors="pt",
+            padding=True, truncation=True, max_length=self.max_length, return_tensors="pt",
         ).to(self.device)
         with torch.no_grad():
             logits = self.model(**inputs).logits.view(-1)

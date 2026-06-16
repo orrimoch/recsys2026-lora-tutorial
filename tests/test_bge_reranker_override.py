@@ -21,7 +21,7 @@ def test_reranker_factory_passes_model_path_to_bge_reranker(monkeypatch, tmp_pat
     captured = {}
 
     class _Stub:
-        def __init__(self, item_db_name, track_split_types, corpus_types, cache_dir, model_name=None):
+        def __init__(self, item_db_name, track_split_types, corpus_types, cache_dir, model_name=None, max_length=256):
             captured["model_name"] = model_name
             captured["called"] = True
 
