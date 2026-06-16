@@ -14,10 +14,22 @@ from mcrs.contracts import Candidate
 class RRFFusion:
     label = "rrf"
 
-    def __init__(self, channels: list, weights: Optional[list[float]] = None, k: int = 60) -> None:
+    def __init__(self, channels: list, weights: Optional[list[float]] = None, k: int = 60,
+                 segment_weights: Optional[dict[str, list[float]]] = None) -> None:
         self.channels = channels
         self.weights = weights if weights is not None else [1.0] * len(channels)
         self.k = k
+        # optional per-segment weight vectors, e.g. {"cold": [...], "warm": [...]}; a query's
+        # segment is read from batch_context[i]["segment"]. Falls back to self.weights when
+        # segment_weights is None, the ctx has no segment, or the segment isn't in the map.
+        self.segment_weights = segment_weights
+
+    def _weights_for(self, ctx: Optional[dict]) -> list[float]:
+        if self.segment_weights and ctx:
+            seg = ctx.get("segment")
+            if seg in self.segment_weights:
+                return self.segment_weights[seg]
+        return self.weights
 
     @staticmethod
     def fuse_per_sub(per_sub: list[list[list[str]]], weights: list[float],
@@ -44,10 +56,14 @@ class RRFFusion:
         per_sub = self._per_sub(queries, ti, batch_context, user_ids)
         results: list[list[Candidate]] = []
         for qi in range(len(queries)):
+            ctx = batch_context[qi] if batch_context and qi < len(batch_context) else None
+            w_vec = self._weights_for(ctx)
             fused: dict[str, float] = {}
             ranks: dict[str, dict[str, int]] = {}
             for si, ch in enumerate(self.channels):
-                w = self.weights[si]
+                w = w_vec[si]
+                if w == 0:                       # zero-weighted channel = dropped (no pool pollution)
+                    continue
                 for rank, tid in enumerate(per_sub[si][qi], start=1):
                     fused[tid] = fused.get(tid, 0.0) + w / (self.k + rank)
                     ranks.setdefault(tid, {})[ch.label] = rank
