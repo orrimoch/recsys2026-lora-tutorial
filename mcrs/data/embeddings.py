@@ -75,7 +75,9 @@ class UserEmbeddings:
 
     def vector(self, user_id: str) -> Optional[np.ndarray]:
         v = self._vecs.get(user_id)
-        return None if v is None else np.asarray(v, dtype=np.float32)
+        if v is None or len(v) == 0:   # missing OR empty (cold user) => cold signal
+            return None
+        return np.asarray(v, dtype=np.float32)
 
     def __contains__(self, user_id: str) -> bool:
         return user_id in self._vecs

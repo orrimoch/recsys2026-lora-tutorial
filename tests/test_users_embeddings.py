@@ -60,6 +60,12 @@ def test_user_embedding_vector_and_missing():
     assert "u1" in ue and "cold-user" not in ue
 
 
+def test_user_embedding_empty_vector_is_cold_none():
+    # cold users can have an EMPTY cf-bpr list -> must read as None, not a size-0 array
+    ue = UserEmbeddings([{"user_id": "uc", "cf-bpr": []}])
+    assert ue.vector("uc") is None
+
+
 @pytest.mark.skipif(not os.path.isdir("data/TalkPlayData-Challenge-Track-Embeddings"),
                     reason="embeddings not on disk")
 def test_track_embeddings_from_disk_cfbpr_shape():
