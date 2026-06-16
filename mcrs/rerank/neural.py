@@ -7,9 +7,13 @@ Never enlarges the pool (R7 owns recall) and never reorders below the slice. The
 
 Two integration modes:
 - `rerank()` — final-stage: reorder the top slice by neural score (simple, leak-free at inference).
-- `score()`  — stacking surface: {track_id -> neural score} for the top slice, fed back as a K1
-  feature. NOTE: as a TRAIN feature it must be produced OUT-OF-FOLD (K1 §4.1) or it leaks; that
-  cross-fit harness is a separate step — `score()` itself just computes the scores.
+- `score()`  — stacking surface: {track_id -> neural score} for the top slice, fed back as a K1 feature.
+
+OOF / leak note: an OFF-THE-SHELF (frozen) cross-encoder never sees the gold labels, so its score is
+a fixed function of (query, doc) — stacking it into K1 is leak-free, exactly like the dense_cos
+bi-encoder feature. Out-of-fold/cross-fit is required ONLY if the scorer is FINE-TUNED on Train
+(spec §4 LoRA option), since then the model has seen the labels. So: off-the-shelf stacking = safe;
+fine-tuned stacking = must be produced OOF (a separate harness, gated to the LoRA path).
 See `.claude/documents/features/52_K3_neural_reranker.md`.
 """
 from __future__ import annotations
@@ -26,7 +30,8 @@ class NeuralReranker:
 
     def __init__(self, catalog, query_builder, score_fn: ScoreFn,
                  cross_encoder_k: int = 100, enriched: bool = True,
-                 max_doc_chars: int = 2000, model_revision: Optional[str] = None) -> None:
+                 max_doc_chars: int = 2000, model_revision: Optional[str] = None,
+                 max_pairs_per_turn: Optional[int] = None) -> None:
         self.catalog = catalog
         self.qb = query_builder
         self.score_fn = score_fn
@@ -36,6 +41,8 @@ class NeuralReranker:
         #                                         cross-encoder tokenizer truncates the doc further
         # provenance only (train==serve pin recorded by D1, spec §8); the model itself lives in score_fn
         self.model_revision = model_revision
+        # per-turn cost budget (spec §8): raise if a turn would score more than this many pairs
+        self.max_pairs_per_turn = max_pairs_per_turn
 
     def _doc(self, track_id: str) -> str:
         return self.catalog.id_to_metadata(track_id, enriched=self.enriched)[:self.max_doc_chars]
@@ -45,6 +52,8 @@ class NeuralReranker:
         top = candidates[:self.cross_encoder_k]
         if not top:
             return {}
+        if self.max_pairs_per_turn is not None and len(top) > self.max_pairs_per_turn:
+            raise ValueError(f"K3 would score {len(top)} pairs/turn > budget {self.max_pairs_per_turn}")
         query = self.qb.build(ctx).text
         scores = self.score_fn([(query, self._doc(c.track_id)) for c in top])
         if len(scores) != len(top):                 # loud fail vs silent zip truncation

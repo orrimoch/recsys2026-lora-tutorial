@@ -56,11 +56,15 @@ Optional module: ships only if dev **nDCG@20 (and hit-rank) improves over K2-alo
 > Status after the 2026-06-16 K3-vs-plan review (impl: `mcrs/rerank/{neural,cross_encoder}.py`).
 - [x] Implements F2 `Reranker` + `score()` stacking surface; re-scores only top `cross_encoder_k`
       (final-stage `rerank()` done; `ChainReranker` composes K2→K3; 7 tests). `model_revision` carried.
-- [~] Stacking score is OOF (in-sample variant fails a test): **DEFERRED** — `rerank()` final-stage is
-      leak-free (inference-time, not a train feature), so we measure final-stage first; the OOF
-      cross-fit harness + leak test are built only if/when we stack and K3 shows a final-stage lift.
-      Doc-side truncation is now **token-level** (`build_cross_encoder_score_fn`, `truncate_doc_tokens`,
-      `truncation` on the doc only) — query side preserved; tested.
+- [x] Stacking score is OOF: **CLARIFIED — OOF not required for the off-the-shelf model.** A frozen
+      pretrained cross-encoder never sees the gold labels, so its score is a fixed function of
+      (query, doc); stacking it into K1 is leak-free, identical to the shipped `dense_cos` bi-encoder
+      feature. OOF/cross-fit is mandatory ONLY if the cross-encoder is FINE-TUNED on Train (§4 LoRA) —
+      gated to that path with its own harness + in-sample-fails-a-test. Doc-side truncation is
+      **token-level** (`build_cross_encoder_score_fn` / `truncate_doc_tokens`, doc only) — query
+      side preserved; tested.
+- [x] Per-turn cost budget assert (§8): `NeuralReranker(max_pairs_per_turn=...)` raises if a turn
+      would score more than the budget; tested.
 - [~] Dev nDCG@20 lift over K2 measured; cost within budget; cold/warm reported: **wired** in
       `phase2_rerank` 6b (K2 vs K2+K3 overall + per-segment), pending a run. Ships only if K2+K3 > K2.
 - [ ] If LoRA used: adapter on Hub by revision, session-disjoint val, train==serve pinned. (LoRA N/A yet.)

@@ -75,6 +75,18 @@ def test_score_fn_length_mismatch_raises():
         k3.score(_ctx(), _cands(["t1", "t2", "t3"]))
 
 
+def test_cost_budget_raises_when_per_turn_pairs_exceed_budget():
+    import pytest
+    k3 = NeuralReranker(_CAT, QueryBuilder(), _fake_scorer, cross_encoder_k=5, max_pairs_per_turn=2)
+    with pytest.raises(ValueError):
+        k3.score(_ctx(), _cands(["t1", "t2", "t3"]))   # would score 3 pairs > budget 2
+
+
+def test_within_cost_budget_is_fine():
+    k3 = NeuralReranker(_CAT, QueryBuilder(), _fake_scorer, cross_encoder_k=5, max_pairs_per_turn=10)
+    assert set(k3.score(_ctx(), _cands(["t1", "t2"]))) == {"t1", "t2"}
+
+
 class _Rev:                                           # fake reranker: reverses the pool
     def rerank(self, ctx, cands):
         return RankedList(turn=ctx, items=list(reversed(cands)))
