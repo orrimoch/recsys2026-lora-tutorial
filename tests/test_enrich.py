@@ -35,6 +35,14 @@ def test_build_prompt_returns_system_and_user_with_metadata():
     assert isinstance(system, str) and "Nirvana" in user
 
 
+def test_build_prompt_few_shot_examples_anchor_the_style():
+    examples = ["something upbeat for a workout", "more songs like Radiohead but mellower"]
+    system, user = build_enrich_prompt(_META, n_requests=4, examples=examples)
+    prompt = system + user
+    assert "something upbeat for a workout" in prompt
+    assert "more songs like Radiohead but mellower" in prompt
+
+
 def test_enrich_catalog_with_injected_generator_covers_rows():
     rows = [_META, {"track_id": "track_id: b", "track_name": ["Take Five"],
                     "artist_name": ["Brubeck"], "album_name": ["Time Out"], "release_date": "1959"}]

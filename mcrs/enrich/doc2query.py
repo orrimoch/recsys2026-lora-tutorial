@@ -36,13 +36,22 @@ def meta_text(meta: dict) -> str:
     return ", ".join(f"{k}: {v}" for k, v in fields if v)
 
 
-def build_enrich_prompt(meta: dict, n_requests: int = 4) -> tuple[str, str]:
+def build_enrich_prompt(meta: dict, n_requests: int = 4,
+                        examples: Optional[list[str]] = None) -> tuple[str, str]:
     system = (
         "You are a music metadata expert. Given a track's metadata, write "
-        f"{n_requests} short, varied retrieval queries a listener might use to find this track "
-        "(mood, genre, era, similar artists, use-cases/activities). One per line, no numbering, "
-        "no extra commentary."
+        f"{n_requests} varied retrieval queries a listener might actually use to find this track "
+        "(mood, genre, era, similar artists, use-cases/activities). Vary length from terse keywords "
+        "to a full conversational request. One per line, no numbering, no extra commentary."
     )
+    if examples:
+        # Few-shot STYLE anchors only (real listener phrasings, sampled from TRAIN — not tied to
+        # this track). They calibrate register/length to the real query distribution.
+        shots = "\n".join(f"- {e}" for e in examples)
+        system += (
+            "\n\nReal listener queries look like this (match their style and variety, "
+            f"do NOT copy their content):\n{shots}"
+        )
     return system, meta_text(meta)
 
 
