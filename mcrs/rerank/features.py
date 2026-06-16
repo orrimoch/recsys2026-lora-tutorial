@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Optional
+from typing import Callable, Optional
 
 from mcrs.contracts import Candidate, TurnContext
 
@@ -31,14 +31,21 @@ def _artists(meta: dict) -> set:
 
 
 class FeatureBuilder:
-    def __init__(self, catalog, channel_labels: list[str]) -> None:
+    def __init__(self, catalog, channel_labels: list[str],
+                 score_fns: Optional[dict[str, Callable[[TurnContext, str], float]]] = None) -> None:
         self.catalog = catalog
         self.channel_labels = list(channel_labels)
+        # injected per-candidate relevance scorers (e.g. dense query<->doc cosine, bm25 score).
+        # Each fn(ctx, track_id) -> float; computed once here so K2/K3 consume, never recompute.
+        # Not label-derived (fixed encoder/index) -> leak-free; a TRAINED score would need OOF.
+        self.score_fns = dict(score_fns or {})
+        self.score_names = sorted(self.score_fns)
         self.feature_names = (
             ["rrf_score", "n_channels_hit", "best_rank_inv"]
             + [f"rank_inv__{l}" for l in self.channel_labels]
             + ["turn_number", "history_len", "is_cold", "query_len",
                "log_popularity", "release_year", "artist_in_history"]
+            + self.score_names
         )
 
     def build(self, ctx: TurnContext, candidates: list[Candidate]) -> list[Candidate]:
@@ -67,6 +74,8 @@ class FeatureBuilder:
             }
             for l in self.channel_labels:
                 f[f"rank_inv__{l}"] = (1.0 / ranks[l]) if l in ranks else 0.0
+            for name in self.score_names:
+                f[name] = float(self.score_fns[name](ctx, c.track_id))
             c.features = f
         return candidates
 

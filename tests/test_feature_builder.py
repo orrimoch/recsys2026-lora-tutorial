@@ -47,6 +47,21 @@ def test_features_computed_correctly():
     assert b.features["rank_inv__cf"] == 0.0 and b.features["artist_in_history"] == 0.0
 
 
+def test_score_fns_add_relevance_features():
+    # injected per-candidate relevance scorer (e.g. dense query<->doc cosine), GPU-free in tests
+    fb = FeatureBuilder(_CAT, channel_labels=["bm25", "cf"],
+                        score_fns={"dense_cos": lambda ctx, tid: {"c": 0.9, "b": 0.2}[tid]})
+    assert "dense_cos" in fb.feature_names
+    c, b = fb.build(_ctx(), _cands())
+    assert c.features["dense_cos"] == 0.9 and b.features["dense_cos"] == 0.2
+    assert set(c.features) == set(fb.feature_names)        # matrix() stays consistent
+
+
+def test_no_score_fns_keeps_default_feature_set():
+    fb = FeatureBuilder(_CAT, channel_labels=["bm25", "cf"])
+    assert not any(n.startswith("dense") for n in fb.feature_names)
+
+
 def test_build_is_pure_and_keys_match_feature_names():
     fb = FeatureBuilder(_CAT, channel_labels=["bm25", "cf"])
     once = fb.build(_ctx(), _cands())[0].features
