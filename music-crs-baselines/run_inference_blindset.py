@@ -88,6 +88,7 @@ def main(args):
     reranker_max_output_tokens = int(config.get("reranker_max_output_tokens", 512))
     reranker_k = int(config.get("reranker_k", 50))
     reranker_k2 = int(config.get("reranker_k2", 24))
+    reranker_stage1_model = str(config.get("reranker_stage1_model", "gemini-2.5-flash-lite"))
     # EXP: disable gemini "thinking" on the listwise reranker (None=default on; 0=off).
     _rtb = config.get("reranker_thinking_budget", None)
     reranker_thinking_budget = None if _rtb is None else int(_rtb)
@@ -157,6 +158,7 @@ def main(args):
         reranker_max_output_tokens=reranker_max_output_tokens,
         reranker_k=reranker_k,
         reranker_k2=reranker_k2,
+        reranker_stage1_model=reranker_stage1_model,
         reranker_rich_candidates=reranker_rich_candidates,
         reranker_thinking_budget=reranker_thinking_budget,
         retrieval_topk=retrieval_topk,

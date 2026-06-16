@@ -25,6 +25,7 @@ def load_reranker_module(
     rich_candidates: bool = False,
     thinking_budget: Optional[int] = None,
     k2: int = 24,
+    stage1_model: str = "gemini-2.5-flash-lite",
 ) -> Optional[Any]:
     """Return a reranker instance or None if reranker_type is falsy.
 
@@ -87,12 +88,15 @@ def load_reranker_module(
         _stage1_prompt = str(_P(__file__).resolve().parent.parent
                              / "system_prompts" / "llm_listwise_rerank_stage1.txt")
         common = dict(item_db_name=item_db_name, track_split_types=track_split_types,
-                      corpus_types=corpus_types, cache_dir=cache_dir, model_path=model_path,
+                      corpus_types=corpus_types, cache_dir=cache_dir,
                       max_output_tokens=max_output_tokens)
-        stage1 = LLMListwiseReranker(**common, k=k, rich_candidates=False, thinking_budget=None,
-                                     system_prompt_path=_stage1_prompt)
-        stage2 = LLMListwiseReranker(**common, k=k2, rich_candidates=rich_candidates,
-                                     thinking_budget=thinking_budget)  # default precision prompt
+        # Stage 1 = CHEAP coarse filter: flash-lite (stage1_model) + thinking DISABLED (0 — None
+        # would mean SDK-default dynamic thinking ON, paying for thinking on the wide 100-pass).
+        # Stage 2 = the strong model (model_path) + thinking + rich + precision prompt.
+        stage1 = LLMListwiseReranker(**common, model_path=stage1_model, k=k, rich_candidates=False,
+                                     thinking_budget=0, system_prompt_path=_stage1_prompt)
+        stage2 = LLMListwiseReranker(**common, model_path=model_path, k=k2,
+                                     rich_candidates=rich_candidates, thinking_budget=thinking_budget)
         return TwoStageListwiseReranker(stage1=stage1, stage2=stage2, k1=k, k2=k2)
     if reranker_type == "pro_rank":
         # W3 default reranker — last-token-logit-diff scoring over Qwen-0.5B.

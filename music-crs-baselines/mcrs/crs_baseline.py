@@ -309,6 +309,7 @@ class CRS_BASELINE:
         # config; reranker_k: 100 lets it see wall golds at union rank 51-100.
         reranker_k: int = 50,
         reranker_k2: int = 24,   # llm_listwise_2stage: stage-2 shortlist size (k1=reranker_k)
+        reranker_stage1_model: str = "gemini-2.5-flash-lite",  # 2stage stage-1 (cheap coarse filter)
         # EXP-014: richer per-candidate context for the LLM listwise reranker
         # (release year + wider tag list + goal_category). Off = config 205 prompt.
         reranker_rich_candidates: bool = False,
@@ -417,6 +418,7 @@ class CRS_BASELINE:
             max_output_tokens=reranker_max_output_tokens,
             k=reranker_k,
             k2=reranker_k2,
+            stage1_model=reranker_stage1_model,
             rich_candidates=reranker_rich_candidates,
             thinking_budget=reranker_thinking_budget,
         )

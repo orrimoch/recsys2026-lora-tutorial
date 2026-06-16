@@ -5,7 +5,8 @@
 #   Stage 2 (fine, SHORT): RICH listwise over the 24 (reranker_rich_candidates=true: 12 tags+year),
 #     thinking=512, PRECISION prompt -> final top-20. Short list -> the LLM ranks it well.
 # Tests whether attacking the CONVERSION gap (recall@100 0.48, nDCG 0.33 -> conditional-on-hit
-# ~0.69) lifts nDCG@20. FREE (no retrain; pure reranker). Both stages = gemini-2.5-flash. ~2x the
+# ~0.69) lifts nDCG@20. FREE (no retrain; pure reranker). Stage 1 = gemini-2.5-flash-LITE, NO
+# thinking (cheap coarse filter); Stage 2 = gemini-2.5-flash + thinking 512 (precision). ~1.3x the
 # single-stage Gemini cost. Responder SILENT -> nDCG@20 only. Compare to 215 (and to 221 = lever 1 alone).
 
 lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
@@ -53,9 +54,10 @@ attn_implementation: "sdpa"
 
 retrieval_topk: 100
 reranker_type: "llm_listwise_2stage"   # LEVER 2: two-stage wide->short
-reranker_model_path: "gemini-2.5-flash"
+reranker_model_path: "gemini-2.5-flash"          # stage 2 (fine/precision)
+reranker_stage1_model: "gemini-2.5-flash-lite"   # stage 1 (cheap coarse filter, NO thinking)
 reranker_max_output_tokens: 2048
-reranker_thinking_budget: 512          # stage 2 only (stage 1 = no thinking)
+reranker_thinking_budget: 512          # stage 2 ONLY (stage 1 thinking is hard-disabled = 0)
 reranker_rich_candidates: true         # LEVER 1: stage 2 gets 12 tags + year per candidate
 reranker_k: 100                        # stage 1 (k1): coarse over the WHOLE pool (sees 51-100)
 reranker_k2: 24                        # stage 2 (k2): rich rank of the shortlist
