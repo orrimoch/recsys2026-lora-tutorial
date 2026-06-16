@@ -45,7 +45,7 @@ def main():
     from datasets import load_dataset
     from mcrs.retrieval_modules import load_retrieval_module
     from mcrs.crs_baseline import build_retrieval_query
-    from mcrs.retrieval_modules.sasrec_model import build_user_dialog
+    from mcrs.retrieval_modules.sasrec_model import build_user_dialog, prior_turns
     from mcrs.rerankers.bge_reranker import build_tid_text_map
     from mcrs.db_item.music_catalog import MusicCatalogDB
 
@@ -69,6 +69,9 @@ def main():
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     n_written = 0
     buf_raw, buf_cmp, buf_ctx, buf_uid, buf_gold, buf_sess = [], [], [], [], [], []
+    # Open once in "w" (truncate on fresh run) so a Colab restart re-writes rather
+    # than silently appending duplicate rows; handle held across all flush batches.
+    out_f = open(args.output, "w")
 
     def flush():
         nonlocal n_written
@@ -76,16 +79,15 @@ def main():
             return
         cands = union.batch_text_to_item_retrieval(
             buf_raw, topk=args.pool_size, user_ids=buf_uid, batch_context=buf_ctx)
-        with open(args.output, "a") as f:
-            for j in range(len(buf_raw)):
-                gold = buf_gold[j]
-                if gold not in text_map:
-                    continue
-                negs = select_ce_negatives(gold, list(cands[j]), args.max_negatives)
-                row = build_ce_row(buf_cmp[j], gold, negs, text_map, buf_uid[j], buf_sess[j])
-                if len(row["neg"]) < 2:
-                    continue
-                f.write(json.dumps(row) + "\n"); n_written += 1
+        for j in range(len(buf_raw)):
+            gold = buf_gold[j]
+            if gold not in text_map:
+                continue
+            negs = select_ce_negatives(gold, list(cands[j]), args.max_negatives)
+            row = build_ce_row(buf_cmp[j], gold, negs, text_map, buf_uid[j], buf_sess[j])
+            if len(row["neg"]) < 2:
+                continue
+            out_f.write(json.dumps(row) + "\n"); n_written += 1
         buf_raw.clear(); buf_cmp.clear(); buf_ctx.clear(); buf_uid.clear(); buf_gold.clear(); buf_sess.clear()
 
     n_rows = 0
@@ -95,14 +97,15 @@ def main():
         up = sess.get("user_profile"); uid = sess.get("user_id"); sid = sess.get("session_id")
         for _, music in df[df["role"] == "music"].iterrows():
             tn = int(music["turn_number"])
-            prior = df[(df["turn_number"] < tn) | ((df["turn_number"] == tn) & (df["role"] == "user"))]
-            prior_turns = [{"role": ("assistant" if t["role"] == "music" else t["role"]),
-                            "content": (item_db.id_to_metadata(t["content"]) if t["role"] == "music"
-                                        else t["content"])} for _, t in prior.iterrows()]
+            # Single source of truth for the conditioning slice (train/serve parity).
+            prior = prior_turns(df, tn)
+            prior_rows = [{"role": ("assistant" if t["role"] == "music" else t["role"]),
+                           "content": (item_db.id_to_metadata(t["content"]) if t["role"] == "music"
+                                       else t["content"])} for _, t in prior.iterrows()]
             played = list(df[(df["role"] == "music") & (df["turn_number"] < tn)]["content"])
-            raw_q = build_retrieval_query(prior_turns, mode=args.retrieval_query_mode,
+            raw_q = build_retrieval_query(prior_rows, mode=args.retrieval_query_mode,
                                           goal_text=goal, user_profile=up)
-            cmp_q = build_retrieval_query(prior_turns, mode=args.ce_query_mode,
+            cmp_q = build_retrieval_query(prior_rows, mode=args.ce_query_mode,
                                           goal_text=goal, user_profile=up)
             buf_raw.append(raw_q); buf_cmp.append(cmp_q)
             buf_ctx.append({"history_tids": played, "user_dialog": build_user_dialog(prior.to_dict("records")),
@@ -112,8 +115,11 @@ def main():
                 flush()
             n_rows += 1
             if args.max_rows and n_rows >= args.max_rows:
-                flush(); print(f"[ce-build] DONE (max-rows) -> {args.output} ({n_written})", file=sys.stderr); return
+                flush(); out_f.close()
+                print(f"[ce-build] DONE (max-rows) -> {args.output} ({n_written})", file=sys.stderr)
+                return
     flush()
+    out_f.close()
     print(f"[ce-build] DONE -> {args.output} ({n_written} rows from {n_rows} turns)", file=sys.stderr)
 
 
