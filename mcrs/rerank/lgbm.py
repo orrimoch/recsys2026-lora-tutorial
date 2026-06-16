@@ -8,6 +8,8 @@ K1's Candidate.features. See `.claude/documents/features/51_K2_lgbm_lambdamart.m
 """
 from __future__ import annotations
 
+import json
+import os
 import random
 from typing import Optional
 
@@ -38,6 +40,8 @@ class LGBMReranker:
         self._booster = None
         self.n_train_groups_ = 0
         self.n_val_groups_ = 0
+        # feature spec the model was trained on; persisted on save, checked at rerank (serve guard)
+        self.feature_names_: Optional[list[str]] = None
 
     # ---- group / feature assembly ----
     def _cap(self, cands: list[Candidate], gold: str) -> list[Candidate]:
@@ -96,6 +100,7 @@ class LGBMReranker:
                       random_state=self.seed, verbosity=-1, num_leaves=15, min_child_samples=5)
         params.update(self.params)
         self.model = lgb.LGBMRanker(**params)
+        self.feature_names_ = list(self.fb.feature_names)   # pin the trained feature spec
 
         # Early stopping (opt-in): session-disjoint val + stop on val ndcg@20.
         if self.early_stopping_rounds and self.val_fraction > 0:
@@ -121,6 +126,11 @@ class LGBMReranker:
     def rerank(self, ctx: TurnContext, candidates: list[Candidate]) -> RankedList:
         if self._booster is None:
             raise RuntimeError("LGBMReranker.rerank called before fit()/load()")
+        if self.feature_names_ is not None and list(self.fb.feature_names) != self.feature_names_:
+            raise ValueError(
+                "feature spec mismatch: this FeatureBuilder differs from the trained model's. "
+                f"trained on {len(self.feature_names_)} features, got {len(self.fb.feature_names)}. "
+                "Reconstruct FeatureBuilder with the SAME channel_labels and score_fns (train==serve).")
         self.fb.build(ctx, candidates)
         scores = self._booster.predict(self.fb.matrix(candidates))
         order = np.argsort(-scores, kind="stable")
@@ -130,8 +140,15 @@ class LGBMReranker:
         if self._booster is None:
             raise RuntimeError("nothing to save: fit() first")
         self._booster.save_model(path)
+        if self.feature_names_ is not None:           # sidecar feature spec for the serve guard
+            with open(path + ".features.json", "w") as f:
+                json.dump(self.feature_names_, f)
 
     def load(self, path: str) -> "LGBMReranker":
         import lightgbm as lgb
         self._booster = lgb.Booster(model_file=path)
+        sidecar = path + ".features.json"
+        if os.path.exists(sidecar):
+            with open(sidecar) as f:
+                self.feature_names_ = json.load(f)
         return self

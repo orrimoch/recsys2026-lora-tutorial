@@ -88,3 +88,20 @@ def test_save_load_roundtrip_preserves_ranking(tmp_path):
     loaded = LGBMReranker(_fb()).load(p)
     after = [c.track_id for c in loaded.rerank(ctx, list(cands)).items]
     assert before == after
+
+
+def test_rerank_raises_on_feature_spec_mismatch(tmp_path):
+    # trained with bm25+dense+a score feature; reloaded with a DIFFERENT feature set -> must fail loud
+    fb_train = FeatureBuilder(catalog=None, channel_labels=["bm25", "dense"],
+                              score_fns={"dense_cos": lambda ctx, tid: 0.0})
+    rk = LGBMReranker(fb_train, n_estimators=20)
+    rk.fit([_group("g", ["g", f"d{i}", f"e{i}"]) for i in range(20)])
+    p = str(tmp_path / "k2.txt"); rk.save(p)
+    ctx, cands, _ = _group("g", ["d1", "g", "e1"])
+    mismatched = LGBMReranker(FeatureBuilder(catalog=None, channel_labels=["bm25", "dense"])).load(p)
+    import pytest
+    with pytest.raises(ValueError):
+        mismatched.rerank(ctx, list(cands))      # feature set differs from the trained model
+    matched = LGBMReranker(FeatureBuilder(catalog=None, channel_labels=["bm25", "dense"],
+                                          score_fns={"dense_cos": lambda ctx, tid: 0.0})).load(p)
+    assert matched.rerank(ctx, list(cands)).items                      # same spec -> works
