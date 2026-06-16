@@ -13,11 +13,12 @@ venv/
 .venv/
 .python-version
 
-# Data + caches (everything pulled at runtime)
-data/
-cache/
-output/
-lora_adapters/
+# Data + caches (everything pulled at runtime). Root-anchored so source dirs
+# like mcrs/data/ are NOT ignored.
+/data/
+/cache/
+/output/
+/lora_adapters/
 models/
 
 # Inference outputs — large (~7.5 MB per devset run), reproducible via
