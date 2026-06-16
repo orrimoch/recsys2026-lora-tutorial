@@ -29,11 +29,14 @@ def doc_token_budget(query_tokens: int, max_length: int, max_doc_tokens: int,
 
 def build_cross_encoder_score_fn(model_name: str, device: str = "cuda", max_length: int = 512,
                                  max_doc_tokens: int = 480, batch_size: int = 64,
-                                 revision: Optional[str] = None):
-    """Load a CrossEncoder and return score_fn(pairs)->list[float] with doc-side token truncation."""
+                                 revision: Optional[str] = None, fp16: bool = True):
+    """Load a CrossEncoder and return score_fn(pairs)->list[float] with doc-side token truncation.
+    fp16=True halves memory + ~2x throughput on GPU (negligible ranking-quality loss) — matters on T4/G4."""
     from sentence_transformers import CrossEncoder
 
     ce = CrossEncoder(model_name, max_length=max_length, device=device, revision=revision)
+    if fp16 and str(device).startswith("cuda"):
+        ce.model.half()
     tok = ce.tokenizer
     # cap the counting-encode at max_length so a very long doc doesn't trip the tokenizer's
     # ">model_max_length" warning; we slice to the per-pair budget below anyway.
