@@ -26,6 +26,8 @@ def load_crs_baseline(
     reranker_multimodal_artifacts: Optional[str] = None,
     reranker_max_output_tokens: int = 512,
     reranker_k: int = 50,  # EXP-010: LLM listwise reranker window (50=default; 100=see rank 51-100)
+    reranker_k2: int = 24,  # llm_listwise_2stage: stage-2 shortlist size (k1=reranker_k)
+    reranker_stage1_model: str = "gemini-2.5-flash-lite",  # 2stage stage-1 (cheap coarse filter)
     reranker_rich_candidates: bool = False,  # EXP-014: richer per-candidate context (year+tags+goal_category)
     reranker_thinking_budget: Optional[int] = None,  # EXP: 0 = disable gemini "thinking" on the listwise reranker
     retrieval_topk: int = 20,
@@ -78,6 +80,8 @@ def load_crs_baseline(
         reranker_multimodal_artifacts=reranker_multimodal_artifacts,
         reranker_max_output_tokens=reranker_max_output_tokens,
         reranker_k=reranker_k,
+        reranker_k2=reranker_k2,
+        reranker_stage1_model=reranker_stage1_model,
         reranker_rich_candidates=reranker_rich_candidates,
         reranker_thinking_budget=reranker_thinking_budget,
         retrieval_topk=retrieval_topk,
