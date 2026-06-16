@@ -19,6 +19,12 @@ def test_content_knn_returns_neighbors_of_history_and_empty_when_cold():
     assert cold[0] == []
 
 
+def test_content_knn_label_override_for_multiple_modalities():
+    te = TrackEmbeddings([{"track_id": "a", "m": [1.0, 0.0]}])
+    assert ContentKNNChannel(te, modality="m").label == "content_knn"          # default
+    assert ContentKNNChannel(te, modality="m", label="cknn_audio").label == "cknn_audio"
+
+
 def test_cf_uses_user_vector_and_empty_for_missing_user():
     ue = UserEmbeddings([{"user_id": "u1", "cf-bpr": [1.0, 0.0]}])
     te = TrackEmbeddings([{"track_id": "a", "cf-bpr": [1.0, 0.0]},

@@ -25,7 +25,10 @@ def _history(batch_context, i) -> list[str]:
 class ContentKNNChannel:
     label = "content_knn"
 
-    def __init__(self, track_emb: TrackEmbeddings, modality: str, normalize: bool = True) -> None:
+    def __init__(self, track_emb: TrackEmbeddings, modality: str, normalize: bool = True,
+                 label: Optional[str] = None) -> None:
+        if label is not None:        # distinct label per modality (multiple content-kNN channels fuse)
+            self.label = label
         self.index_to_id = track_emb.index_to_id
         self.id_to_index = track_emb.id_to_index
         self.normalize = normalize
