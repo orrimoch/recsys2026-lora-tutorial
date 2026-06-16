@@ -6,11 +6,11 @@ from mcrs.rerank.features import FeatureBuilder
 from mcrs.rerank.lgbm import LGBMReranker
 
 
-def _ctx():
-    return TurnContext("s", "u", 1, ["q"], None, UserProfile("u", 1, "f", "US", []), [], "cold")
+def _ctx(session="s"):
+    return TurnContext(session, "u", 1, ["q"], None, UserProfile("u", 1, "f", "US", []), [], "cold")
 
 
-def _group(gold_id, ids):
+def _group(gold_id, ids, session="s"):
     """gold gets the strongest retrieval signal; distractors weaker."""
     cands = []
     for j, t in enumerate(ids):
@@ -18,7 +18,7 @@ def _group(gold_id, ids):
             cands.append(Candidate(t, channel_ranks={"bm25": 1, "dense": 1}, rrf_score=1.0))
         else:
             cands.append(Candidate(t, channel_ranks={"bm25": j + 5}, rrf_score=0.05))
-    return (_ctx(), cands, gold_id)
+    return (_ctx(session), cands, gold_id)
 
 
 def _fb():
@@ -50,6 +50,32 @@ def test_rerank_requires_a_fitted_model():
     import pytest
     with pytest.raises(RuntimeError):
         LGBMReranker(_fb()).rerank(_ctx(), [Candidate("a")])
+
+
+def test_negative_cap_limits_group_size_keeping_the_gold():
+    rk = LGBMReranker(_fb(), neg_cap=2)
+    X, y, gsizes = rk.build_training_data([_group("g", ["g", "d", "e", "f", "h"])])
+    assert gsizes == [3]                 # gold + 2 negatives (was 1 + 4)
+    assert int(y.sum()) == 1             # gold retained
+
+
+def test_session_split_is_disjoint():
+    rk = LGBMReranker(_fb(), val_fraction=0.3, seed=1)
+    groups = [_group("g", ["g", "x", "y"], session=f"s{i}") for i in range(10)]
+    tr, va = rk._session_split(groups)
+    tr_s = {g[0].session_id for g in tr}
+    va_s = {g[0].session_id for g in va}
+    assert tr_s and va_s and not (tr_s & va_s)      # disjoint, both non-empty
+    assert len(va_s) == 3                            # 30% of 10 sessions
+
+
+def test_fit_uses_validation_split_and_still_ranks_gold_first():
+    rk = LGBMReranker(_fb(), n_estimators=80, val_fraction=0.25,
+                      min_val_groups=5, early_stopping_rounds=10)
+    rk.fit([_group("g", ["g", f"d{i}", f"e{i}", f"f{i}"], session=f"s{i}") for i in range(40)])
+    assert rk.n_val_groups_ > 0 and rk.n_train_groups_ > 0   # session-disjoint val used
+    ranked = rk.rerank(*_group("g", ["d9", "e9", "g", "f9"])[:2])
+    assert ranked.items[0].track_id == "g"
 
 
 def test_save_load_roundtrip_preserves_ranking(tmp_path):
