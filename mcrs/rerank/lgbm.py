@@ -24,6 +24,7 @@ class LGBMReranker:
         self.n_estimators = n_estimators
         self.params = params or {}
         self.model = None
+        self._booster = None
 
     def build_training_data(self, groups):
         """groups = iterable of (TurnContext, candidates, gold_id). Returns (X, y, group_sizes),
@@ -49,12 +50,23 @@ class LGBMReranker:
         params.update(self.params)
         self.model = lgb.LGBMRanker(**params)
         self.model.fit(X, y, group=gsizes)
+        self._booster = self.model.booster_
         return self
 
     def rerank(self, ctx: TurnContext, candidates: list[Candidate]) -> RankedList:
-        if self.model is None:
-            raise RuntimeError("LGBMReranker.rerank called before fit()")
+        if self._booster is None:
+            raise RuntimeError("LGBMReranker.rerank called before fit()/load()")
         self.fb.build(ctx, candidates)
-        scores = self.model.predict(self.fb.matrix(candidates))
+        scores = self._booster.predict(self.fb.matrix(candidates))
         order = np.argsort(-scores, kind="stable")
         return RankedList(turn=ctx, items=[candidates[int(i)] for i in order])
+
+    def save(self, path: str) -> None:
+        if self._booster is None:
+            raise RuntimeError("nothing to save: fit() first")
+        self._booster.save_model(path)
+
+    def load(self, path: str) -> "LGBMReranker":
+        import lightgbm as lgb
+        self._booster = lgb.Booster(model_file=path)
+        return self

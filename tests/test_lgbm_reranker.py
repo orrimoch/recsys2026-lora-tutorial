@@ -50,3 +50,15 @@ def test_rerank_requires_a_fitted_model():
     import pytest
     with pytest.raises(RuntimeError):
         LGBMReranker(_fb()).rerank(_ctx(), [Candidate("a")])
+
+
+def test_save_load_roundtrip_preserves_ranking(tmp_path):
+    rk = LGBMReranker(_fb(), n_estimators=30)
+    rk.fit([_group("g", ["g", f"d{i}", f"e{i}"]) for i in range(30)])
+    ctx, cands, _ = _group("g", ["d1", "g", "e1"])
+    before = [c.track_id for c in rk.rerank(ctx, list(cands)).items]
+    p = str(tmp_path / "k2.txt")
+    rk.save(p)
+    loaded = LGBMReranker(_fb()).load(p)
+    after = [c.track_id for c in loaded.rerank(ctx, list(cands)).items]
+    assert before == after
