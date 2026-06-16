@@ -24,6 +24,7 @@ def load_reranker_module(
     k: int = 50,
     rich_candidates: bool = False,
     thinking_budget: Optional[int] = None,
+    k2: int = 24,
 ) -> Optional[Any]:
     """Return a reranker instance or None if reranker_type is falsy.
 
@@ -74,6 +75,25 @@ def load_reranker_module(
             rich_candidates=rich_candidates,
             thinking_budget=thinking_budget,
         )
+    if reranker_type == "llm_listwise_2stage":
+        # Lever 2: stage 1 = coarse listwise over the WIDE pool (k = k1, plain, no thinking) so
+        # wall golds at pool-rank 51-100 can enter the shortlist; stage 2 = rich listwise over the
+        # top-k2 shortlist (short list ranks well + rich tags = lever 1). Shared cache per stage.
+        from pathlib import Path as _P
+        from .llm_listwise_rerank import LLMListwiseReranker
+        from .two_stage_listwise import TwoStageListwiseReranker
+        # Per-stage prompts: stage 1 = coarse-recall ("keep plausible matches, don't drop them");
+        # stage 2 = the default precision prompt ("commit decisively to the best").
+        _stage1_prompt = str(_P(__file__).resolve().parent.parent
+                             / "system_prompts" / "llm_listwise_rerank_stage1.txt")
+        common = dict(item_db_name=item_db_name, track_split_types=track_split_types,
+                      corpus_types=corpus_types, cache_dir=cache_dir, model_path=model_path,
+                      max_output_tokens=max_output_tokens)
+        stage1 = LLMListwiseReranker(**common, k=k, rich_candidates=False, thinking_budget=None,
+                                     system_prompt_path=_stage1_prompt)
+        stage2 = LLMListwiseReranker(**common, k=k2, rich_candidates=rich_candidates,
+                                     thinking_budget=thinking_budget)  # default precision prompt
+        return TwoStageListwiseReranker(stage1=stage1, stage2=stage2, k1=k, k2=k2)
     if reranker_type == "pro_rank":
         # W3 default reranker — last-token-logit-diff scoring over Qwen-0.5B.
         # `model_path` (optional) loads a LoRA adapter on top of the base model

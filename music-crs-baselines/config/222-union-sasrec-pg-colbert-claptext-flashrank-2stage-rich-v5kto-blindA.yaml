@@ -1,0 +1,74 @@
+# 222 — config 215 + RERANKER LEVERS 1+2: two-stage LLM listwise reranker.
+#   Stage 1 (coarse, WIDE): listwise over ALL 100 candidates (reranker_k=100), plain lines, no
+#     thinking, COARSE-RECALL prompt -> top-24 shortlist. Catches WALL golds recalled at pool-rank
+#     51-100 that the single-stage k=50 reranker never even sees.
+#   Stage 2 (fine, SHORT): RICH listwise over the 24 (reranker_rich_candidates=true: 12 tags+year),
+#     thinking=512, PRECISION prompt -> final top-20. Short list -> the LLM ranks it well.
+# Tests whether attacking the CONVERSION gap (recall@100 0.48, nDCG 0.33 -> conditional-on-hit
+# ~0.69) lifts nDCG@20. FREE (no retrain; pure reranker). Both stages = gemini-2.5-flash. ~2x the
+# single-stage Gemini cost. Responder SILENT -> nDCG@20 only. Compare to 215 (and to 221 = lever 1 alone).
+
+lm_type: "OrRim123/recsys2026-b3-grpo-pilot-2026-05-13-qwen3b-v5-kto-merged"
+lora_path: null
+lora_max_rank: 32
+
+retrieval_type: "wrrf_union_v1"
+
+use_sasrec: true
+w_sasrec: 1.0
+sasrec_model_dir: "sasrec_v1"
+
+use_propose_ground: true
+w_propose_ground: 0.5
+pg_model: "gemini-2.5-flash"
+pg_n_proposals: 20
+pg_batch_size: 4
+pg_inner_dense: "dense_metadata_qwen3_instruct"
+
+use_colbert: true
+w_colbert: 1.0
+colbert_index_folder: null
+colbert_index_name: "colbert-music-v1"
+colbert_q_len: 96
+colbert_model: null
+
+use_clap_text: true
+w_clap_text: 1.0
+clap_text_model: "laion/larger_clap_music"
+
+test_dataset_name: "talkpl-ai/TalkPlayData-Challenge-Blind-A"
+item_db_name: "talkpl-ai/TalkPlayData-Challenge-Track-Metadata"
+user_db_name: "talkpl-ai/TalkPlayData-Challenge-User-Metadata"
+track_split_types:
+  - "all_tracks"
+user_split_types:
+  - "all_users"
+corpus_types:
+  - "track_name"
+  - "artist_name"
+  - "album_name"
+cache_dir: "../experiments/cache"
+device: "cuda"
+attn_implementation: "sdpa"
+
+retrieval_topk: 100
+reranker_type: "llm_listwise_2stage"   # LEVER 2: two-stage wide->short
+reranker_model_path: "gemini-2.5-flash"
+reranker_max_output_tokens: 2048
+reranker_thinking_budget: 512          # stage 2 only (stage 1 = no thinking)
+reranker_rich_candidates: true         # LEVER 1: stage 2 gets 12 tags + year per candidate
+reranker_k: 100                        # stage 1 (k1): coarse over the WHOLE pool (sees 51-100)
+reranker_k2: 24                        # stage 2 (k2): rich rank of the shortlist
+
+response_prompt_name: "response_generation_cot_user_state"
+response_max_new_tokens: 320
+top_n_for_prompt: 1
+query_preprocessing_mode: "raw_enriched"
+
+use_vllm: false
+
+use_state_tracker: true
+state_tracker_prompt_name: "state_extraction"
+state_tracker_max_new_tokens: 96
+
+use_cmqr: false

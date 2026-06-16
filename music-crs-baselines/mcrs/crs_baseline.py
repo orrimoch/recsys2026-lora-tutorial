@@ -308,6 +308,7 @@ class CRS_BASELINE:
         # the reranker reads + reorders). Default 50 = bit-identical to every shipped
         # config; reranker_k: 100 lets it see wall golds at union rank 51-100.
         reranker_k: int = 50,
+        reranker_k2: int = 24,   # llm_listwise_2stage: stage-2 shortlist size (k1=reranker_k)
         # EXP-014: richer per-candidate context for the LLM listwise reranker
         # (release year + wider tag list + goal_category). Off = config 205 prompt.
         reranker_rich_candidates: bool = False,
@@ -415,6 +416,7 @@ class CRS_BASELINE:
             multimodal_artifacts=reranker_multimodal_artifacts,
             max_output_tokens=reranker_max_output_tokens,
             k=reranker_k,
+            k2=reranker_k2,
             rich_candidates=reranker_rich_candidates,
             thinking_budget=reranker_thinking_budget,
         )
