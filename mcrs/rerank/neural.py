@@ -60,3 +60,17 @@ class NeuralReranker:
         # stable sort: ties keep the incoming (K2) order; rest stays in K2 order below the slice
         top_sorted = sorted(top, key=lambda c: -sc.get(c.track_id, 0.0))
         return RankedList(turn=ctx, items=top_sorted + rest)
+
+
+class ChainReranker:
+    """Apply rerankers in sequence (e.g. K2 then K3), each consuming the prior's items. F2 Reranker."""
+    label = "chain"
+
+    def __init__(self, *rerankers) -> None:
+        self.rerankers = rerankers
+
+    def rerank(self, ctx: TurnContext, candidates: list[Candidate]) -> RankedList:
+        items = list(candidates)
+        for r in self.rerankers:
+            items = r.rerank(ctx, items).items
+        return RankedList(turn=ctx, items=items)

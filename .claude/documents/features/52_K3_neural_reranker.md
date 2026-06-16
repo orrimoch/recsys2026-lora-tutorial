@@ -53,11 +53,19 @@ Optional module: ships only if dev **nDCG@20 (and hit-rank) improves over K2-alo
 `rerank.neural.enabled` (default false), `.kind` (`cross_encoder`|`colbert`), `.model_revision`, `.cross_encoder_k` (from P0), `.mode` (`stacking`|`final`, default `stacking`), `.lora.{enabled,r,alpha,target_modules}`, `.max_doc_tokens`, `.batch_size`. Defaults/types from F2 loader.
 
 ## 10. Definition of Done & review checklist
-- [ ] Implements F2 `Reranker` + `score()` stacking surface; re-scores only top `cross_encoder_k`.
-- [ ] Stacking score is OOF (in-sample variant fails a test); doc-side truncation correct.
-- [ ] Dev nDCG@20 lift over K2 measured (else not shipped); cost within budget; cold/warm reported.
-- [ ] If LoRA used: adapter on Hub by revision, session-disjoint val, train==serve pinned.
-- [ ] Code review approved.
+> Status after the 2026-06-16 K3-vs-plan review (impl: `mcrs/rerank/{neural,cross_encoder}.py`).
+- [x] Implements F2 `Reranker` + `score()` stacking surface; re-scores only top `cross_encoder_k`
+      (final-stage `rerank()` done; `ChainReranker` composes K2→K3; 7 tests). `model_revision` carried.
+- [~] Stacking score is OOF (in-sample variant fails a test): **DEFERRED** — `rerank()` final-stage is
+      leak-free (inference-time, not a train feature), so we measure final-stage first; the OOF
+      cross-fit harness + leak test are built only if/when we stack and K3 shows a final-stage lift.
+      Doc-side truncation is now **token-level** (`build_cross_encoder_score_fn`, `truncate_doc_tokens`,
+      `truncation` on the doc only) — query side preserved; tested.
+- [~] Dev nDCG@20 lift over K2 measured; cost within budget; cold/warm reported: **wired** in
+      `phase2_rerank` 6b (K2 vs K2+K3 overall + per-segment), pending a run. Ships only if K2+K3 > K2.
+- [ ] If LoRA used: adapter on Hub by revision, session-disjoint val, train==serve pinned. (LoRA N/A yet.)
+- [~] Code review approved: reviewed; cheap items applied (fail-loud scorer, edge tests, `model_revision`);
+      OOF harness + per-turn cost budget assert remain open.
 
 ## 11. Build order & dependencies
 **Built after K1 + K2** (needs the GBDT pool + the feature/stacking harness) and P0 (`cross_encoder_k`). Depends on: F1, F2, F3, K1, K2, R7. **Blocks:** nothing hard (optional precision lever feeding L1); its stacked feature loops back into K1/K2. Sits on the "push to 0.55" path (plan §17 day 8–10).

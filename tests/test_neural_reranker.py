@@ -4,7 +4,8 @@ from __future__ import annotations
 from mcrs.contracts import Candidate, TurnContext, UserProfile
 from mcrs.data.catalog import Catalog
 from mcrs.retrieval.query import QueryBuilder
-from mcrs.rerank.neural import NeuralReranker
+from mcrs.contracts import RankedList
+from mcrs.rerank.neural import ChainReranker, NeuralReranker
 
 # each track's doc carries its id (via artist_name) so the fake scorer can key on it
 _CAT = Catalog([{"track_id": t, "artist_name": [t]} for t in ("t1", "t2", "t3", "t4")],
@@ -72,6 +73,18 @@ def test_score_fn_length_mismatch_raises():
     import pytest
     with pytest.raises(ValueError):
         k3.score(_ctx(), _cands(["t1", "t2", "t3"]))
+
+
+class _Rev:                                           # fake reranker: reverses the pool
+    def rerank(self, ctx, cands):
+        return RankedList(turn=ctx, items=list(reversed(cands)))
+
+
+def test_chain_applies_rerankers_in_order():
+    out1 = ChainReranker(_Rev()).rerank(_ctx(), _cands(["t1", "t2", "t3"]))
+    assert [c.track_id for c in out1.items] == ["t3", "t2", "t1"]          # one reverse
+    out2 = ChainReranker(_Rev(), _Rev()).rerank(_ctx(), _cands(["t1", "t2", "t3"]))
+    assert [c.track_id for c in out2.items] == ["t1", "t2", "t3"]          # reversed twice = original
 
 
 def test_pairs_use_query_text_and_enriched_doc():
