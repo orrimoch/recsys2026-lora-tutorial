@@ -35,6 +35,13 @@ def test_build_prompt_returns_system_and_user_with_metadata():
     assert isinstance(system, str) and "Nirvana" in user
 
 
+def test_prompt_steers_toward_attributes_intent_not_title_restatement():
+    system, _ = build_enrich_prompt(_META, n_requests=4)
+    s = system.lower()
+    assert "attribute" in s or "intent" in s           # focus on attributes/intent
+    assert "title" in s                                # explicitly mentions not relying on the title
+
+
 def test_build_prompt_few_shot_examples_anchor_the_style():
     examples = ["something upbeat for a workout", "more songs like Radiohead but mellower"]
     system, user = build_enrich_prompt(_META, n_requests=4, examples=examples)

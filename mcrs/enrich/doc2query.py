@@ -40,9 +40,11 @@ def build_enrich_prompt(meta: dict, n_requests: int = 4,
                         examples: Optional[list[str]] = None) -> tuple[str, str]:
     system = (
         "You are a music metadata expert. Given a track's metadata, write "
-        f"{n_requests} varied retrieval queries a listener might actually use to find this track "
-        "(mood, genre, era, similar artists, use-cases/activities). Vary length from terse keywords "
-        "to a full conversational request. One per line, no numbering, no extra commentary."
+        f"{n_requests} varied retrieval queries a listener might actually use to find this track. "
+        "Focus on its ATTRIBUTES and the listener's INTENT — mood, energy, genre, era, themes, "
+        "similar artists, and use-cases/activities. Assume the listener may NOT know the exact "
+        "title or artist, so do not just restate them. Vary length from terse keywords to a full "
+        "conversational request. One per line, no numbering, no extra commentary."
     )
     if examples:
         # Few-shot STYLE anchors only (real listener phrasings, sampled from TRAIN — not tied to
