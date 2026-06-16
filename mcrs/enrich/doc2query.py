@@ -9,6 +9,7 @@ Reads track metadata ONLY (no conversations/golds) — no leak.
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Iterable, Optional
 
 from mcrs.data.ids import canonical_track_id
@@ -91,4 +92,43 @@ def enrich_catalog(
             continue
         system, user = build_enrich_prompt(r, n_requests)
         out[tid] = enriched_document(r, generate_fn(system, user))
+    return out
+
+
+def enrich_catalog_concurrent(
+    rows: Iterable[dict],
+    generate_fn: Callable[[str, str], str],
+    n_requests: int = 4,
+    limit: int = 0,
+    done: Optional[dict[str, str]] = None,
+    max_workers: int = 20,
+) -> dict[str, str]:
+    """Concurrent twin of `enrich_catalog` for paid-tier throughput.
+
+    Per-item LLM calls are independent, so we keep up to `max_workers` requests in flight at
+    once via a thread pool — throughput is then bounded by the API rate limit (RPM/TPM) rather
+    than per-request latency. Same result/`done`-resume semantics as `enrich_catalog`. Wrap
+    `generate_fn` with the retry helper so a single failed call can't abort the run.
+    """
+    out: dict[str, str] = dict(done or {})
+
+    pending: list[dict] = []
+    for i, r in enumerate(rows):
+        if limit and i >= limit:
+            break
+        if canonical_track_id(r["track_id"]) in out:
+            continue
+        pending.append(r)
+    if not pending:
+        return out
+
+    def _enrich_one(r: dict) -> tuple[str, str]:
+        system, user = build_enrich_prompt(r, n_requests)
+        return canonical_track_id(r["track_id"]), enriched_document(r, generate_fn(system, user))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(_enrich_one, r) for r in pending]
+        for fut in as_completed(futures):
+            tid, doc = fut.result()
+            out[tid] = doc
     return out

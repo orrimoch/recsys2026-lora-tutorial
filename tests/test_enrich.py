@@ -1,10 +1,13 @@
 """A1 — catalog enrichment / doc2query (pure helpers + injected-generator driver)."""
 from __future__ import annotations
 
+import threading
+
 from mcrs.enrich.doc2query import (
     build_enrich_prompt,
     clean_enrichment,
     enrich_catalog,
+    enrich_catalog_concurrent,
     enriched_document,
     meta_text,
 )
@@ -57,3 +60,39 @@ def test_enrich_catalog_with_injected_generator_covers_rows():
     docs = enrich_catalog(rows, gen, n_requests=2)
     assert set(docs) == {"a", "b"}                          # canonical ids (prefix stripped)
     assert "query one" in docs["a"] and "Nirvana" in docs["a"]
+
+
+_ROWS = [
+    _META,
+    {"track_id": "track_id: b", "track_name": ["Take Five"], "artist_name": ["Brubeck"],
+     "album_name": ["Time Out"], "release_date": "1959"},
+    {"track_id": "c", "track_name": ["Clair de Lune"], "artist_name": ["Debussy"]},
+]
+
+
+def test_enrich_catalog_concurrent_matches_serial_result():
+    gen = lambda system, user: "query one\nquery two"       # fake LLM
+    serial = enrich_catalog(_ROWS, gen, n_requests=2)
+    concurrent = enrich_catalog_concurrent(_ROWS, gen, n_requests=2, max_workers=4)
+    assert concurrent == serial                             # same ids, same enriched docs
+
+
+def test_enrich_catalog_concurrent_resumes_from_done():
+    gen = lambda system, user: "fresh"
+    done = {"a": "already enriched doc"}                    # canonical id already present
+    docs = enrich_catalog_concurrent(_ROWS, gen, n_requests=2, max_workers=4, done=done)
+    assert docs["a"] == "already enriched doc"             # untouched, not regenerated
+    assert set(docs) == {"a", "b", "c"} and "fresh" in docs["b"]
+
+
+def test_enrich_catalog_concurrent_runs_requests_in_parallel():
+    # Barrier of 3 only releases when 3 requests are in flight at once; a serial loop would
+    # never get a 2nd request started, so wait() would time out and break the barrier.
+    barrier = threading.Barrier(3, timeout=5)
+
+    def gen(system, user):
+        barrier.wait()                                      # raises BrokenBarrierError if serial
+        return "ok"
+
+    docs = enrich_catalog_concurrent(_ROWS, gen, n_requests=2, max_workers=3)
+    assert set(docs) == {"a", "b", "c"}
