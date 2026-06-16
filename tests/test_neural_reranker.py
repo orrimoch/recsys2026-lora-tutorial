@@ -58,6 +58,22 @@ def test_score_returns_neural_scores_for_top_k_only():
     assert set(sc) == {"t1", "t2"} and sc["t1"] == 0.2 and sc["t2"] == 0.1
 
 
+def test_empty_and_short_pools():
+    k3 = NeuralReranker(_CAT, QueryBuilder(), _fake_scorer, cross_encoder_k=10)
+    assert k3.rerank(_ctx(), []).items == []                       # empty pool
+    assert k3.score(_ctx(), []) == {}
+    out = k3.rerank(_ctx(), _cands(["t1", "t2"]))                  # fewer than k -> no error
+    assert sorted(c.track_id for c in out.items) == ["t1", "t2"]
+
+
+def test_score_fn_length_mismatch_raises():
+    bad = lambda pairs: [0.0]                                       # returns too few scores
+    k3 = NeuralReranker(_CAT, QueryBuilder(), bad, cross_encoder_k=3)
+    import pytest
+    with pytest.raises(ValueError):
+        k3.score(_ctx(), _cands(["t1", "t2", "t3"]))
+
+
 def test_pairs_use_query_text_and_enriched_doc():
     cat = Catalog([{"track_id": "t1", "artist_name": ["t1"]}],
                   corpus_types=["artist_name"], enriched_docs={"t1": "ENRICHED mellow jazz blurb t1"})

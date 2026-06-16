@@ -14,7 +14,7 @@ See `.claude/documents/features/52_K3_neural_reranker.md`.
 """
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Optional
 
 from mcrs.contracts import Candidate, RankedList, TurnContext
 
@@ -26,7 +26,7 @@ class NeuralReranker:
 
     def __init__(self, catalog, query_builder, score_fn: ScoreFn,
                  cross_encoder_k: int = 100, enriched: bool = True,
-                 max_doc_chars: int = 2000) -> None:
+                 max_doc_chars: int = 2000, model_revision: Optional[str] = None) -> None:
         self.catalog = catalog
         self.qb = query_builder
         self.score_fn = score_fn
@@ -34,6 +34,8 @@ class NeuralReranker:
         self.enriched = enriched
         self.max_doc_chars = max_doc_chars      # coarse doc-side cap (preserve the query side); the
         #                                         cross-encoder tokenizer truncates the doc further
+        # provenance only (train==serve pin recorded by D1, spec §8); the model itself lives in score_fn
+        self.model_revision = model_revision
 
     def _doc(self, track_id: str) -> str:
         return self.catalog.id_to_metadata(track_id, enriched=self.enriched)[:self.max_doc_chars]
@@ -45,6 +47,8 @@ class NeuralReranker:
             return {}
         query = self.qb.build(ctx).text
         scores = self.score_fn([(query, self._doc(c.track_id)) for c in top])
+        if len(scores) != len(top):                 # loud fail vs silent zip truncation
+            raise ValueError(f"score_fn returned {len(scores)} scores for {len(top)} candidates")
         return {c.track_id: float(s) for c, s in zip(top, scores)}
 
     def rerank(self, ctx: TurnContext, candidates: list[Candidate]) -> RankedList:
