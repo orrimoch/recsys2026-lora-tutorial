@@ -218,6 +218,12 @@ by weighted RRF (`46_R7_…`); `topk` here is the channel's `topk_internal` (≥
   truncation + cap-hit counter; R1 keeps the latest turn verbatim (§8).
 - **Noise channel** (high recall, no unique recall) → R7 down-/zero-weights it via the §6.2 unique-recall
   evidence; don't ship a channel that only duplicates BM25.
+- **Semantic duplicate of R8 (ColBERT)** — R4 and R8 (`47_R8_…`) are the SAME signal: semantic match of
+  the current-intent query against the enriched docs (R4 pools to one vector; R8 keeps token-level MaxSim).
+  They MUST NOT both run as active query-semantic channels (RRF double-counts). When R8 is activated, its
+  §6 replace-ablation keeps exactly one: ColBERT supersedes this channel iff ColBERT-alone ≥ dense-alone
+  recall@K and R4 adds ~no unique recall; otherwise keep R4 and shelve R8. Until R8 is built, R4 is the
+  sole semantic-query channel. This is the one structural semantic-duplicate pair in the retrieval design.
 - **Catalog-size surprise (47k vs 1M)** → brute force too slow. Guard: P0 asserts the count; ANN swap
   behind the same interface is the documented contingency, not a silent default.
 - **GPU OOM on a 4B encoder** → not applicable to BGE-large/E5-large (≤0.5B) at fp16; if a larger

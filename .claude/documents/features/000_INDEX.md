@@ -48,6 +48,7 @@ Defined once in **`11_F2_interfaces_contracts_config.md`** and consumed by every
 | R5 | `44_R5_embedding_personalization_channels.md` | Content-kNN (history) + CF + same-artist | Retrieval | recall@K (warm segment) | spec: **done** |
 | R6 | `45_R6_extension_channels.md` | CLAP / related-artist / propose-ground / SASRec (gated) | Retrieval | unique-recall lift per channel | spec: **done** |
 | R7 | `46_R7_rrf_fusion.md` | Weighted-RRF fusion + top-K sizing | Retrieval | fused recall@20 ≥ 0.75, recall@200 ≥ 0.90 | spec: **done** |
+| R8 | `47_R8_colbert_late_interaction_channel.md` | ColBERT late-interaction channel (replaces R4 query-dense; enriched docs) | Retrieval (§12) | recall@K + replace-R4 ablation | spec: **done** — PARKED hot lever |
 | K1 | `50_K1_rerank_feature_builder.md` | Rerank feature builder (causal, pure) | Rerank | feature-purity + no-leak tests | spec: **done** |
 | K2 | `51_K2_lgbm_lambdamart.md` | LightGBM LambdaMART (primary reranker) | Rerank | nDCG@20 ≥ 0.45, hit-rank ≤ 2.5 | spec: **done** |
 | K3 | `52_K3_neural_reranker.md` | Cross-encoder/ColBERT (LoRA) + GBDT stacking | Rerank | nDCG@20 lift vs K2; → 0.55 | spec: **done** |
