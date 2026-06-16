@@ -105,11 +105,15 @@ class BM25_MODEL:
         bm25_results = doc_scores.documents[0]
         return [self.track_ids[item['id']] for item in bm25_results]
 
-    def batch_text_to_item_retrieval(self, queries: list[str], topk: int) -> list[list[str]]:
+    def batch_text_to_item_retrieval(
+        self, queries: list[str], topk: int, user_ids=None,
+    ) -> list[list[str]]:
         """Retrieve top-k track IDs for multiple queries in batch.
         Args:
             queries: List of user text queries to match against the metadata corpus.
             topk: Number of items to retrieve per query.
+            user_ids: accepted for interface parity (ignored by BM25; used by
+                cf-bpr retriever — see retrieval_modules/cf_bpr.py).
         Returns:
             A list of lists, where each inner list contains track IDs ordered by decreasing BM25 score.
         """

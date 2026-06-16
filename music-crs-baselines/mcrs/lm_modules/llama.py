@@ -2,18 +2,6 @@ import os
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-
-# Cap on the formatted chat-template length we send to the LM, in tokens.
-# Why this exists: 8-turn music conversations with metadata expansions can
-# tokenize to 4-5k tokens. Left-padded batches then peak at the longest
-# sequence, causing OOM on bf16 7B/3B models even at modest batch sizes.
-# 2048 fits comfortably for the CoT prompt (~400 tok) + recommend_item
-# (~50 tok) + several recent history turns + the chat-template scaffolding.
-# Truncation drops OLDEST history turns first, never the system prompt or
-# the recommend_item (cutting either of those would break the response).
-_MAX_INPUT_TOKENS = 2048
-
-
 class LLAMA_MODEL:
     def __init__(self, model_name="meta-llama/Llama-3.2-1B-Instruct", device="cuda", attn_implementation="eager", dtype=torch.bfloat16):
         self.model_name = model_name
@@ -31,29 +19,9 @@ class LLAMA_MODEL:
 
     def _format_chat_history(self, sys_prompt, chat_history: list, recommend_item: str):
         chat_data = [{"role": "system", "content": sys_prompt}]
-        chat_data += list(chat_history)
+        chat_data += chat_history
         chat_data += [{"role": "assistant", "content": recommend_item}]
         chat_template = self.tokenizer.apply_chat_template(chat_data, tokenize=False, add_generation_prompt=True)
-
-        # Fast path: only re-tokenize for length when there's history to drop.
-        if not chat_history:
-            return chat_template
-        n_tokens = len(self.tokenizer.encode(chat_template, add_special_tokens=False))
-        if n_tokens <= _MAX_INPUT_TOKENS:
-            return chat_template
-
-        # Drop oldest history turns one at a time until we fit. Worst case we
-        # exhaust history and return system + recommend_item (still valid).
-        history = list(chat_history)
-        while history and n_tokens > _MAX_INPUT_TOKENS:
-            history.pop(0)
-            chat_data = [{"role": "system", "content": sys_prompt}]
-            chat_data += history
-            chat_data += [{"role": "assistant", "content": recommend_item}]
-            chat_template = self.tokenizer.apply_chat_template(
-                chat_data, tokenize=False, add_generation_prompt=True,
-            )
-            n_tokens = len(self.tokenizer.encode(chat_template, add_special_tokens=False))
         return chat_template
 
     def response_generation(self, sys_prompt: str, chat_history: list, recommend_item: str,max_new_tokens=512, response_format=None):
@@ -103,58 +71,3 @@ class LLAMA_MODEL:
         # Decode only the newly generated tokens
         generated_texts = self.tokenizer.batch_decode(outputs[:,input_ids.shape[1]:], skip_special_tokens=True)
         return generated_texts
-
-    def batch_response_generation_multi(
-        self,
-        sys_prompts: list[str],
-        chat_histories: list[list],
-        recommend_items: list[str],
-        max_new_tokens: int = 192,
-        temperatures: list[float] | None = None,
-    ) -> list[list[str]]:
-        """Generate K candidate responses per input via temperature sampling.
-
-        Used by response-reranker pipelines (exp 026 and later): we sample
-        K diverse responses per query, score each with a reward model, and
-        ship the highest-scored one to output. The list of temperatures
-        controls diversity: [0.3, 0.7, 1.0] gives one focused + two varied.
-
-        Returns: list of N lists, each with len(temperatures) candidate strings.
-        """
-        if temperatures is None:
-            temperatures = [0.3, 0.7, 1.0]
-
-        # Format + tokenize input once (shared across all temperatures).
-        formatted = [
-            self._format_chat_history(sp, ch, ri)
-            for sp, ch, ri in zip(sys_prompts, chat_histories, recommend_items)
-        ]
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        token_inputs = self.tokenizer(formatted, return_tensors="pt", padding=True, truncation=True)
-        input_ids = token_inputs.input_ids.to(self.device)
-        attention_mask = token_inputs.attention_mask.to(self.device)
-
-        n = len(formatted)
-        results: list[list[str]] = [[] for _ in range(n)]
-        for temp in temperatures:
-            with torch.no_grad():
-                if temp <= 0.0:
-                    outputs = self.lm.generate(
-                        input_ids, attention_mask=attention_mask,
-                        max_new_tokens=max_new_tokens,
-                        pad_token_id=self.tokenizer.pad_token_id,
-                        do_sample=False,
-                    )
-                else:
-                    outputs = self.lm.generate(
-                        input_ids, attention_mask=attention_mask,
-                        max_new_tokens=max_new_tokens,
-                        pad_token_id=self.tokenizer.pad_token_id,
-                        do_sample=True, temperature=temp, top_p=0.9,
-                        no_repeat_ngram_size=3,
-                    )
-            gen = self.tokenizer.batch_decode(outputs[:, input_ids.shape[1]:], skip_special_tokens=True)
-            for i, text in enumerate(gen):
-                results[i].append(text)
-        return results
