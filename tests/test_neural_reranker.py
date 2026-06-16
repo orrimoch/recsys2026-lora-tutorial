@@ -1,6 +1,8 @@
 """K3 — neural (cross-encoder) reranker: re-score only the top cross_encoder_k, stack via score()."""
 from __future__ import annotations
 
+import math
+
 from mcrs.contracts import Candidate, TurnContext, UserProfile
 from mcrs.data.catalog import Catalog
 from mcrs.retrieval.query import QueryBuilder
@@ -85,6 +87,34 @@ def test_cost_budget_raises_when_per_turn_pairs_exceed_budget():
 def test_within_cost_budget_is_fine():
     k3 = NeuralReranker(_CAT, QueryBuilder(), _fake_scorer, cross_encoder_k=5, max_pairs_per_turn=10)
     assert set(k3.score(_ctx(), _cands(["t1", "t2"]))) == {"t1", "t2"}
+
+
+def test_rerank_deterministic_and_stable_on_ties():
+    # with a pinned scorer (= pinned model_revision at serve), repeated runs are byte-identical;
+    # equal neural scores preserve the incoming (K2) order (stable sort).
+    flat = lambda pairs: [1.0] * len(pairs)
+    k3 = NeuralReranker(_CAT, QueryBuilder(), flat, cross_encoder_k=4, model_revision="rev1")
+    a = [c.track_id for c in k3.rerank(_ctx(), _cands(["t1", "t2", "t3", "t4"])).items]
+    b = [c.track_id for c in k3.rerank(_ctx(), _cands(["t1", "t2", "t3", "t4"])).items]
+    assert a == b == ["t1", "t2", "t3", "t4"]         # all-equal scores -> unchanged, stable
+
+
+def _ndcg20(ranked_ids, gold):                        # single gold per turn
+    return 1.0 / math.log2(ranked_ids.index(gold) + 2) if gold in ranked_ids[:20] else 0.0
+
+
+def test_k3_ndcg_non_regression_vs_k2_on_fixture():
+    gold = "t3"
+    k2_order = ["t1", "t2", "t3"]                      # K2 output: gold at rank 3
+    # informative cross-encoder (t3 scores highest) -> gold promoted, nDCG must not drop
+    k3 = NeuralReranker(_CAT, QueryBuilder(), _fake_scorer, cross_encoder_k=3)
+    k3_order = [c.track_id for c in k3.rerank(_ctx(), _cands(k2_order)).items]
+    assert k3_order[0] == "t3"                         # gold to rank 1
+    assert _ndcg20(k3_order, gold) >= _ndcg20(k2_order, gold)
+    # uninformative (flat) scorer -> order unchanged, exactly no regression
+    flat = NeuralReranker(_CAT, QueryBuilder(), lambda p: [1.0] * len(p), cross_encoder_k=3)
+    flat_order = [c.track_id for c in flat.rerank(_ctx(), _cands(k2_order)).items]
+    assert _ndcg20(flat_order, gold) == _ndcg20(k2_order, gold)
 
 
 class _Rev:                                           # fake reranker: reverses the pool
