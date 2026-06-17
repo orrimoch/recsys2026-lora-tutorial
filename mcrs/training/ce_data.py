@@ -98,3 +98,50 @@ def _weighted_sample(items, k, rng):
                 pool.pop(idx)
                 break
     return out
+
+
+GP_WEIGHTS = {"MOVES_TOWARD_GOAL": 1.0, "DOES_NOT_MOVE_TOWARD_GOAL": 0.3, None: 1.0}
+
+
+def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, cross_encoder_k,
+                             n_negatives=15, sampling="rank_strat", same_artist="soft_downweight",
+                             denoise_near_dup=True, skip_top_rank=False, k_min=4, seed,
+                             gp_fn=None, w_low=0.3, report=None):
+    """Build [(query_text, [pos_doc, neg_doc...], group_weight)] for gold-in-pool turns.
+
+    `gp_fn(turn) -> goal_progress_label | None` supplies the per-group weight (None => uniform).
+    Drops turns whose gold is not in the top-`cross_encoder_k` pool, or that have < k_min negatives.
+    """
+    gp_weights = dict(GP_WEIGHTS); gp_weights["DOES_NOT_MOVE_TOWARD_GOAL"] = w_low
+    queries = [query_builder.build(t).text for t in turns]
+    bc = [{"history_tids": t.history_tids, "user_id": t.user_id} for t in turns]
+    uids = [t.user_id for t in turns]
+    pools = fusion.fuse(queries, cross_encoder_k, topk_internal=cross_encoder_k,
+                        batch_context=bc, user_ids=uids)
+    artist_fn = lambda tid: catalog.metadata(tid).get("artist_name") if tid in catalog._meta else None
+    title_fn = lambda tid: catalog.metadata(tid).get("track_name") if tid in catalog._meta else None
+    groups, dropped_no_gold, dropped_few_neg = [], 0, 0
+    for turn, qtext, pool in zip(turns, queries, pools):
+        gold = gold_fn(turn)
+        top = pool[:cross_encoder_k]
+        ids = [c.track_id for c in top]
+        if gold is None or gold not in ids:
+            dropped_no_gold += 1
+            continue
+        ranked = [(c.track_id, min(c.channel_ranks.values()) if c.channel_ranks else (i + 1))
+                  for i, c in enumerate(top)]
+        negs = sample_negatives(ranked, gold_tid=gold, gold_title=(title_fn(gold) or ""),
+                                gold_artist=(artist_fn(gold) or ""), artist_fn=artist_fn,
+                                title_fn=title_fn, n=n_negatives, k_min=k_min,
+                                seed=hash((seed, turn.session_id, turn.turn_number)) & 0xFFFFFFFF,
+                                sampling=sampling, same_artist=same_artist,
+                                denoise_near_dup=denoise_near_dup, skip_top_rank=skip_top_rank)
+        if len(negs) < k_min:
+            dropped_few_neg += 1
+            continue
+        docs = [build_doc(catalog, gold)] + [build_doc(catalog, t) for t in negs]
+        gw = gp_weights.get(gp_fn(turn)) if gp_fn else 1.0
+        groups.append((qtext, docs, gw))
+    if report is not None:
+        report.update(dropped_no_gold=dropped_no_gold, dropped_few_neg=dropped_few_neg, kept=len(groups))
+    return groups
