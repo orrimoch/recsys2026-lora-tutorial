@@ -10,7 +10,7 @@ from typing import Any, Iterable, Optional
 
 from mcrs.data.ids import canonical_track_id
 
-_DEFAULT_CORPUS = ["track_name", "artist_name", "album_name", "release_date"]
+_DEFAULT_CORPUS = ["track_name", "artist_name", "album_name", "tag_list", "release_date"]
 
 
 class Catalog:
@@ -41,10 +41,15 @@ class Catalog:
     def metadata(self, track_id: str) -> dict:
         return self._meta[track_id]
 
+    _FIELD_LABEL = {"tag_list": "tags"}
+
     def id_to_metadata(self, track_id: str, enriched: bool = False) -> str:
         if enriched and track_id in self._enriched:
             return self._enriched[track_id]
         return self._raw_doc(track_id)
+
+    def is_enriched(self, track_id: str) -> bool:
+        return track_id in self._enriched
 
     def _raw_doc(self, track_id: str) -> str:
         row = self._meta[track_id]
@@ -57,7 +62,7 @@ class Catalog:
                 v = ""
             else:
                 v = str(v)
-            parts.append(f"{field}: {v}")
+            parts.append(f"{self._FIELD_LABEL.get(field, field)}: {v}")
         return ", ".join(parts)
 
     @classmethod
