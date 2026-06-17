@@ -591,7 +591,7 @@ def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, 
         negs = sample_negatives(ranked, gold_tid=gold, gold_title=(title_fn(gold) or ""),
                                 gold_artist=(artist_fn(gold) or ""), artist_fn=artist_fn,
                                 title_fn=title_fn, n=n_negatives, k_min=k_min,
-                                seed=hash((seed, turn.session_id, turn.turn_number)) & 0xFFFFFFFF,
+                                seed=_stable_seed(seed, turn.session_id, turn.turn_number),  # md5, NOT hash() (PYTHONHASHSEED)
                                 sampling=sampling, same_artist=same_artist,
                                 denoise_near_dup=denoise_near_dup, skip_top_rank=skip_top_rank)
         if len(negs) < k_min:
