@@ -168,9 +168,24 @@ loss; and rely on the dev nDCG@20 gate as the real check.
   (sentence-transformers `CrossEncoder` wraps the same model, so serve is compatible).
 - PEFT LoRA: r=16, α=32, dropout=0.05, target attention `query`/`value`; the 1-logit head is trained too. A few M
   trainable params.
-- dtype: train in bf16 (the softmax denominator is fp16-overflow-prone). The serve dtype must match — the shipped
-  `build_cross_encoder_score_fn` hard-codes `ce.model.half()` (fp16); pin serve to bf16 (or fp32) when the adapter
-  was trained in bf16, or the scores skew.
+- Optimizer/LR: AdamW, lr=1e-4 (LoRA-appropriate — higher than full-FT's ~1e-5 since only the adapter+head train),
+  weight_decay=0. Cosine schedule with ~5% linear warmup, stepped per OPTIMIZER step (per accumulation cycle); the
+  warmup keeps the zero-init LoRA-B and untrained head from destabilizing early steps.
+- Epochs & early stopping: epochs=3 is the upper bound (cross-encoder rerankers fit fast and overfit past 1–3
+  epochs); early-stop on val nDCG@20 with patience=1, and the best-val-nDCG@20 epoch is the returned adapter.
+- GPU strategy (tuned for a 16GB Colab T4/G4):
+  - Mixed precision auto via `_resolve_dtype` — bf16 where the GPU supports it, else **fp16 + GradScaler** (a T4/G4
+    is Turing and has **no bf16**). The masked softmax subtracts the per-group max, so it is fp16-stable. Serve
+    dtype is resolved the same way, so train==serve on the same hardware.
+  - **Gradient checkpointing** (`use_cache=False`, `enable_input_require_grads`) — the key lever that lets seq=2048
+    fit in 16GB.
+  - **Gradient accumulation** — large EFFECTIVE batch (`batch_groups × grad_accum`, e.g. 2×16=32 groups) for a
+    stable gradient without OOM; the micro-batch is sized to memory.
+  - **Length-grouped batching** so similar-length groups share a micro-batch (less pad waste, faster).
+  - `inference_mode` + `empty_cache` around validation.
+- Batch vs negatives (distinct knobs): there are **no in-batch negatives** (a cross-encoder can't reuse other
+  groups' docs without re-scoring them). Negatives-per-gold is `N` from sampling (the contrast/quality knob, §4.3);
+  the effective batch (accumulation) is the gradient-stability knob. Raising the batch does not add negatives.
 - Build docs via `build_doc` and tokenize with the same truncation helpers and the same `max_length`/
   `max_doc_tokens` values as serve (asserted, not assumed).
 
@@ -197,8 +212,11 @@ loss; and rely on the dev nDCG@20 gate as the real check.
   candidate pool before stacking — a within-group transform invariant to fold-wise logit scale.
 
 ### 4.7 Logging, checkpointing, serve
-- Logging (Trackio): train loss + val loss per eval step, plus val nDCG@20 via `score_official` (the real ranking
-  metric, not just loss). Console/JSON fallback if Trackio is unavailable.
+- Logging (Trackio): per optimizer step, the raw train loss plus an EMA-smoothed train loss (the per-step loss is
+  noisy with small micro-batches + hard negatives; the EMA is display-only and never feeds optimization) and the
+  current LR. Per epoch: val loss + val nDCG@20 via `score_official` (the real ranking metric). All decisions
+  (early stopping, checkpoint selection) use val nDCG@20 — never the noisy train loss. Console/JSON fallback if
+  Trackio is unavailable.
 - Checkpointing: the best-val-nDCG@20 LoRA adapter is saved to disk and pushed to HF Hub by revision; that revision
   flows into `NeuralReranker(model_revision=...)` and `build_cross_encoder_score_fn(lora_adapter=...)`, and D1
   records the hash as the train==serve pin.
@@ -248,10 +266,11 @@ per-goal-progress-label, `mean_hit_rank`, and cost/turn within the K3 per-turn b
 
 ## 9. Config knobs
 `rerank.neural.lora.{enabled,r,alpha,dropout,target_modules}`, `.max_length` (2048; pin after the A1 re-measure),
-`.max_doc_tokens`, `.dtype` (bf16; train==serve), `.adapter_revision`;
+`.max_doc_tokens`, `.dtype` (auto → bf16 where supported else fp16; train==serve), `.adapter_revision`;
 `.negatives.{n,k_min,sampling,same_artist,denoise_near_dup,skip_top_rank}`; `.goal_progress.{enabled,w_low}`;
 `.oof.{folds,dedup_cross_fold,score_norm}`; `.split.{key,dedup_near_dup}`;
-`.train.{epochs,lr,batch_groups,warmup,seed,group_by_length}`; `query.{markers,taste_items}`;
+`.train.{epochs(3),lr(1e-4),weight_decay,warmup(0.05,cosine),batch_groups,grad_accum,early_stop_patience(1),
+group_by_length,gradient_checkpointing,log_every,seed}`; `query.{markers,taste_items}`;
 `logging.trackio.{enabled,project}`. Defaults/types from the F2 config loader.
 
 ## 10. Definition of Done
