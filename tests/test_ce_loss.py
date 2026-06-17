@@ -3,9 +3,9 @@ import math, torch
 from mcrs.training.ce_loss import masked_listwise_ce
 
 def test_perfect_scores_low_loss():
-    # group A: [gold=10, neg=0,0]; group B (ragged): [gold=10, neg=0]
-    logits = torch.tensor([10., 0., 0., 10., 0., -1e9])     # last is a pad slot
-    group_sizes = [3, 2]                                     # 2nd group has 2 real, 1 pad
+    # group A: [gold=10, neg=0, neg=0]; group B (ragged): [gold=10, neg=0, PAD=-1e9]
+    logits = torch.tensor([10., 0., 0., 10., 0., -1e9])     # index 5 is a pad slot in group B
+    group_sizes = [3, 3]                                     # group B's 3rd slot is the pad
     loss = masked_listwise_ce(logits, group_sizes, group_weights=[1.0, 1.0])
     assert loss.item() < 0.01
 
