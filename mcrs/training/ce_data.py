@@ -145,3 +145,24 @@ def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, 
     if report is not None:
         report.update(dropped_no_gold=dropped_no_gold, dropped_few_neg=dropped_few_neg, kept=len(groups))
     return groups
+
+
+def assign_session_folds(session_ids, *, k, seed):
+    """Deterministic session-disjoint fold id per row. All rows of a session share a fold."""
+    uniq = sorted(set(session_ids))
+    rng = random.Random(seed)
+    rng.shuffle(uniq)
+    fold_of = {s: i % k for i, s in enumerate(uniq)}
+    return [fold_of[s] for s in session_ids]
+
+
+def drop_cross_fold_near_dups(items):
+    """items: list[(dedup_key, fold)]. Keep the first occurrence of each key; drop later folds'
+    copies so a near-duplicate (query->gold) never straddles the fold boundary. Returns kept indices."""
+    seen, keep = set(), []
+    for i, (key, _fold) in enumerate(items):
+        if key in seen:
+            continue
+        seen.add(key)
+        keep.append(i)
+    return keep
