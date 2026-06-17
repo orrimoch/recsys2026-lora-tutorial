@@ -1,9 +1,18 @@
 """K3b — GPU-free data/label construction for the cross-encoder fine-tune."""
 from __future__ import annotations
 
+import hashlib
 import random
 import re
 from typing import Callable, Optional
+
+
+def _stable_seed(seed: int, session_id: str, turn_number: int) -> int:
+    """Process-stable 32-bit seed for per-turn negative sampling. Python's built-in hash() is
+    randomized per interpreter (PYTHONHASHSEED), which would break OOF reproducibility across runs;
+    md5 of the joined key is deterministic everywhere."""
+    digest = hashlib.md5(f"{seed}:{session_id}:{turn_number}".encode()).hexdigest()
+    return int(digest, 16) & 0xFFFFFFFF
 
 
 def build_doc(catalog, track_id: str, *, max_doc_chars: int = 2000) -> str:
@@ -133,7 +142,7 @@ def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, 
         negs = sample_negatives(ranked, gold_tid=gold, gold_title=(title_fn(gold) or ""),
                                 gold_artist=(artist_fn(gold) or ""), artist_fn=artist_fn,
                                 title_fn=title_fn, n=n_negatives, k_min=k_min,
-                                seed=hash((seed, turn.session_id, turn.turn_number)) & 0xFFFFFFFF,
+                                seed=_stable_seed(seed, turn.session_id, turn.turn_number),
                                 sampling=sampling, same_artist=same_artist,
                                 denoise_near_dup=denoise_near_dup, skip_top_rank=skip_top_rank)
         if len(negs) < k_min:
