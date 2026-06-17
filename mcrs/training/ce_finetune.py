@@ -133,7 +133,7 @@ def finetune_cross_encoder(groups_train, groups_val, *, base_model, lora_cfg,
     total_steps = max(1, math.ceil(n_micro / accum) * train_cfg["epochs"])   # OPTIMIZER steps over the run
     warmup_steps = int(train_cfg.get("warmup", 0.05) * total_steps)          # ~5% linear warmup
     sched = get_cosine_schedule_with_warmup(opt, warmup_steps, total_steps)  # then cosine decay to ~0
-    scaler = torch.cuda.amp.GradScaler(enabled=use_scaler)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)   # new torch API (no deprecation warning)
     best, best_metric, since_improved, step, loss_ema = None, -math.inf, 0, 0, None
     for epoch in range(train_cfg["epochs"]):
         model.train(); opt.zero_grad()
@@ -146,7 +146,7 @@ def finetune_cross_encoder(groups_train, groups_val, *, base_model, lora_cfg,
             if (i + 1) % accum == 0:                           # optimizer step once per `accum` micro-batches
                 scaler.step(opt); scaler.update(); sched.step(); opt.zero_grad()
                 step += 1
-                cur = float(loss) * accum                       # undo the accumulation scaling for logging
+                cur = loss.detach().item() * accum              # undo accum scaling for logging (detach: no grad warning)
                 loss_ema = cur if loss_ema is None else 0.98 * loss_ema + 0.02 * cur   # smooth the noisy curve
                 if step % train_cfg.get("log_every", 50) == 0:  # EMA is display-only; never feeds optimization
                     logger.log({"train_loss": cur, "train_loss_ema": loss_ema,
