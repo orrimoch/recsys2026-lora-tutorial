@@ -209,6 +209,23 @@ def test_fusion_query_builder_separate_from_ce_query():
     assert groups[0][0] == "q1"                                      # CE query (FakeQB), not "PLAIN"
 
 
+def test_fusion_chunking_matches_single_call():
+    # Chunked fusion (for progress + bounded memory) must yield identical groups to one batched call.
+    cat = FakeCat()
+    pool_tpl = [Candidate(track_id=t, channel_ranks={"c": i}) for i, t in enumerate(["g", "x", "y", "z", "w"], 1)]
+
+    class ChunkAwareFusion:                                          # one pool per query (honors chunk slices)
+        def fuse(self, queries, topk, **kw):
+            return [list(pool_tpl) for _ in queries]
+
+    turns = [_turn(1, session_id="s1"), _turn(2, session_id="s2"), _turn(3, session_id="s3")]
+    kw = dict(catalog=cat, cross_encoder_k=5, n_negatives=2, k_min=1, seed=0)
+    g_single = build_ce_training_groups(FakeQB(), ChunkAwareFusion(), turns, lambda t: "g", **kw)
+    g_chunked = build_ce_training_groups(FakeQB(), ChunkAwareFusion(), turns, lambda t: "g", fusion_chunk=2, **kw)
+    assert len(g_single) == len(g_chunked) == 3
+    assert [docs for _, docs, _ in g_single] == [docs for _, docs, _ in g_chunked]   # identical, chunk-invariant
+
+
 def test_list_valued_metadata_is_coerced_not_crashed():
     # Real Track-Metadata has LIST-valued track_name/artist_name; they must be coerced to str for
     # the denoise helpers (normalize_title/.lower()), not passed through raw (regression: AttributeError).

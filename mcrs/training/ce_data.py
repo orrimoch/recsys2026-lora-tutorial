@@ -115,7 +115,8 @@ GP_WEIGHTS = {"MOVES_TOWARD_GOAL": 1.0, "DOES_NOT_MOVE_TOWARD_GOAL": 0.3, None: 
 def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, cross_encoder_k,
                              n_negatives=15, sampling="rank_strat", same_artist="soft_downweight",
                              denoise_near_dup=True, skip_top_rank=False, k_min=4, seed,
-                             gp_fn=None, w_low=0.3, fusion_query_builder=None, report=None):
+                             gp_fn=None, w_low=0.3, fusion_query_builder=None,
+                             fusion_chunk=0, show_progress=False, report=None):
     """Build [(ce_query_text, [pos_doc, neg_doc...], group_weight)] for gold-in-pool turns.
 
     `query_builder` builds the CROSS-ENCODER pair query (e.g. the enriched/markered query).
@@ -133,8 +134,26 @@ def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, 
     fusion_queries = [fusion_qb.build(t).text for t in turns]          # pool-retrieval query (matches serve)
     bc = [{"history_tids": t.history_tids, "user_id": t.user_id} for t in turns]
     uids = [t.user_id for t in turns]
-    pools = fusion.fuse(fusion_queries, cross_encoder_k, topk_internal=cross_encoder_k,
-                        batch_context=bc, user_ids=uids)
+    # Fusion is the slow step (full retrieval over the catalog per turn). With `fusion_chunk` we fuse
+    # in chunks of turns — gives a tqdm progress bar (show_progress) AND bounds peak memory (avoids
+    # one giant similarity matrix). Default (0) keeps the single batched call (unchanged behavior).
+    if fusion_chunk and fusion_chunk > 0:
+        steps = range(0, len(turns), fusion_chunk)
+        if show_progress:
+            try:
+                from tqdm.auto import tqdm
+                steps = tqdm(list(steps), desc="fusion (turns)", unit="chunk")
+            except Exception:
+                pass
+        pools = []
+        for s in steps:
+            e = s + fusion_chunk
+            pools.extend(fusion.fuse(fusion_queries[s:e], cross_encoder_k,
+                                     topk_internal=cross_encoder_k,
+                                     batch_context=bc[s:e], user_ids=uids[s:e]))
+    else:
+        pools = fusion.fuse(fusion_queries, cross_encoder_k, topk_internal=cross_encoder_k,
+                            batch_context=bc, user_ids=uids)
     def _field(tid, key):                                   # real catalog fields can be LISTS -> coerce to str
         if tid not in catalog._meta:
             return None
