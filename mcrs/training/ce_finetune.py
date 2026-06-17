@@ -135,9 +135,47 @@ def finetune_cross_encoder(groups_train, groups_val, *, base_model, lora_cfg,
     sched = get_cosine_schedule_with_warmup(opt, warmup_steps, total_steps)  # then cosine decay to ~0
     scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)   # new torch API (no deprecation warning)
     best, best_metric, since_improved, step, loss_ema = None, -math.inf, 0, 0, None
+    eval_steps = train_cfg.get("eval_steps", 0)                # >0: eval+checkpoint every N optimizer steps
+    #   (captures an intra-epoch peak even if the model later degrades); 0: eval once per epoch (default).
     from tqdm.auto import tqdm
     n_epochs = train_cfg["epochs"]
+
+    def _evaluate(epoch):
+        """Val loss + val nDCG@20, logged; restores train mode so training can resume. Returns the metric."""
+        if dev == "cuda": torch.cuda.empty_cache()
+        was_training = model.training
+        model.eval()
+        with torch.inference_mode():
+            vl = []
+            for feats, sizes, weights in make_loader(groups_val, False):
+                feats = {k: v.to(dev) for k, v in feats.items()}
+                with torch.autocast(device_type=dev, dtype=amp_dtype, enabled=use_amp):
+                    vl.append(float(masked_listwise_ce(model(**feats).logits.squeeze(-1), sizes, weights)))
+            val_loss = sum(vl) / max(len(vl), 1)
+        metric = val_eval_fn(model, tok) if val_eval_fn else -val_loss   # dev nDCG@20 (real metric)
+        logger.log({"val_loss": val_loss, "val_ndcg@20": metric, "epoch": epoch}, step=step)
+        if was_training:
+            model.train()                                      # resume training after an intra-epoch eval
+        if dev == "cuda": torch.cuda.empty_cache()
+        return metric
+
+    def _consider(metric, epoch):
+        """Checkpoint the BEST-metric adapter; advance early-stop patience. Returns True to stop."""
+        nonlocal best, best_metric, since_improved
+        if metric > best_metric:                               # new best (could be MID-epoch) -> save it
+            best_metric, since_improved, best = metric, 0, out_dir
+            model.save_pretrained(out_dir)
+            return False
+        since_improved += 1
+        if since_improved >= patience:
+            logger.log({"early_stop": epoch}, step=step)
+            return True
+        return False
+
+    stop = False
     for epoch in range(n_epochs):
+        if stop:
+            break
         model.train(); opt.zero_grad()
         bar = tqdm(make_loader(groups_train, True), desc=f"train epoch {epoch + 1}/{n_epochs}",
                    unit="batch", disable=not show_progress)   # live per-batch bar with loss/lr
@@ -156,25 +194,13 @@ def finetune_cross_encoder(groups_train, groups_val, *, base_model, lora_cfg,
                 if step % train_cfg.get("log_every", 50) == 0:  # EMA is display-only; never feeds optimization
                     logger.log({"train_loss": cur, "train_loss_ema": loss_ema,
                                 "lr": sched.get_last_lr()[0], "epoch": epoch}, step=step)
-        # ---- validation + early stopping ----
-        if dev == "cuda": torch.cuda.empty_cache()
-        model.eval()
-        with torch.inference_mode():
-            vl = []
-            for feats, sizes, weights in make_loader(groups_val, False):
-                feats = {k: v.to(dev) for k, v in feats.items()}
-                with torch.autocast(device_type=dev, dtype=amp_dtype, enabled=use_amp):
-                    vl.append(float(masked_listwise_ce(model(**feats).logits.squeeze(-1), sizes, weights)))
-            val_loss = sum(vl) / max(len(vl), 1)
-        val_ndcg = val_eval_fn(model, tok) if val_eval_fn else -val_loss      # dev nDCG@20 (real metric)
-        logger.log({"val_loss": val_loss, "val_ndcg@20": val_ndcg, "epoch": epoch}, step=step)
-        if val_ndcg > best_metric:                             # improved -> checkpoint best, reset patience
-            best_metric, since_improved, best = val_ndcg, 0, out_dir
-            model.save_pretrained(out_dir)
-        else:
-            since_improved += 1
-            if since_improved >= patience:                     # EARLY STOP
-                logger.log({"early_stop_epoch": epoch}, step=step)
+                if eval_steps and step % eval_steps == 0:       # intra-epoch eval + best-checkpoint
+                    if _consider(_evaluate(epoch), epoch):
+                        stop = True
+                        break
+        if stop:
+            break
+        if not eval_steps:                                      # default: one eval + checkpoint per epoch
+            if _consider(_evaluate(epoch), epoch):
                 break
-        if dev == "cuda": torch.cuda.empty_cache()
     return best
