@@ -27,22 +27,35 @@ def doc_token_budget(query_tokens: int, max_length: int, max_doc_tokens: int,
     return max(8, min(max_doc_tokens, max_length - query_tokens - margin))
 
 
+def _resolve_dtype(dtype: str, bf16_supported: bool) -> str:
+    """Resolve `dtype` to a concrete precision. `auto` picks bf16 only where the GPU supports it
+    (Ampere+/L4/A100), else fp16 — so the same code runs on a Turing T4 ("G4"), which has no bf16."""
+    valid = ("auto", "bf16", "fp16", "fp32")
+    if dtype not in valid:
+        raise ValueError(f"dtype must be one of {valid}, got {dtype!r}")
+    if dtype == "auto":
+        return "bf16" if bf16_supported else "fp16"
+    return dtype
+
+
 def build_cross_encoder_score_fn(model_name: str, device: str = "cuda", max_length: int = 2048,
                                  max_doc_tokens: int = 1100, batch_size: int = 64,
-                                 revision: Optional[str] = None, dtype: str = "bf16",
+                                 revision: Optional[str] = None, dtype: str = "auto",
                                  lora_adapter: Optional[str] = None,
                                  lora_revision: Optional[str] = None):
     """Load a CrossEncoder (+ optional PEFT LoRA adapter) and return score_fn(pairs)->list[float].
 
     `max_length`/`max_doc_tokens`/`dtype` MUST match the values used at fine-tune time (train==serve).
+    `dtype="auto"` picks bf16 where supported else fp16 (works on a T4/G4, which has no bf16).
     `lora_adapter` may be a local dir or a HF Hub repo id; `lora_revision` pins the Hub revision (spec §4.7).
     """
-    if dtype not in ("bf16", "fp16", "fp32"):       # validate BEFORE lazy imports so a bad dtype
-        raise ValueError(f"dtype must be one of ('bf16', 'fp16', 'fp32'), got {dtype!r}")
+    if dtype not in ("auto", "bf16", "fp16", "fp32"):   # validate BEFORE lazy imports
+        raise ValueError(f"dtype must be one of ('auto', 'bf16', 'fp16', 'fp32'), got {dtype!r}")
 
     import torch
     from sentence_transformers import CrossEncoder
 
+    resolved = _resolve_dtype(dtype, torch.cuda.is_available() and torch.cuda.is_bf16_supported())
     dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 
     ce = CrossEncoder(model_name, max_length=max_length, device=device, revision=revision)
@@ -51,7 +64,7 @@ def build_cross_encoder_score_fn(model_name: str, device: str = "cuda", max_leng
         ce.model = PeftModel.from_pretrained(ce.model, lora_adapter, revision=lora_revision)
         ce.model = ce.model.merge_and_unload()        # fold LoRA into base for fast inference
     if str(device).startswith("cuda"):
-        ce.model = ce.model.to(dtype=dtype_map[dtype])
+        ce.model = ce.model.to(dtype=dtype_map[resolved])
     tok = ce.tokenizer
     # cap the counting-encode at max_length so a very long doc doesn't trip the tokenizer's
     # ">model_max_length" warning; we slice to the per-pair budget below anyway.

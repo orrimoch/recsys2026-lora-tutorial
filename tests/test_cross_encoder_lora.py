@@ -6,7 +6,7 @@ def test_signature_defaults_pin_2048_and_lora_and_dtype():
     sig = inspect.signature(ce.build_cross_encoder_score_fn)
     assert sig.parameters["max_length"].default == 2048
     assert "lora_adapter" in sig.parameters and sig.parameters["lora_adapter"].default is None
-    assert sig.parameters["dtype"].default == "bf16"
+    assert sig.parameters["dtype"].default == "auto"
 
 def test_doc_token_budget_unchanged_helper():
     # budget math still preserves the query at the new ceiling
@@ -80,33 +80,22 @@ def test_truncate_doc_tokens_to_one_token():
 
 
 def test_invalid_dtype_raises_value_error():
-    """build_cross_encoder_score_fn with dtype='int8' raises ValueError before any model load.
-
-    In cross_encoder.py the dtype validation (line 44-45) is placed AFTER the lazy imports of
-    torch and sentence_transformers (lines 40-41). This means the ValueError can only be reached
-    if both packages are installed. When sentence_transformers is absent the function raises
-    ModuleNotFoundError before the dtype check — in that case we skip the assertion.
-    """
+    """Invalid dtype raises ValueError BEFORE any lazy import (validation is first in the function),
+    so it does not depend on torch/sentence_transformers being installed."""
     import pytest
-    import sys
-
-    # Check that both lazy imports required before the dtype check are present.
-    def _importable(name: str) -> bool:
-        if name in sys.modules:
-            return True
-        try:
-            __import__(name)
-            return True
-        except ImportError:
-            return False
-
-    if not _importable("torch") or not _importable("sentence_transformers"):
-        pytest.skip(
-            "torch or sentence_transformers not installed — dtype check unreachable "
-            "without them (ModuleNotFoundError fires first; this is a source-level ordering "
-            "issue: the dtype guard in build_cross_encoder_score_fn comes after the imports, "
-            "not before)"
-        )
-
     with pytest.raises(ValueError, match="dtype must be one of"):
         ce.build_cross_encoder_score_fn("dummy-model-name", dtype="int8")
+
+
+def test_resolve_dtype_auto_picks_bf16_only_when_supported():
+    assert ce._resolve_dtype("auto", bf16_supported=True) == "bf16"
+    assert ce._resolve_dtype("auto", bf16_supported=False) == "fp16"   # T4/G4 path (no bf16)
+
+
+def test_resolve_dtype_passthrough_and_invalid():
+    import pytest
+    for d in ("bf16", "fp16", "fp32"):
+        assert ce._resolve_dtype(d, bf16_supported=True) == d
+        assert ce._resolve_dtype(d, bf16_supported=False) == d
+    with pytest.raises(ValueError):
+        ce._resolve_dtype("int8", bf16_supported=True)
