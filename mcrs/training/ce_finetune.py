@@ -85,7 +85,7 @@ def _collate(batch, tokenizer, max_length):
 
 def finetune_cross_encoder(groups_train, groups_val, *, base_model, lora_cfg,
                            max_length=2048, max_doc_tokens=1100, dtype="auto",
-                           train_cfg, logger, out_dir, val_eval_fn=None):
+                           train_cfg, logger, out_dir, val_eval_fn=None, show_progress=True):
     """LoRA fine-tune of bge-reranker-v2-m3 with masked listwise-softmax, GPU-optimized for a 16GB T4/G4.
 
     Memory/throughput: gradient CHECKPOINTING (fits seq=2048 on 16GB) + mixed precision (bf16 where the GPU
@@ -135,9 +135,13 @@ def finetune_cross_encoder(groups_train, groups_val, *, base_model, lora_cfg,
     sched = get_cosine_schedule_with_warmup(opt, warmup_steps, total_steps)  # then cosine decay to ~0
     scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)   # new torch API (no deprecation warning)
     best, best_metric, since_improved, step, loss_ema = None, -math.inf, 0, 0, None
-    for epoch in range(train_cfg["epochs"]):
+    from tqdm.auto import tqdm
+    n_epochs = train_cfg["epochs"]
+    for epoch in range(n_epochs):
         model.train(); opt.zero_grad()
-        for i, (feats, sizes, weights) in enumerate(make_loader(groups_train, True)):
+        bar = tqdm(make_loader(groups_train, True), desc=f"train epoch {epoch + 1}/{n_epochs}",
+                   unit="batch", disable=not show_progress)   # live per-batch bar with loss/lr
+        for i, (feats, sizes, weights) in enumerate(bar):
             feats = {k: v.to(dev, non_blocking=True) for k, v in feats.items()}
             with torch.autocast(device_type=dev, dtype=amp_dtype, enabled=use_amp):
                 logits = model(**feats).logits.squeeze(-1)
@@ -146,8 +150,9 @@ def finetune_cross_encoder(groups_train, groups_val, *, base_model, lora_cfg,
             if (i + 1) % accum == 0:                           # optimizer step once per `accum` micro-batches
                 scaler.step(opt); scaler.update(); sched.step(); opt.zero_grad()
                 step += 1
-                cur = loss.detach().item() * accum              # undo accum scaling for logging (detach: no grad warning)
+                cur = loss.detach().item() * accum              # undo accum scaling (detach: no grad warning)
                 loss_ema = cur if loss_ema is None else 0.98 * loss_ema + 0.02 * cur   # smooth the noisy curve
+                bar.set_postfix(loss=f"{cur:.3f}", ema=f"{loss_ema:.3f}", lr=f"{sched.get_last_lr()[0]:.1e}")
                 if step % train_cfg.get("log_every", 50) == 0:  # EMA is display-only; never feeds optimization
                     logger.log({"train_loss": cur, "train_loss_ema": loss_ema,
                                 "lr": sched.get_last_lr()[0], "epoch": epoch}, step=step)
