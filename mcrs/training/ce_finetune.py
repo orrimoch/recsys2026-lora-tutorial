@@ -165,6 +165,9 @@ def finetune_cross_encoder(groups_train, groups_val, *, base_model, lora_cfg,
         if metric > best_metric:                               # new best (could be MID-epoch) -> save it
             best_metric, since_improved, best = metric, 0, out_dir
             model.save_pretrained(out_dir)
+            import json, os                                     # provenance: which epoch/step this adapter is from
+            with open(os.path.join(out_dir, "best_info.json"), "w") as _f:
+                json.dump({"best_val_ndcg@20": metric, "epoch": epoch, "step": step}, _f, indent=2)
             logger.log({"saved_best": 1, "best_val_ndcg@20": metric, "epoch": epoch}, step=step)
             return False
         since_improved += 1
