@@ -135,8 +135,15 @@ def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, 
     uids = [t.user_id for t in turns]
     pools = fusion.fuse(fusion_queries, cross_encoder_k, topk_internal=cross_encoder_k,
                         batch_context=bc, user_ids=uids)
-    artist_fn = lambda tid: catalog.metadata(tid).get("artist_name") if tid in catalog._meta else None
-    title_fn = lambda tid: catalog.metadata(tid).get("track_name") if tid in catalog._meta else None
+    def _field(tid, key):                                   # real catalog fields can be LISTS -> coerce to str
+        if tid not in catalog._meta:
+            return None
+        v = catalog.metadata(tid).get(key)
+        if isinstance(v, list):
+            return ", ".join(str(x) for x in v)
+        return None if v is None else str(v)
+    artist_fn = lambda tid: _field(tid, "artist_name")
+    title_fn = lambda tid: _field(tid, "track_name")
     groups, kept_keys, dropped_no_gold, dropped_few_neg = [], [], 0, 0
     for turn, qtext, pool in zip(turns, ce_queries, pools):
         gold = gold_fn(turn)

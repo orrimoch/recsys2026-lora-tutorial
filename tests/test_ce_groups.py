@@ -207,3 +207,15 @@ def test_fusion_query_builder_separate_from_ce_query():
                                       cross_encoder_k=5, n_negatives=1, k_min=1, seed=0,
                                       fusion_query_builder=PlainQB())
     assert groups[0][0] == "q1"                                      # CE query (FakeQB), not "PLAIN"
+
+
+def test_list_valued_metadata_is_coerced_not_crashed():
+    # Real Track-Metadata has LIST-valued track_name/artist_name; they must be coerced to str for
+    # the denoise helpers (normalize_title/.lower()), not passed through raw (regression: AttributeError).
+    cat = FakeCat()
+    cat._meta = {t: {"artist_name": [f"a{t}"], "track_name": [f"n{t}", "(alt)"]}
+                 for t in ["g", "x", "y", "z", "w"]}
+    pool = [Candidate(track_id=t, channel_ranks={"c": i}) for i, t in enumerate(["g", "x", "y", "z", "w"], 1)]
+    groups = build_ce_training_groups(FakeQB(), FakeFusion([pool]), [_turn(1)], lambda t: "g", catalog=cat,
+                                      cross_encoder_k=5, n_negatives=2, k_min=1, seed=0)
+    assert len(groups) == 1                                          # built, no crash on list fields
