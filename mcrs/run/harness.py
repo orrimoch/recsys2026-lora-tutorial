@@ -24,7 +24,7 @@ class InferenceHarness:
         self.topk = topk
         self.topk_internal = topk_internal
 
-    def run(self, turns: Sequence[TurnContext]) -> list[SubmissionRow]:
+    def run(self, turns: Sequence[TurnContext], show_progress: bool = False) -> list[SubmissionRow]:
         turns = list(turns)
         queries = [self.qb.build(t).text for t in turns]
         bc = [{"history_tids": t.history_tids, "user_id": t.user_id} for t in turns]
@@ -32,7 +32,14 @@ class InferenceHarness:
         pools = self.fusion.fuse(queries, self.topk, topk_internal=self.topk_internal,
                                  batch_context=bc, user_ids=uids)
         rows: list[SubmissionRow] = []
-        for t, pool in zip(turns, pools):
+        pairs = zip(turns, pools)
+        if show_progress:                       # per-turn bar: the rerank loop is the slow part (CE forwards)
+            try:
+                from tqdm.auto import tqdm
+                pairs = tqdm(list(pairs), total=len(turns), desc="rerank turns", unit="turn")
+            except ImportError:
+                pass
+        for t, pool in pairs:
             ranked = self.reranker.rerank(t, pool) if self.reranker else RankedList(turn=t, items=pool)
             ids = self.filt.apply(ranked)
             resp = self.responder.respond(t, [{"track_id": i} for i in ids]) if self.responder else ""

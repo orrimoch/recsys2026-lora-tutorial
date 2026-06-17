@@ -71,6 +71,43 @@ class NeuralReranker:
         return RankedList(turn=ctx, items=top_sorted + rest)
 
 
+def make_ce_feature_fn(lookup: dict, default: float = -1.0):
+    """Adapter turning a precomputed CE-score lookup into a K1 FeatureBuilder score_fn.
+
+    `lookup` maps (session_id, turn_number, track_id) -> CE score (typically within-pool
+    normalized). Candidates the CE did not score (outside the top-`cross_encoder_k`) get `default`
+    — the SAME sentinel at train and serve, so the feature is train==serve consistent and the GBDT
+    can learn "not CE-scored" as its own signal. Leak-free when the lookup came from a frozen CE
+    (no labels seen) or from OOF cross-fitting (see build_ce_score_lookup / oof_ce_scores)."""
+    def _fn(ctx, track_id: str) -> float:
+        return float(lookup.get((ctx.session_id, ctx.turn_number, track_id), default))
+    return _fn
+
+
+def build_ce_score_lookup(turns, pools, scorer, *, normalize: bool = True) -> dict:
+    """Per-candidate CE-score lookup for K2 stacking, reusing the K3 `scorer.score` surface.
+
+    `scorer` is anything with `.score(ctx, candidates) -> {track_id: ce_score}` (e.g. NeuralReranker,
+    which scores only the top `cross_encoder_k`). `turns`/`pools` are aligned. With `normalize`, each
+    turn's scores are min-max scaled within that turn's pool only (fold/scale-invariant, leak-free —
+    uses no cross-turn or gold info). Returns {(session_id, turn_number, track_id): score}.
+
+    Leak note: pass a FROZEN cross-encoder's scorer for no-OOF leak-free stacking; a FINE-TUNED CE
+    must instead be cross-fit via oof_ce_scores (it has seen the labels)."""
+    from mcrs.training.ce_data import normalize_within_pool
+
+    lookup: dict = {}
+    for ctx, pool in zip(turns, pools):
+        d = scorer.score(ctx, pool)
+        if not d:
+            continue
+        if normalize:
+            d = normalize_within_pool(d)
+        for tid, s in d.items():
+            lookup[(ctx.session_id, ctx.turn_number, tid)] = float(s)
+    return lookup
+
+
 class ChainReranker:
     """Apply rerankers in sequence (e.g. K2 then K3), each consuming the prior's items. F2 Reranker."""
     label = "chain"

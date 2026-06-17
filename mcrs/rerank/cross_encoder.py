@@ -90,20 +90,35 @@ def build_cross_encoder_score_fn(model_name: str, device: str = "cuda", max_leng
     use_amp = on_cuda and resolved in ("bf16", "fp16")
 
     def score_fn(pairs: list[tuple[str, str]]) -> list[float]:
-        capped = []
+        # Cap each doc to its query-preserving budget. The query repeats across a turn's pairs
+        # (NeuralReranker scores ~K docs against ONE query), so cache its token length instead of
+        # re-tokenizing it per pair. Capture each capped pair's token length for length-bucketing.
+        qlen: dict[str, int] = {}
+        capped: list[tuple[str, str]] = []
+        lengths: list[int] = []
         for q, d in pairs:
-            budget = doc_token_budget(len(enc(q)), max_length, max_doc_tokens)
-            capped.append((q, truncate_doc_tokens(enc, tok.decode, d, budget)))  # doc fits, query kept
-        out: list[float] = []
-        for i in range(0, len(capped), batch_size):
-            chunk = capped[i:i + batch_size]
-            feats = tok([q for q, _ in chunk], [d for _, d in chunk], padding=True,
+            ql = qlen.get(q)
+            if ql is None:
+                ql = qlen[q] = len(enc(q))
+            budget = doc_token_budget(ql, max_length, max_doc_tokens)
+            d_ids = enc(d)
+            d_cap = tok.decode(d_ids[:budget]) if len(d_ids) > budget else d  # query kept
+            capped.append((q, d_cap))
+            lengths.append(ql + min(len(d_ids), budget))
+        # Length-bucket: score similar-length pairs together so dynamic padding wastes far fewer
+        # tokens (a big GPU win when doc lengths vary), then scatter scores back to input order.
+        order = sorted(range(len(capped)), key=lambda i: lengths[i])
+        scored: list[float] = [0.0] * len(capped)
+        for i in range(0, len(order), batch_size):
+            idx = order[i:i + batch_size]
+            feats = tok([capped[j][0] for j in idx], [capped[j][1] for j in idx], padding=True,
                         truncation=True, max_length=max_length, return_tensors="pt")
             feats = {k: v.to(device) for k, v in feats.items()}
             with torch.inference_mode():
                 with torch.autocast(device_type="cuda", dtype=dtype_map[resolved], enabled=use_amp):
                     logits = model(**feats).logits.squeeze(-1)
-            out.extend(logits.float().cpu().tolist())
-        return out
+            for j, s in zip(idx, logits.float().cpu().tolist()):
+                scored[j] = s
+        return scored
 
     return score_fn
