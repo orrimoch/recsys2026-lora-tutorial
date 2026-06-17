@@ -37,12 +37,13 @@ def build_cross_encoder_score_fn(model_name: str, device: str = "cuda", max_leng
     `max_length`/`max_doc_tokens`/`dtype` MUST match the values used at fine-tune time (train==serve).
     `lora_adapter` may be a local dir or a HF Hub repo id; `lora_revision` pins the Hub revision (spec §4.7).
     """
+    if dtype not in ("bf16", "fp16", "fp32"):       # validate BEFORE lazy imports so a bad dtype
+        raise ValueError(f"dtype must be one of ('bf16', 'fp16', 'fp32'), got {dtype!r}")
+
     import torch
     from sentence_transformers import CrossEncoder
 
     dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
-    if dtype not in dtype_map:
-        raise ValueError(f"dtype must be one of {sorted(dtype_map)}, got {dtype!r}")
 
     ce = CrossEncoder(model_name, max_length=max_length, device=device, revision=revision)
     if lora_adapter:
