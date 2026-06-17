@@ -115,30 +115,37 @@ GP_WEIGHTS = {"MOVES_TOWARD_GOAL": 1.0, "DOES_NOT_MOVE_TOWARD_GOAL": 0.3, None: 
 def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, cross_encoder_k,
                              n_negatives=15, sampling="rank_strat", same_artist="soft_downweight",
                              denoise_near_dup=True, skip_top_rank=False, k_min=4, seed,
-                             gp_fn=None, w_low=0.3, report=None):
-    """Build [(query_text, [pos_doc, neg_doc...], group_weight)] for gold-in-pool turns.
+                             gp_fn=None, w_low=0.3, fusion_query_builder=None, report=None):
+    """Build [(ce_query_text, [pos_doc, neg_doc...], group_weight)] for gold-in-pool turns.
 
-    `gp_fn(turn) -> goal_progress_label | None` supplies the per-group weight (None => uniform).
-    Drops turns whose gold is not in the top-`cross_encoder_k` pool, or that have < k_min negatives.
+    `query_builder` builds the CROSS-ENCODER pair query (e.g. the enriched/markered query).
+    `fusion_query_builder` (defaults to `query_builder`) builds the RETRIEVAL query used to fuse the
+    candidate pool — at serve, retrieval uses the plain query while K3 re-scores with the enriched one,
+    so pass the plain builder here to make the negative pool match serve (spec train==serve).
+    `gp_fn(turn) -> goal_progress_label | None` supplies the per-group weight (None => uniform). Drops
+    turns whose gold is not in the top-`cross_encoder_k` pool, or that have < k_min negatives. When a
+    `report` dict is given it gets `dropped_no_gold`, `dropped_few_neg`, `kept`, and `kept_keys`
+    (the (session_id, turn_number) of each kept group, in order — use this to align folds to groups).
     """
     gp_weights = dict(GP_WEIGHTS); gp_weights["DOES_NOT_MOVE_TOWARD_GOAL"] = w_low
-    queries = [query_builder.build(t).text for t in turns]
+    fusion_qb = fusion_query_builder or query_builder
+    ce_queries = [query_builder.build(t).text for t in turns]          # cross-encoder pair query
+    fusion_queries = [fusion_qb.build(t).text for t in turns]          # pool-retrieval query (matches serve)
     bc = [{"history_tids": t.history_tids, "user_id": t.user_id} for t in turns]
     uids = [t.user_id for t in turns]
-    pools = fusion.fuse(queries, cross_encoder_k, topk_internal=cross_encoder_k,
+    pools = fusion.fuse(fusion_queries, cross_encoder_k, topk_internal=cross_encoder_k,
                         batch_context=bc, user_ids=uids)
     artist_fn = lambda tid: catalog.metadata(tid).get("artist_name") if tid in catalog._meta else None
     title_fn = lambda tid: catalog.metadata(tid).get("track_name") if tid in catalog._meta else None
-    groups, dropped_no_gold, dropped_few_neg = [], 0, 0
-    for turn, qtext, pool in zip(turns, queries, pools):
+    groups, kept_keys, dropped_no_gold, dropped_few_neg = [], [], 0, 0
+    for turn, qtext, pool in zip(turns, ce_queries, pools):
         gold = gold_fn(turn)
         top = pool[:cross_encoder_k]
         ids = [c.track_id for c in top]
         if gold is None or gold not in ids:
             dropped_no_gold += 1
             continue
-        ranked = [(c.track_id, min(c.channel_ranks.values()) if c.channel_ranks else (i + 1))
-                  for i, c in enumerate(top)]
+        ranked = [(c.track_id, i + 1) for i, c in enumerate(top)]      # fused-pool rank (RRF-sorted position)
         negs = sample_negatives(ranked, gold_tid=gold, gold_title=(title_fn(gold) or ""),
                                 gold_artist=(artist_fn(gold) or ""), artist_fn=artist_fn,
                                 title_fn=title_fn, n=n_negatives, k_min=k_min,
@@ -151,8 +158,10 @@ def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, 
         docs = [build_doc(catalog, gold)] + [build_doc(catalog, t) for t in negs]
         gw = gp_weights.get(gp_fn(turn)) if gp_fn else 1.0
         groups.append((qtext, docs, gw))
+        kept_keys.append((turn.session_id, turn.turn_number))
     if report is not None:
-        report.update(dropped_no_gold=dropped_no_gold, dropped_few_neg=dropped_few_neg, kept=len(groups))
+        report.update(dropped_no_gold=dropped_no_gold, dropped_few_neg=dropped_few_neg,
+                      kept=len(groups), kept_keys=kept_keys)
     return groups
 
 

@@ -177,3 +177,33 @@ def test_report_keeps_count_is_number_of_groups():
                                       cross_encoder_k=5, n_negatives=3, k_min=1, seed=0,
                                       report=report)
     assert report["kept"] == len(groups)
+
+
+def test_report_exposes_kept_keys_aligned_to_groups():
+    # kept_keys must align 1:1 with groups (used to map fold ids -> groups), even when a turn is dropped.
+    cat = FakeCat()
+    pool = [Candidate(track_id=t, rrf_score=1.0/i, channel_ranks={"c": i})
+            for i, t in enumerate(["g", "x", "y", "z", "w"], start=1)]
+    no_gold = [Candidate("x"), Candidate("y")]                       # turn 2 gold not in pool -> dropped
+    fusion = FakeFusion([pool, no_gold])
+    turns = [_turn(1, session_id="sA"), _turn(2, session_id="sB")]
+    rep = {}
+    groups = build_ce_training_groups(FakeQB(), fusion, turns, lambda t: "g", catalog=cat,
+                                      cross_encoder_k=5, n_negatives=2, k_min=1, seed=0, report=rep)
+    assert rep["kept_keys"] == [("sA", 1)]                           # only the kept turn, in order
+    assert len(rep["kept_keys"]) == len(groups)
+
+
+def test_fusion_query_builder_separate_from_ce_query():
+    # The CE query (query_builder) and the retrieval/fusion query (fusion_query_builder) can differ;
+    # the group's query_text is the CE one. FakeFusion ignores the text, so we just assert the CE query wins.
+    cat = FakeCat()
+    pool = [Candidate(track_id=t, channel_ranks={"c": i}) for i, t in enumerate(["g", "x", "y"], 1)]
+    class PlainQB:
+        def build(self, ctx):
+            from mcrs.contracts import Query
+            return Query(text="PLAIN")
+    groups = build_ce_training_groups(FakeQB(), FakeFusion([pool]), [_turn(1)], lambda t: "g", catalog=cat,
+                                      cross_encoder_k=5, n_negatives=1, k_min=1, seed=0,
+                                      fusion_query_builder=PlainQB())
+    assert groups[0][0] == "q1"                                      # CE query (FakeQB), not "PLAIN"
