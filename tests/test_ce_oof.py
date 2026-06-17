@@ -15,6 +15,8 @@ def test_oof_scores_use_only_held_out_fold_model():
     def fake_score(model, row):
         _name, trained_folds = model
         assert row["fold"] not in trained_folds   # INVARIANT: never score a row with a model that saw its fold
-        return 1.0
+        return {"cand_a": 1.0, "cand_b": 0.5}     # per-candidate scores for this turn's pool
     scores = oof_ce_scores(turns, folds=3, seed=0, fit_fn=fake_fit, score_fn=fake_score)
-    assert len(scores) == 6                       # every train row scored exactly once
+    assert len(scores) == 12                      # 6 turns x 2 candidates, each scored exactly once
+    assert all(len(k) == 3 for k in scores)       # keys are (session_id, turn_number, track_id)
+    assert scores[("s0", 0, "cand_a")] == 1.0

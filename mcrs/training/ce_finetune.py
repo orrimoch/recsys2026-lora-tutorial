@@ -9,10 +9,12 @@ from mcrs.training.ce_loss import masked_listwise_ce
 
 
 def oof_ce_scores(turns, *, folds, seed, fit_fn, score_fn):
-    """Leak-free per-row CE scores via k-fold session-disjoint cross-fitting.
+    """Leak-free per-CANDIDATE CE scores via k-fold session-disjoint cross-fitting (spec §2/§4.6).
 
-    turns: list of (session_id, turn_number). fit_fn(train_rows, **)->model.
-    score_fn(model, row)->float. Each row is scored by a model trained on the OTHER folds only.
+    turns: list of (session_id, turn_number). fit_fn(train_rows, fold=)->model. score_fn(model, row)
+    returns a {track_id: score} dict for that turn's candidate pool. Each held-out row is scored ONLY
+    by a model trained on the OTHER folds. Returns {(session_id, turn_number, track_id): score} — the
+    per-candidate granularity K2 needs to stack `ce_ft_score` as a K1 feature.
     """
     sids = [s for s, _ in turns]
     fold_of = assign_session_folds(sids, k=folds, seed=seed)
@@ -20,10 +22,11 @@ def oof_ce_scores(turns, *, folds, seed, fit_fn, score_fn):
     out = {}
     for held in range(folds):
         train_rows = [(r["session_id"], r["turn"], r["fold"]) for r in rows if r["fold"] != held]
-        model = fit_fn(train_rows, fold=held)
+        model = fit_fn(train_rows, fold=held)               # trained on the OTHER folds only
         for r in rows:
             if r["fold"] == held:
-                out[(r["session_id"], r["turn"])] = score_fn(model, r)
+                for tid, s in score_fn(model, r).items():   # per-candidate scores for this turn's pool
+                    out[(r["session_id"], r["turn"], tid)] = s
     return out
 
 
