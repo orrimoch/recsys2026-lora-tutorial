@@ -27,16 +27,24 @@ def doc_token_budget(query_tokens: int, max_length: int, max_doc_tokens: int,
     return max(8, min(max_doc_tokens, max_length - query_tokens - margin))
 
 
-def build_cross_encoder_score_fn(model_name: str, device: str = "cuda", max_length: int = 512,
-                                 max_doc_tokens: int = 480, batch_size: int = 64,
-                                 revision: Optional[str] = None, fp16: bool = True):
-    """Load a CrossEncoder and return score_fn(pairs)->list[float] with doc-side token truncation.
-    fp16=True halves memory + ~2x throughput on GPU (negligible ranking-quality loss) — matters on T4/G4."""
+def build_cross_encoder_score_fn(model_name: str, device: str = "cuda", max_length: int = 2048,
+                                 max_doc_tokens: int = 1100, batch_size: int = 64,
+                                 revision: Optional[str] = None, dtype: str = "bf16",
+                                 lora_adapter: Optional[str] = None):
+    """Load a CrossEncoder (+ optional PEFT LoRA adapter) and return score_fn(pairs)->list[float].
+
+    `max_length`/`max_doc_tokens`/`dtype` MUST match the values used at fine-tune time (train==serve).
+    """
+    import torch
     from sentence_transformers import CrossEncoder
 
     ce = CrossEncoder(model_name, max_length=max_length, device=device, revision=revision)
-    if fp16 and str(device).startswith("cuda"):
-        ce.model.half()
+    if lora_adapter:
+        from peft import PeftModel
+        ce.model = PeftModel.from_pretrained(ce.model, lora_adapter)
+        ce.model = ce.model.merge_and_unload()        # fold LoRA into base for fast inference
+    if str(device).startswith("cuda"):
+        ce.model = ce.model.to(dtype=torch.bfloat16 if dtype == "bf16" else torch.float16)
     tok = ce.tokenizer
     # cap the counting-encode at max_length so a very long doc doesn't trip the tokenizer's
     # ">model_max_length" warning; we slice to the per-pair budget below anyway.
