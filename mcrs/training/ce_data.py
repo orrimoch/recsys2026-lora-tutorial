@@ -175,3 +175,13 @@ def drop_cross_fold_near_dups(items):
         seen.add(key)
         keep.append(i)
     return keep
+
+
+def normalize_within_pool(tid_to_score: dict) -> dict:
+    """Min-max normalize scores within one turn's candidate pool (fold-scale-invariant feature)."""
+    if not tid_to_score:
+        return {}
+    vals = list(tid_to_score.values())
+    lo, hi = min(vals), max(vals)
+    rng = (hi - lo) or 1.0
+    return {tid: (s - lo) / rng for tid, s in tid_to_score.items()}
