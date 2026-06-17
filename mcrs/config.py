@@ -39,10 +39,83 @@ SCHEMA: dict[str, Any] = {
         "parity_atol": _Leaf(float, 1e-9),
         "distinct_n": _Leaf(int, 2),
     },
+    "rerank": {
+        "neural": {
+            # LoRA adapter config (K3b §9)
+            "lora": {
+                "enabled":        _Leaf(bool,  False),
+                "r":              _Leaf(int,   16),
+                "alpha":          _Leaf(int,   32),
+                "dropout":        _Leaf(float, 0.05),
+                "target_modules": _Leaf(list,  ["query", "value"]),
+            },
+            # Model / tokenisation
+            "max_length":       _Leaf(int,        2048),
+            "max_doc_tokens":   _Leaf(int,        1100),
+            "dtype":            _Leaf(str,        "auto"),
+            "adapter_revision": _Leaf(type(None), None),
+            # Negative sampling
+            "negatives": {
+                "n":               _Leaf(int,   15),
+                "k_min":           _Leaf(int,   4),
+                "sampling":        _Leaf(str,   "rank_strat"),
+                "same_artist":     _Leaf(str,   "soft_downweight"),
+                "denoise_near_dup": _Leaf(bool, True),
+                "skip_top_rank":   _Leaf(bool,  False),
+            },
+            # Goal-progress positive weighting
+            "goal_progress": {
+                "enabled": _Leaf(bool,  False),
+                "w_low":   _Leaf(float, 0.3),
+            },
+            # Out-of-fold stacking
+            "oof": {
+                "folds":           _Leaf(int,  3),
+                "dedup_cross_fold": _Leaf(bool, True),
+                "score_norm":      _Leaf(str,  "within_pool"),
+            },
+            # Training hyper-parameters
+            "train": {
+                "epochs":                   _Leaf(int,   3),
+                "lr":                       _Leaf(float, 1e-4),
+                "weight_decay":             _Leaf(float, 0.0),
+                "batch_groups":             _Leaf(int,   2),
+                "grad_accum":               _Leaf(int,   16),
+                "warmup":                   _Leaf(float, 0.05),
+                "early_stop_patience":      _Leaf(int,   1),
+                "group_by_length":          _Leaf(bool,  True),
+                "log_every":                _Leaf(int,   50),
+                "seed":                     _Leaf(int,   0),
+                "gradient_checkpointing":   _Leaf(bool,  True),
+            },
+            # Train/eval split config
+            "split": {
+                "key":           _Leaf(str,  "session"),
+                "dedup_near_dup": _Leaf(bool, True),
+            },
+        },
+    },
+    "query": {
+        "markers":     _Leaf(bool, True),
+        "taste_items": _Leaf(int,  5),
+    },
+    "logging": {
+        "trackio": {
+            "enabled": _Leaf(bool, False),
+            "project": _Leaf(str,  "recsys2026"),
+        },
+    },
 }
 
 
 def _validate_type(key: str, value: Any, leaf: _Leaf) -> Any:
+    # Optional[str]: leaf.type is type(None) means "str or None".
+    if leaf.type is type(None):
+        if value is not None and not isinstance(value, str):
+            raise ValueError(
+                f"config key '{key}': expected str or None, got {type(value).__name__}"
+            )
+        return value
     # bool is a subclass of int — reject it where an int/float is expected.
     if leaf.type in (int, float) and isinstance(value, bool):
         raise ValueError(f"config key '{key}': expected {leaf.type.__name__}, got bool")
