@@ -52,6 +52,7 @@ Defined once in **`11_F2_interfaces_contracts_config.md`** and consumed by every
 | K1 | `50_K1_rerank_feature_builder.md` | Rerank feature builder (causal, pure) | Rerank | feature-purity + no-leak tests | spec: **done** |
 | K2 | `51_K2_lgbm_lambdamart.md` | LightGBM LambdaMART (primary reranker) | Rerank | nDCG@20 ≥ 0.45, hit-rank ≤ 2.5 | spec: **done** |
 | K3 | `52_K3_neural_reranker.md` | Cross-encoder/ColBERT (LoRA) + GBDT stacking | Rerank | nDCG@20 lift vs K2; → 0.55 | spec: **done** |
+| K3b | `53_K3b_ce_lora_finetune.md` | Cross-encoder LoRA fine-tune (bge-reranker-v2-m3) + OOF stacking | Rerank | dev nDCG@20 lift vs K2 (final-stage + OOF feature) | spec: **done** |
 | L1 | `60_L1_filter_assembly.md` | Filtering & top-20 assembly | Filter | schema-valid + nDCG non-regression + diversity hold | spec: **done** |
 | S1 | `70_S1_responder.md` | Responder (LLM, grounded) | Respond | proxy-judge ↑ + Distinct-2 ≥ 0.2558 | spec: **done** |
 | D1 | `80_D1_inference_submission_harness.md` | Inference & submission harness (Blind A/B) | Delivery | end-to-end schema-valid; local == leaderboard | spec: **done** |
