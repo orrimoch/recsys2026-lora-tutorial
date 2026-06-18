@@ -175,3 +175,32 @@ def test_gemini_responder_respond_returns_text_then_falls_back():
     assert ok == "REPLY: Take Five fits your calm mood."
     fb = GeminiResponder(ResponderConfig(), _FakeClient(raise_exc=True)).respond(_turn_ctx(), top)
     assert fb and fb != ""                                      # non-empty fallback
+
+
+def test_default_max_tokens_leaves_room_for_thinking_models():
+    # gemini-2.5-pro spends output tokens on internal thinking BEFORE the reply; a small cap (256)
+    # is fully consumed by thinking -> empty .text -> every row falls back. The default must leave
+    # room for thinking + a short reply.
+    assert ResponderConfig().max_tokens >= 1024
+
+
+def test_generate_responses_passes_max_output_tokens_to_client():
+    captured = {}
+
+    class _CapModels:
+        async def generate_content(self, model=None, contents=None, config=None):
+            captured.update(config or {})
+            return _FakeResp("a real grounded reply")
+
+    class _CapClient:
+        def __init__(self):
+            class _Aio:
+                pass
+            self.aio = _Aio()
+            self.aio.models = _CapModels()
+
+    preds = [{"session_id": "s1", "user_id": "u1", "turn_number": 3,
+              "predicted_track_ids": ["t1"], "predicted_response": "ok"}]
+    asyncio.run(generate_responses(preds, {"s1": SESSION}, ITEM_META,
+                                   ResponderConfig(max_tokens=1234, concurrency=1), _CapClient()))
+    assert captured.get("max_output_tokens") == 1234

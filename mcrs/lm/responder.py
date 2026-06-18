@@ -192,7 +192,10 @@ def build_output_row(pred: dict, response: str) -> dict:
 class ResponderConfig:
     model_revision: str = "gemini-2.5-flash"
     top_n_for_prompt: int = 3
-    max_tokens: int = 256
+    # gemini-2.5 models spend output tokens on internal THINKING before the reply, and that counts
+    # against max_output_tokens. A small cap (e.g. 256) is consumed entirely by thinking -> empty
+    # reply -> every row falls back. Leave generous room for thinking + the short reply.
+    max_tokens: int = 2048
     temperature: float = 0.7
     concurrency: int = 16
     cache_dir: Optional[str] = None
