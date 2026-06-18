@@ -84,7 +84,8 @@ def make_ce_feature_fn(lookup: dict, default: float = -1.0):
     return _fn
 
 
-def build_ce_score_lookup(turns, pools, scorer, *, normalize: bool = True) -> dict:
+def build_ce_score_lookup(turns, pools, scorer, *, normalize: bool = True,
+                          show_progress: bool = False) -> dict:
     """Per-candidate CE-score lookup for K2 stacking, reusing the K3 `scorer.score` surface.
 
     `scorer` is anything with `.score(ctx, candidates) -> {track_id: ce_score}` (e.g. NeuralReranker,
@@ -92,12 +93,21 @@ def build_ce_score_lookup(turns, pools, scorer, *, normalize: bool = True) -> di
     turn's scores are min-max scaled within that turn's pool only (fold/scale-invariant, leak-free —
     uses no cross-turn or gold info). Returns {(session_id, turn_number, track_id): score}.
 
+    `show_progress` wraps the per-turn loop in a tqdm bar (this is the slow ~K pairs/turn CE pass).
+
     Leak note: pass a FROZEN cross-encoder's scorer for no-OOF leak-free stacking; a FINE-TUNED CE
     must instead be cross-fit via oof_ce_scores (it has seen the labels)."""
     from mcrs.training.ce_data import normalize_within_pool
 
+    pairs = zip(turns, pools)
+    if show_progress:
+        try:
+            from tqdm.auto import tqdm
+            pairs = tqdm(list(pairs), total=len(turns), desc="frozen-CE scoring", unit="turn")
+        except ImportError:
+            pass
     lookup: dict = {}
-    for ctx, pool in zip(turns, pools):
+    for ctx, pool in pairs:
         d = scorer.score(ctx, pool)
         if not d:
             continue
