@@ -14,9 +14,15 @@ def build_rerank_groups(
     query_builder, fusion, turns: list[TurnContext],
     gold_fn: Callable[[TurnContext], Optional[str]],
     topk: int, topk_internal: Optional[int] = None,
+    per_channel_query_builders: Optional[dict] = None,
 ) -> list[tuple]:
     queries = [query_builder.build(t).text for t in turns]
     bc = [{"history_tids": t.history_tids, "user_id": t.user_id} for t in turns]
     uids = [t.user_id for t in turns]
-    pools = fusion.fuse(queries, topk, topk_internal=topk_internal, batch_context=bc, user_ids=uids)
+    # Route per-channel queries (e.g. ColBERT's focused query) EXACTLY like InferenceHarness.run, so the
+    # K2 training pool == the serve pool for every channel (no train/serve skew on a routed channel).
+    pcq = {key: [qb.build(t).text for t in turns]
+           for key, qb in (per_channel_query_builders or {}).items()} or None
+    pools = fusion.fuse(queries, topk, topk_internal=topk_internal, batch_context=bc, user_ids=uids,
+                        per_channel_queries=pcq)
     return [(t, pool, gold_fn(t)) for t, pool in zip(turns, pools)]

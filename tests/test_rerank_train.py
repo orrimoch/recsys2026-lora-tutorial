@@ -21,6 +21,31 @@ def _turns():
             TurnContext("s1", "u", 2, ["hi", "more"], "g", p, ["a"], "warm")]
 
 
+class _RecCh:
+    """Records the query list it was handed (to assert per-channel routing)."""
+    def __init__(self, label, query_key=None):
+        self.label, self.query_key, self.seen = label, query_key, None
+
+    def batch_text_to_item_retrieval(self, queries, topk, batch_context=None, user_ids=None):
+        self.seen = list(queries)
+        return [["a"] for _ in queries]
+
+
+def test_build_groups_routes_focused_query_to_keyed_channel():
+    # Train pools must route the focused query to the colbert channel exactly like InferenceHarness,
+    # else K2 is trained on a different colbert pool than it meets at serve (train/serve skew).
+    cb = _RecCh("colbert", query_key="colbert")
+    dense = _RecCh("dense")
+    fusion = RRFFusion([dense, cb], k=60)
+    golds = {("s1", 1): "a", ("s1", 2): "a"}
+    build_rerank_groups(QueryBuilder(), fusion, _turns(),
+                        lambda t: golds[(t.session_id, t.turn_number)], topk=3,
+                        per_channel_query_builders={"colbert": QueryBuilder(recency_window=1)})
+    # turn1 utt ["hi"] goal "g" -> "hi g"; turn2 utt ["hi","more"] -> focused "more g"
+    assert cb.seen == ["hi g", "more g"]
+    assert dense.seen == ["hi g", "hi more g"]   # dense keeps the FULL query
+
+
 def test_build_groups_runs_fusion_and_attaches_gold():
     fusion = RRFFusion([_Fake("bm25", [["a", "b", "c"], ["d", "e", "f"]])], k=60)
     golds = {("s1", 1): "b", ("s1", 2): "zzz"}  # turn 2 gold not in pool
