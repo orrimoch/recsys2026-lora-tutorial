@@ -150,6 +150,7 @@ def train_colbert(triples: Sequence[dict], out_dir: str, *, base_model: str = "l
 
     from datasets import Dataset
     from sentence_transformers import SentenceTransformerTrainer, SentenceTransformerTrainingArguments
+    from sentence_transformers.training_args import BatchSamplers
     from pylate import losses, models, utils
 
     rows = triples_to_contrastive_rows(triples)
@@ -168,7 +169,12 @@ def train_colbert(triples: Sequence[dict], out_dir: str, *, base_model: str = "l
     targs = SentenceTransformerTrainingArguments(
         output_dir=out_dir, num_train_epochs=epochs, per_device_train_batch_size=batch_size,
         learning_rate=lr, weight_decay=weight_decay, warmup_ratio=warmup_ratio, max_grad_norm=1.0,
-        bf16=True, seed=seed, logging_steps=50, save_strategy="no")  # callback owns saving
+        bf16=True, seed=seed, logging_steps=50, save_strategy="no",  # callback owns saving
+        # We explode triples to one (query, positive, negative) row per hard negative, so the same
+        # (query, positive) appears K_NEGS times. Contrastive uses IN-BATCH negatives, so two copies
+        # in one batch would make a query's own gold an in-batch negative (false negative). NO_DUPLICATES
+        # guarantees no repeated sample in a batch — keeps the original explode, removes the collision (#2).
+        batch_sampler=BatchSamplers.NO_DUPLICATES)
     trainer = SentenceTransformerTrainer(
         model=model, args=targs, train_dataset=train_dataset, loss=train_loss,
         data_collator=utils.ColBERTCollator(model.tokenize), callbacks=callbacks)

@@ -21,7 +21,10 @@ class Catalog:
         enriched_docs: Optional[dict[str, str]] = None,
     ) -> None:
         self.corpus_types = list(corpus_types or _DEFAULT_CORPUS)
-        self._enriched = dict(enriched_docs or {})
+        # Canonicalize keys so id_to_metadata(canonical_tid, enriched=True) matches even when the
+        # enriched-doc source keys carry a 'track_id:' prefix / whitespace (ML-review finding #3:
+        # a mismatch silently falls back to the raw doc, defeating A1 enrichment + expansion-first).
+        self._enriched = {canonical_track_id(k): v for k, v in (enriched_docs or {}).items()}
         self._meta: dict[str, dict] = {}
         self.index_to_id: list[str] = []
         for r in rows:

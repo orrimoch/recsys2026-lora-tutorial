@@ -47,6 +47,14 @@ def test_id_to_metadata_enriched_falls_back_to_raw_when_uncovered():
     assert c.id_to_metadata("a", enriched=True) == c.id_to_metadata("a", enriched=False)
 
 
+def test_enriched_keys_are_canonicalized():
+    # enriched_docs keyed by a raw 'track_id:'-prefixed / whitespaced id must still resolve under the
+    # canonical id, else id_to_metadata silently falls back to the raw doc (ML-review finding #3).
+    c = _cat(enriched_docs={"track_id: a ": "ENRICHED-A"})
+    assert c.is_enriched("a") is True
+    assert c.id_to_metadata("a", enriched=True) == "ENRICHED-A"
+
+
 def test_id_to_metadata_enriched_uses_enrichment_when_present():
     c = _cat(enriched_docs={"a": "Song A — a soaring pop anthem about X"})
     out = c.id_to_metadata("a", enriched=True)

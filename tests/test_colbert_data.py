@@ -99,6 +99,7 @@ class TestIterColbertPositives:
         assert r["turn_number"] == 1
         assert r["session_id"] == "s1"
         assert r["history_tids"] == []
+        assert r["segment"] == "cold"  # carried through for segment-aware fusion (ML-review #4)
 
     def test_turn1_kept_even_without_label(self):
         # RCA #1: real turn-1 has NO goal_progress_assessment, yet the gate is 100% turn-1.

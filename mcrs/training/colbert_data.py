@@ -144,6 +144,7 @@ def iter_colbert_positives(
             "session_id": ctx.session_id,
             "user_id": ctx.user_id,
             "history_tids": list(ctx.history_tids),
+            "segment": ctx.segment,
         })
     return rows
 
@@ -199,7 +200,9 @@ def build_colbert_train_data(
     positives = iter_colbert_positives(turns, gold_fn, query_builder, gp_fn)
 
     queries = [r["query"] for r in positives]
-    bc = [{"history_tids": r["history_tids"], "user_id": r["user_id"]} for r in positives]
+    # segment plumbed through so the hard-neg pool matches serve once segment-weighted RRF is on (#4)
+    bc = [{"history_tids": r["history_tids"], "user_id": r["user_id"], "segment": r["segment"]}
+          for r in positives]
     uids = [r["user_id"] for r in positives]
     rng = range(len(queries))
     if show_progress:
@@ -237,9 +240,11 @@ def build_dev_eval_pack(
             "turn_number": 1,
             "history_tids": list(t.history_tids),
             "user_id": t.user_id,
+            "segment": t.segment,
         })
     queries = [r["query"] for r in rows]
-    bc = [{"history_tids": r["history_tids"], "user_id": r["user_id"]} for r in rows]
+    bc = [{"history_tids": r["history_tids"], "user_id": r["user_id"], "segment": r["segment"]}
+          for r in rows]
     uids = [r["user_id"] for r in rows]
     pools = fusion.batch_text_to_item_retrieval(queries, pool_size, batch_context=bc, user_ids=uids)
     return dev_eval_pack_from_pools(rows, pools, doc_text_fn)
