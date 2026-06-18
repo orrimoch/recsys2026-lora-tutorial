@@ -86,6 +86,32 @@ def build_triples_from_pools(
     return triples, stats
 
 
+def dev_eval_pack_from_pools(
+    rows: Sequence[dict],
+    pools: Sequence[Sequence[str]],
+    doc_text_fn: Callable[[str], str],
+) -> dict:
+    """Assemble the dev-eval pack the fine-tune selection callback consumes, from dev rows + their
+    aligned candidate pools. Each row has {query, gold_tid, turn_number}. Drops rows with no gold
+    (can't score recall). `wall[i]` marks the turn-1 gate (the metric the checkpoint is selected on);
+    `tid_to_text` covers the union of all pool tids so the live model can re-encode + rerank them."""
+    queries, golds, out_pools, wall = [], [], [], []
+    tid_to_text: dict[str, str] = {}
+    for row, pool in zip(rows, pools):
+        gold = row["gold_tid"]
+        if gold is None:
+            continue
+        queries.append(row["query"])
+        golds.append(gold)
+        out_pools.append(list(pool))
+        wall.append(int(row["turn_number"]) == 1)
+        for t in pool:
+            if t not in tid_to_text:
+                tid_to_text[t] = doc_text_fn(t)
+    return {"queries": queries, "golds": golds, "pools": out_pools,
+            "wall": wall, "tid_to_text": tid_to_text}
+
+
 def iter_colbert_positives(
     turns: Sequence[Any],
     gold_fn: Callable[[Any], Optional[str]],
@@ -188,3 +214,32 @@ def build_colbert_train_data(
     if report is not None:
         report.update(positives=len(positives), **stats)
     return triples
+
+
+def build_dev_eval_pack(
+    conversations: Any,
+    query_builder: Any,
+    fusion: Any,
+    doc_text_fn: Callable[[str], str],
+    *,
+    pool_size: int = 100,
+) -> dict:
+    """Build the dev-eval pack (DEV/TEST split) for in-loop checkpoint selection. Gate = turn-1
+    recall (the probe metric), so we evaluate turn-1 dev turns only. SAME `query_builder` + `fusion`
+    + `doc_text_fn` as train, so the dev re-probe matches serve. Returns the pack for
+    `colbert_finetune.make_dev_eval_callback`."""
+    turns = [t for t in conversations.turns() if int(t.turn_number) == 1]
+    rows = []
+    for t in turns:
+        rows.append({
+            "query": query_builder.build(t).text,
+            "gold_tid": conversations.gold(t.session_id, t.turn_number),
+            "turn_number": 1,
+            "history_tids": list(t.history_tids),
+            "user_id": t.user_id,
+        })
+    queries = [r["query"] for r in rows]
+    bc = [{"history_tids": r["history_tids"], "user_id": r["user_id"]} for r in rows]
+    uids = [r["user_id"] for r in rows]
+    pools = fusion.batch_text_to_item_retrieval(queries, pool_size, batch_context=bc, user_ids=uids)
+    return dev_eval_pack_from_pools(rows, pools, doc_text_fn)

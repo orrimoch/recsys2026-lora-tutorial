@@ -12,6 +12,7 @@ from mcrs.contracts import Query, TurnContext, UserProfile
 from mcrs.training.colbert_data import (
     build_colbert_triple,
     build_triples_from_pools,
+    dev_eval_pack_from_pools,
     goal_progress_label,
     iter_colbert_positives,
     select_hard_negatives,
@@ -161,3 +162,34 @@ class TestBuildTriplesFromPools:
         pool = ["tGOLD1"] + [f"n{i}" for i in range(10)]
         triples, _ = build_triples_from_pools([_pos("tGOLD1")], [pool], _DOC, k_negs=3)
         assert len(triples[0]["negatives"]) == 3
+
+
+def _drow(gold, query="q", tn=1):
+    return {"query": query, "gold_tid": gold, "turn_number": tn}
+
+
+class TestDevEvalPackFromPools:
+    def test_builds_pack_fields(self):
+        rows = [_drow("g1", "q1", 1), _drow("g2", "q2", 2)]
+        pools = [["g1", "a"], ["b", "g2"]]
+        pack = dev_eval_pack_from_pools(rows, pools, _DOC)
+        assert pack["queries"] == ["q1", "q2"]
+        assert pack["golds"] == ["g1", "g2"]
+        assert pack["pools"] == [["g1", "a"], ["b", "g2"]]
+
+    def test_wall_marks_turn1_only(self):
+        rows = [_drow("g1", tn=1), _drow("g2", tn=2)]
+        pack = dev_eval_pack_from_pools(rows, [["g1"], ["g2"]], _DOC)
+        assert pack["wall"] == [True, False]
+
+    def test_tid_to_text_covers_pool_union(self):
+        rows = [_drow("g1"), _drow("g2", tn=1)]
+        pack = dev_eval_pack_from_pools(rows, [["g1", "a"], ["a", "g2"]], _DOC)
+        assert pack["tid_to_text"] == {"g1": "meta:g1", "a": "meta:a", "g2": "meta:g2"}
+
+    def test_skips_rows_without_gold(self):
+        # gold None -> drop the row AND its aligned pool (can't score recall without a gold).
+        rows = [_drow(None, "q1"), _drow("g2", "q2")]
+        pack = dev_eval_pack_from_pools(rows, [["x"], ["g2"]], _DOC)
+        assert pack["queries"] == ["q2"] and pack["golds"] == ["g2"]
+        assert pack["pools"] == [["g2"]]
