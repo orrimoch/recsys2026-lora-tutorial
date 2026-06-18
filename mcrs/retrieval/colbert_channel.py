@@ -47,11 +47,19 @@ def _strip_track_id_prefix(doc_text: str) -> str:
     return doc_text
 
 
-def colbert_doc_text(catalog, track_id: str) -> str:
+def colbert_doc_text(catalog, track_id: str, expansion_first: bool = False) -> str:
     """The ColBERT doc text for a track: the A1-ENRICHED doc (47_R8 §4.2, hard constraint),
     with a leading track_id prefix stripped. Channels never build doc text themselves —
-    enrichment is layered by A1 and read through F1 `id_to_metadata(enriched=True)`."""
-    return _strip_track_id_prefix(catalog.id_to_metadata(track_id, enriched=True))
+    enrichment is layered by A1 and read through F1 `id_to_metadata(enriched=True)`.
+
+    `expansion_first` (47_R8 §4.3): A1 writes `base (metadata+tags) | doc2query-expansion`, so the
+    high-value expansion is LAST and right-truncation at `doc_maxlen` drops it. Setting this swaps to
+    `expansion | base` so the doc2query text survives truncation. No-op when there's no ` | `."""
+    text = _strip_track_id_prefix(catalog.id_to_metadata(track_id, enriched=True))
+    if expansion_first and " | " in text:
+        base, expansion = text.split(" | ", 1)
+        return f"{expansion} | {base}"
+    return text
 
 
 def count_docs_over_budget(texts: Sequence[str], budget: int,

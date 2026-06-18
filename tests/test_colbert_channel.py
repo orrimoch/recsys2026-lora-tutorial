@@ -155,6 +155,26 @@ def test_colbert_doc_text_no_prefix_is_noop():
     assert colbert_doc_text(cat, "y") == "upbeat synthpop tags: pop"
 
 
+def test_colbert_doc_text_expansion_first_reorders():
+    # A1 builds 'base (metadata+tags) | doc2query-expansion'; expansion (high-value, R8 §4.3) is
+    # LAST, so right-truncation drops it. expansion_first swaps it to the front so it survives.
+    cat = Catalog(
+        [{"track_id": "x", "track_name": ["Song"], "artist_name": ["A"]}],
+        enriched_docs={"x": "name: Song, tags: rock | upbeat 90s workout anthem"},
+    )
+    assert colbert_doc_text(cat, "x") == "name: Song, tags: rock | upbeat 90s workout anthem"
+    assert colbert_doc_text(cat, "x", expansion_first=True) == \
+        "upbeat 90s workout anthem | name: Song, tags: rock"
+
+
+def test_colbert_doc_text_expansion_first_noop_without_separator():
+    cat = Catalog(
+        [{"track_id": "y", "track_name": ["S"], "artist_name": ["B"]}],
+        enriched_docs={"y": "name: S, tags: pop"},   # no ' | ' expansion
+    )
+    assert colbert_doc_text(cat, "y", expansion_first=True) == "name: S, tags: pop"
+
+
 def test_count_docs_over_budget():
     texts = ["a b c", "a b c d e", "x"]
     assert count_docs_over_budget(texts, budget=4) == 1     # only the 5-token doc
