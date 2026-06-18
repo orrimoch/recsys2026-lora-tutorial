@@ -94,8 +94,12 @@ class ColBERTChannel:
         label: str = "colbert",
         normalize: bool = True,
         chunk_docs: int = 4096,
+        query_key: Optional[str] = None,
     ) -> None:
         self.label = label
+        # R7 per-channel routing key: when set, RRFFusion feeds this channel the focused query from
+        # per_channel_queries[query_key] instead of the full query (additive MaxSim wants it short).
+        self.query_key = query_key
         self.index_to_id = list(index_to_id)
         self.encode_query_fn = encode_query_fn
         self.normalize = normalize
@@ -129,6 +133,7 @@ class ColBERTChannel:
         doc_text_fn: Optional[Callable[[object, str], str]] = None,
         doc_token_budget: Optional[int] = None,
         tokenize: Optional[Callable[[str], Sequence]] = None,
+        query_key: Optional[str] = None,
     ) -> "ColBERTChannel":
         """Build the channel from an F1 `Catalog`: encode each track's A1-enriched doc to ColBERT
         token embeddings, indexed over `catalog.index_to_id` (the F1 id space, §4.6 row alignment).
@@ -144,7 +149,7 @@ class ColBERTChannel:
                 f"(§4.6 row alignment — index size must equal len(catalog))"
             )
         ch = cls(ids, doc_embs, encode_query_fn, label=label,
-                 normalize=normalize, chunk_docs=chunk_docs)
+                 normalize=normalize, chunk_docs=chunk_docs, query_key=query_key)
         if doc_token_budget is not None:
             ch.n_docs_over_budget = count_docs_over_budget(texts, doc_token_budget, tokenize)
         return ch
@@ -178,6 +183,7 @@ class ColBERTChannel:
             label=label,
             doc_token_budget=c.doc_maxlen,
             tokenize=lambda s: model.tokenize([s], is_query=False)["input_ids"][0],
+            query_key=getattr(c, "query_key", None),  # focused per-channel query routing (R7/A1)
         )
 
     def batch_text_to_item_retrieval(

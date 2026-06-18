@@ -210,7 +210,8 @@ def test_model_revision_falls_back_to_adapter_path_when_no_revision():
 class FakeFusion:
     """Returns a fixed pool of candidates for any query."""
 
-    def fuse(self, queries, topk, topk_internal=None, batch_context=None, user_ids=None):
+    def fuse(self, queries, topk, topk_internal=None, batch_context=None, user_ids=None,
+             per_channel_queries=None):
         pool = _make_candidates(["t1", "t2", "t3", "t4", "t5"])
         return [pool for _ in queries]
 

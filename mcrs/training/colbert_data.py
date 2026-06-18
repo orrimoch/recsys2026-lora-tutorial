@@ -172,6 +172,12 @@ def write_jsonl(rows: Sequence[dict], path: str) -> int:
     return len(rows)
 
 
+def read_jsonl(path: str) -> list[dict]:
+    """Read a JSONL file back into a list of dicts (for the notebook's triple cache)."""
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
 def build_colbert_train_data(
     conversations: Any,
     raw_rows: Sequence[dict],

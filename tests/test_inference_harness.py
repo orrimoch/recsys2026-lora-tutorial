@@ -37,6 +37,35 @@ def _harness(responder=None):
     return InferenceHarness(QueryBuilder(), fusion, TopKAssembler(_CAT), responder=responder)
 
 
+def test_harness_rejects_routing_key_matching_no_channel():
+    # A per_channel_query_builders key that matches no channel's query_key would silently no-op
+    # (channel falls back to the full query); fail loud at construction instead (review #3).
+    fusion = RRFFusion([_Fake("bm25", [["a"]]), _Fake("dense", [["b"]])], k=60)
+    with pytest.raises(ValueError):
+        InferenceHarness(QueryBuilder(), fusion, TopKAssembler(_CAT),
+                         per_channel_query_builders={"colbert": QueryBuilder(recency_window=1)})
+
+
+def test_harness_routes_focused_query_to_colbert_channel():
+    # ColBERT must see the focused (recency_window=1) query; other channels see the full query.
+    rec = {}
+
+    class _RecCh:
+        label = "colbert"
+        query_key = "colbert"
+
+        def batch_text_to_item_retrieval(self, queries, topk, batch_context=None, user_ids=None):
+            rec["seen"] = list(queries)
+            return [["a"] for _ in queries]
+
+    fusion = RRFFusion([_Fake("bm25", [["a", "b"], ["c", "d"]]), _RecCh()], k=60)
+    h = InferenceHarness(QueryBuilder(), fusion, TopKAssembler(_CAT),
+                         per_channel_query_builders={"colbert": QueryBuilder(recency_window=1)})
+    h.run(_turns())
+    # turn1 utt ["hello"] goal "goal" -> "hello goal"; turn2 utt ["hello","more"] -> focused "more goal"
+    assert rec["seen"] == ["hello goal", "more goal"]
+
+
 def test_run_produces_one_row_per_turn():
     rows = _harness().run(_turns())
     assert [r.turn_number for r in rows] == [1, 2]

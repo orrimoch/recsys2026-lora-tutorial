@@ -34,6 +34,21 @@ def triples_to_contrastive_rows(triples: Sequence[dict]) -> list[dict[str, str]]
     return rows
 
 
+def count_query_collisions(batch_rows: Sequence[dict]) -> int:
+    """Number of rows whose `query` repeats an earlier row in the same batch. 0 means every
+    (query, positive) gold is unique within the batch, so no query's own gold becomes an in-batch
+    false negative under Contrastive's in-batch negatives. Used to VERIFY the NO_DUPLICATES sampler
+    on the first real batch (exploded triples repeat (query, positive) across negatives)."""
+    seen: set = set()
+    dups = 0
+    for r in batch_rows:
+        q = r["query"]
+        if q in seen:
+            dups += 1
+        seen.add(q)
+    return dups
+
+
 def wall_recall_at_k(ranked_lists: Sequence[Sequence[str]], golds: Sequence[str],
                      wall: Sequence[bool], k: int) -> float:
     """recall@k over the wall subset only (rows where wall[i] is True). Returns 0.0 when there are
@@ -155,7 +170,7 @@ def make_dev_eval_callback(pack: dict, eval_steps: int, dev_subset: int, k: int,
 
 def train_colbert(triples: Sequence[dict], out_dir: str, *, base_model: str = "lightonai/GTE-ModernColBERT-v1",
                   dev_eval_pack: Optional[dict] = None, epochs: float = 2.0, batch_size: int = 32,
-                  lr: float = 1e-4, weight_decay: float = 0.01, warmup_ratio: float = 0.1,
+                  lr: Optional[float] = None, weight_decay: float = 0.01, warmup_ratio: float = 0.1,
                   eval_steps: int = 500, dev_subset: int = 300, q_len: int = 96, d_len: int = 96,
                   k: int = 20, seed: int = 42, force: bool = False,
                   use_lora: bool = True, lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05,
@@ -175,6 +190,11 @@ def train_colbert(triples: Sequence[dict], out_dir: str, *, base_model: str = "l
     if existing_artifact_blocks(out_dir, force):
         print(f"[train-colbert] {out_dir} exists — SKIPPING (pass force=True to retrain)", file=sys.stderr)
         return out_dir
+
+    if lr is None:                                # LoRA tolerates a higher LR; full-FT needs ~1e-5 or it
+        lr = 1e-4 if use_lora else 1e-5          # diverges/forgets — resolve by mode so it can't be mismatched
+        # NOTE behavior change: the old default was an unconditional 1e-4. A caller that omits lr on a
+        # full-FT (use_lora=False) run now gets 1e-5, not 1e-4 — the resolved lr is logged below.
 
     from datasets import Dataset
     from sentence_transformers import SentenceTransformerTrainer, SentenceTransformerTrainingArguments
@@ -218,12 +238,26 @@ def train_colbert(triples: Sequence[dict], out_dir: str, *, base_model: str = "l
         learning_rate=lr, weight_decay=weight_decay, warmup_ratio=warmup_ratio, max_grad_norm=1.0,
         bf16=True, seed=seed, logging_steps=50, save_strategy="no",  # callback owns saving
         # Exploded triples -> the same (query, positive) appears K_NEGS times; Contrastive uses IN-BATCH
-        # negatives, so two copies in a batch make a query's own gold an in-batch negative (false
-        # negative). NO_DUPLICATES forbids repeats in a batch — keeps the explode, removes the collision.
+        # negatives, so two copies in a batch would make a query's own gold an in-batch negative (false
+        # negative). NO_DUPLICATES rejects a row whose any column value already appears in the batch, so a
+        # repeated `query` value is dropped — preventing the collision. The guard below VERIFIES this on
+        # the first real batch; the robust v3 fix (if it ever fails) is one row per triple + negatives list.
         batch_sampler=BatchSamplers.NO_DUPLICATES)
     trainer = SentenceTransformerTrainer(
         model=model, args=targs, train_dataset=train_dataset, loss=train_loss,
         data_collator=utils.ColBERTCollator(model.tokenize), callbacks=callbacks)
+
+    # VERIFY the NO_DUPLICATES sampler on the first real batch: count repeated queries (in-batch false
+    # negatives). 0 = safe. If >0, the sampler did not dedup and the v3 one-row-per-triple fix is needed.
+    try:
+        first_idx = next(iter(trainer.get_train_dataloader().batch_sampler))
+        dups = count_query_collisions([train_dataset[int(i)] for i in first_idx])
+        warn = "" if dups == 0 else "  WARNING: NO_DUPLICATES did NOT dedup — apply the v3 fix"
+        print(f"[train-colbert] first-batch query collisions: {dups} (0 = no in-batch false negatives)"
+              f"{warn}", file=sys.stderr)
+    except Exception as e:                            # never block training on the diagnostic
+        print(f"[train-colbert] first-batch collision check skipped: {e!r}", file=sys.stderr)
+
     trainer.train()
 
     # Finalize: produce a PLAIN ColBERT at out_dir (gate loads it with no PEFT).

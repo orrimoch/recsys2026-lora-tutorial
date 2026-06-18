@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from mcrs.training.colbert_finetune import (
+    count_query_collisions,
     existing_artifact_blocks,
     rerank_pool,
     triples_to_contrastive_rows,
@@ -77,6 +78,22 @@ class TestTriplesToContrastiveRows:
 
     def test_empty_input_yields_empty(self):
         assert triples_to_contrastive_rows([]) == []
+
+
+class TestCountQueryCollisions:
+    # Verifies the NO_DUPLICATES first-batch guard: a repeated `query` in one batch means a query's
+    # own gold becomes an in-batch false negative (review #5).
+    def test_no_repeats_is_zero(self):
+        batch = [{"query": "q1", "positive": "p1", "negative": "n1"},
+                 {"query": "q2", "positive": "p2", "negative": "n2"}]
+        assert count_query_collisions(batch) == 0
+
+    def test_counts_each_repeat_after_the_first(self):
+        batch = [{"query": "q", "positive": "p", "negative": "n1"},
+                 {"query": "q", "positive": "p", "negative": "n2"},   # 1st collision
+                 {"query": "q", "positive": "p", "negative": "n3"},   # 2nd collision
+                 {"query": "other", "positive": "p", "negative": "n"}]
+        assert count_query_collisions(batch) == 2
 
 
 class TestWallRecallAtK:

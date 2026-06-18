@@ -15,8 +15,18 @@ from mcrs.training.colbert_data import (
     dev_eval_pack_from_pools,
     goal_progress_label,
     iter_colbert_positives,
+    read_jsonl,
     select_hard_negatives,
+    write_jsonl,
 )
+
+
+def test_write_then_read_jsonl_roundtrips(tmp_path):
+    rows = [{"query": "q1", "negatives": ["a", "b"], "turn_number": 1},
+            {"query": "q2", "negatives": [], "turn_number": 2}]
+    p = str(tmp_path / "triples.jsonl")
+    assert write_jsonl(rows, p) == 2
+    assert read_jsonl(p) == rows
 
 LABEL_POS = "MOVES_TOWARD_GOAL"
 

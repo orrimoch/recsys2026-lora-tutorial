@@ -45,15 +45,36 @@ class RRFFusion:
             results.append([t for t, _ in sorted(fused.items(), key=lambda kv: -kv[1])[:topk]])
         return results
 
-    def _per_sub(self, queries, topk_internal, batch_context, user_ids):
-        return [ch.batch_text_to_item_retrieval(queries, topk_internal, batch_context, user_ids)
+    def _queries_for(self, ch, queries, per_channel_queries):
+        """A channel with a `query_key` present in `per_channel_queries` gets ITS query list (e.g.
+        ColBERT's focused query); everyone else gets the main `queries` (A1 per-channel routing).
+
+        The routed list MUST be 1:1 aligned (same length + order) with `queries`/`batch_context` —
+        `fuse` reads `per_sub[si][qi]` positionally, so a length mismatch would silently fuse one
+        turn's ColBERT pool into another turn's row. We hard-fail on a length mismatch rather than
+        corrupt the pool."""
+        key = getattr(ch, "query_key", None)
+        if not per_channel_queries or not key or key not in per_channel_queries:
+            return queries                        # unrouted channel, or no override supplied -> full query
+        routed = per_channel_queries[key]
+        if len(routed) != len(queries):
+            raise ValueError(
+                f"per_channel_queries['{key}'] has {len(routed)} queries but {len(queries)} main "
+                f"queries — must be 1:1 aligned with the turns/batch_context (R7 per-channel routing)")
+        return routed
+
+    def _per_sub(self, queries, topk_internal, batch_context, user_ids, per_channel_queries=None):
+        return [ch.batch_text_to_item_retrieval(
+                    self._queries_for(ch, queries, per_channel_queries),
+                    topk_internal, batch_context, user_ids)
                 for ch in self.channels]
 
     def fuse(self, queries: list[str], topk: int, topk_internal: Optional[int] = None,
              batch_context: Optional[list[dict]] = None,
-             user_ids: Optional[list[str]] = None) -> list[list[Candidate]]:
+             user_ids: Optional[list[str]] = None,
+             per_channel_queries: Optional[dict[str, list[str]]] = None) -> list[list[Candidate]]:
         ti = topk_internal or topk
-        per_sub = self._per_sub(queries, ti, batch_context, user_ids)
+        per_sub = self._per_sub(queries, ti, batch_context, user_ids, per_channel_queries)
         results: list[list[Candidate]] = []
         for qi in range(len(queries)):
             ctx = batch_context[qi] if batch_context and qi < len(batch_context) else None
@@ -74,6 +95,8 @@ class RRFFusion:
             ])
         return results
 
-    def batch_text_to_item_retrieval(self, queries, topk, batch_context=None, user_ids=None):
-        pools = self.fuse(queries, topk, batch_context=batch_context, user_ids=user_ids)
+    def batch_text_to_item_retrieval(self, queries, topk, batch_context=None, user_ids=None,
+                                     per_channel_queries=None):
+        pools = self.fuse(queries, topk, batch_context=batch_context, user_ids=user_ids,
+                          per_channel_queries=per_channel_queries)
         return [[c.track_id for c in pool] for pool in pools]
