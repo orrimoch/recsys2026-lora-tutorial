@@ -66,7 +66,7 @@ class SubmissionRow:
 class RetrievalChannel(Protocol):
     label: str
     # MUST return canonical track_ids over all_tracks; absent = not retrieved.
-    # Signature matches the salvage RRF sub-retriever contract (do not change shape).
+    # Signature matches the RRF sub-retriever contract (do not change shape).
     def batch_text_to_item_retrieval(
         self, queries: list[str], topk: int,
         batch_context: list[dict] | None = None, user_ids: list[str] | None = None,
@@ -90,11 +90,11 @@ class Responder(Protocol):
 ## 4. Design & logic
 - **Causal by construction:** `TurnContext` exposes only ≤t data; there is no field for the gold track or future turns. Constructors assert `len(utterances) == turn_number` and `gold ∉ inputs`.
 - **One id space:** `track_id` everywhere is the canonical catalog key (F1). Any channel deriving ids canonicalizes before returning (plan §7.3 req #1).
-- **`per_channel` queries** mirror salvage `rrf.resolve_sub_queries` (`query_key`) so a channel (e.g. ColBERT) can use a compact query while others use the shared one — same object in train and serve.
+- **`per_channel` queries** mirror the prior `rrf.resolve_sub_queries` (`query_key`) so a channel (e.g. ColBERT) can use a compact query while others use the shared one — same object in train and serve.
 - **Serialization:** every record has `to_dict`/`from_dict`; `SubmissionRow` dumps with `ensure_ascii=False`.
 
 ## 5. Reuse
-Channel signature is lifted verbatim from salvage `salvage/mcrs/retrieval_modules/rrf.py` (`batch_text_to_item_retrieval`) so salvage channels port without reshaping. Config shape clones `music-crs-baselines/config/llama1b_*.yaml`. The contracts file itself is **new** (rewrite — salvage had no central contract).
+Channel signature is lifted verbatim from the `batch_text_to_item_retrieval` RRF sub-retriever contract (recoverable from the old git branches — recall-union-lgbm, stage-b-cross-encoder, fresh-model, exp/*) so prior channels port without reshaping. Config shape clones `music-crs-baselines/config/llama1b_*.yaml`. The contracts file itself is **new** (rewrite — there was no central contract before).
 
 ## 6. Eval & acceptance gate
 Not a metric module, so its gate is correctness: **schema round-trip tests pass** (every record `from_dict(to_dict(x)) == x`), causal-assertion tests fire on violations, and a `SubmissionRow` list validates against the strict schema (≤20, unique, valid ids, all session×turns present, `ensure_ascii=False`).

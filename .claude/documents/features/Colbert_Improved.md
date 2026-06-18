@@ -49,11 +49,11 @@ Decision gate (kill criteria). After Phase 2 (fine-tune), if the best checkpoint
 - Channel: `mcrs/retrieval/colbert_channel.py` — `ColBERTChannel` (brute-force chunked MaxSim, content-only, deterministic top-k), `colbert_doc_text(cat, t, expansion_first=)`, `from_pylate(...)`. 19 tests green. This is the serving channel.
 - Query: `mcrs/retrieval/query.py` — `QueryBuilder` (plain + enriched/`markers` template, recency, cap, `taste:` clause via `track_label_fn`). Does NOT yet populate `Query.per_channel`.
 - Probe: `nb/phase1_colbert_probe.ipynb` — now restored to PyLate PLAID with a self-healing cache (see §6; Voyager was the source of the `pad_sequence` and empty-index crashes).
-- Fine-tune scaffolding (salvage, parked, original branch `recall-union-lgbm`):
-  - `salvage/scripts/build_colbert_train_data.py` — mines query→gold + hard negatives from TRAIN; `MOVES_TOWARD_GOAL` turn filter (turn-1 always); SASRec-free union pool (BM25+dense+same-artist); `--compact-query`, `--enrich-tags` parity flags; emits JSONL triples.
-  - `salvage/scripts/train_colbert.py` — PyLate `Contrastive` loss, `SentenceTransformerTrainer`, in-loop dev-eval callback (turn-1 recall@k model selection), `--force` overwrite guard.
-  - `salvage/scripts/build_colbert_index.py` — PLAID index builder with train/index doc-recipe parity banner.
-  - `salvage/mcrs/retrieval_modules/colbert_late.py` — `make_colbert_doc_text_fn` (single source of doc text), `ColbertIndexRetriever` (PLAID), tag-enrichment helpers.
+- Fine-tune scaffolding (`mcrs/training/colbert_*.py` + `nb/phase2_colbert_finetune.ipynb`; design also recoverable from the old branch `recall-union-lgbm`):
+  - `build_colbert_train_data` — mines query→gold + hard negatives from TRAIN; `MOVES_TOWARD_GOAL` turn filter (turn-1 always); SASRec-free union pool (BM25+dense+same-artist); `--compact-query`, `--enrich-tags` parity flags; emits JSONL triples.
+  - `train_colbert` — PyLate `Contrastive` loss, `SentenceTransformerTrainer`, in-loop dev-eval callback (turn-1 recall@k model selection), `--force` overwrite guard.
+  - `build_colbert_index` — PLAID index builder with train/index doc-recipe parity banner.
+  - `mcrs/retrieval/colbert_channel.py` — `colbert_doc_text` (single source of doc text), the PLAID `ColBERTChannel`, tag-enrichment helpers.
 - Data facts (TalkPlay): in-session-only history; list-valued metadata; `goal_progress` train/test shift (TRAIN 44/43 MOVES/DOES_NOT, TEST 77/10); 74% seen-users; warm enriched-query tokens p50≈360/p99≈866; ~47,071 tracks; TRAIN 15,199 sessions / TEST 1,000.
 
 ## 4. Workstream A — Query improvements
@@ -109,11 +109,11 @@ The pretrained gap is the whole reason for this spec.
 
 DECISION (2026-06-18): keep the ORIGINAL feedback mechanism — PyLate `losses.Contrastive` (mined
 hard negatives + in-batch negatives), with turn-1 dev-recall callback for checkpoint selection (the
-original `salvage/scripts/train_colbert.py` approach). Distillation from the K3b cross-encoder (D3)
+original `mcrs/training/colbert_*.py` / `nb/phase2_colbert_finetune.ipynb` approach). Distillation from the K3b cross-encoder (D3)
 is documented as a DEFERRED upgrade we may layer on later; it is NOT in the initial build.
 
-### D1. Training data pipeline (reuse + harden the salvage scripts)
-Use `build_colbert_train_data.py`. Each row = (query, gold doc, hard negatives). Critical parity rule: the query string at TRAIN must match the query at SERVE (the §4 focused/faceted query), and the doc recipe must match the index recipe (§5). The salvage builder already has `--compact-query` and `--enrich-tags` — wire them to emit the §4-winner query format. Turn filter: turn-1 always; turns >1 require `MOVES_TOWARD_GOAL` (strips noisy off-goal mid-conversation targets; note the train/test goal-progress shift — do not filter the TEST/dev eval the same way).
+### D1. Training data pipeline (reuse + harden the prior scripts)
+Use `build_colbert_train_data` (`mcrs/training/colbert_*.py`). Each row = (query, gold doc, hard negatives). Critical parity rule: the query string at TRAIN must match the query at SERVE (the §4 focused/faceted query), and the doc recipe must match the index recipe (§5). The builder already has `--compact-query` and `--enrich-tags` — wire them to emit the §4-winner query format. Turn filter: turn-1 always; turns >1 require `MOVES_TOWARD_GOAL` (strips noisy off-goal mid-conversation targets; note the train/test goal-progress shift — do not filter the TEST/dev eval the same way).
 
 ### D2. Hard negative mining (the quality driver)
 Mine hard negatives from multiple first-stage retrievers (BM25 + dense + same-artist union pool — already done), 15–30 per positive. Two upgrades:
@@ -168,7 +168,7 @@ Pool-reranking cannot raise recall (it only reorders the union's own pool). Buil
 ## 11. Open decisions (resolve before Phase 2)
 
 - Primary objective: RESOLVED (2026-06-18) — contrastive only (the original way); distillation deferred (D3).
-- Build basis: RESOLVED — reuse/promote the original implementation code (salvage scripts + `recall-union-lgbm` branch), adapt to the fresh-start data contracts, rather than writing from scratch.
+- Build basis: RESOLVED — reuse/promote the original implementation code (`mcrs/training/colbert_*.py` + `nb/phase2_colbert_finetune.ipynb`; design also recoverable from the `recall-union-lgbm` branch), adapt to the fresh-start data contracts, rather than writing from scratch.
 - Base model: continue GTE-ModernColBERT vs benchmark answerai-colbert-small. (Recommend GTE-ModernColBERT first.)
 - Adaptation: LoRA vs full + mixed-batch. (Recommend LoRA — reuses K3b infra, forgetting-safe.)
 - Output dim: 128 then shrink, vs train 64 directly. (Recommend confirm 128, then 64.)
@@ -185,5 +185,5 @@ Fine-tune: PyLate docs (lightonai.github.io/pylate) — Distillation/Contrastive
 - `mcrs/retrieval/fusion.py` / `46_R7` — per-channel routing, `topk_internal≥K` assert, segment weight (A1,C3,C4).
 - `mcrs/retrieval/colbert_channel.py` — `from_pylate` PLAID + smoke-test cache (C1,C2); 64-dim (B5).
 - `nb/phase1_colbert_probe.ipynb` — PLAID restored + self-heal (done); A/B matrix harness (A2–A5).
-- `salvage/scripts/build_colbert_train_data.py`, `train_colbert.py`, `build_colbert_index.py` — promote out of salvage; add teacher-score / Distillation path (D3), parity preflight (D6).
-- `salvage/mcrs/retrieval_modules/colbert_late.py` — `make_colbert_doc_text_fn` single-source doc text.
+- `mcrs/training/colbert_*.py` (`build_colbert_train_data`, `train_colbert`, `build_colbert_index`) + `nb/phase2_colbert_finetune.ipynb` — add teacher-score / Distillation path (D3), parity preflight (D6).
+- `mcrs/retrieval/colbert_channel.py` — `colbert_doc_text` single-source doc text.

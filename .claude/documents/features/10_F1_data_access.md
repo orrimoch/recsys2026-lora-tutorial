@@ -87,7 +87,7 @@ gold track for turn `t` is returned **only** by `Conversations.gold(...)` — ne
 - `Catalog.track_ids` (the `all_tracks` split) is **the** universe. Every retrieval channel emits ids
   passed through `canonical_track_id` before fusion; F3 asserts each channel output `⊆ track_ids`.
 - `canonical_track_id` is the **single** normalizer (matches F2 §4 "one id space"). It must NOT be
-  confused with salvage `strip_track_id_prefix` in `colbert_late.py`, which is a doc-**text** helper,
+  confused with the prior `strip_track_id_prefix` doc-**text** helper,
   not an id normalizer (plan §7.3 req #1 explicitly warns against leaning on it). Initial body:
   strip surrounding whitespace + any `track_id: ` prefix, NFC-normalize, then require exact membership
   in `track_ids` (raise/log on miss). The exact set of transforms is fixed in **P0 EDA** by inspecting
@@ -96,13 +96,13 @@ gold track for turn `t` is returned **only** by `Conversations.gold(...)` — ne
   what makes "brute-force cosine over the full catalog = one matmul" (plan §insight 2) correct.
 
 ### 4.2 Catalog metadata
-- Port the salvage `MusicCatalogDB` pattern: build `{track_id: row}` once, share across call sites
-  (salvage already added a process-wide `_SHARED_METADATA` cache for exactly this — see Reuse).
+- Follow the prior `MusicCatalogDB` pattern: build `{track_id: row}` once, share across call sites
+  (a process-wide `_SHARED_METADATA` cache served exactly this — see Reuse).
 - `metadata()` returns the raw row. Fields (verified from `dataset_info.json`): `track_id` (str),
   and **List[str]** fields `ISRC`, `track_name`, `artist_name`, `album_name`, `tag_list`, `artist_id`,
   `album_id`; plus `popularity` (float64), `release_date` (str), `duration` (int64).
   **Note:** name/artist/album/tags are *lists*, not scalars — `id_to_metadata` must `", ".join(...)`
-  (matching salvage `format_catalog_track_text`). A1 (enrichment) and R3/R4 (BM25/dense docs) consume
+  (matching the prior `format_catalog_track_text`). A1 (enrichment) and R3/R4 (BM25/dense docs) consume
   `id_to_metadata`. **Enriched layering (A1 wiring):** `id_to_metadata(tid, enriched=True)` returns
   A1's enriched `doc_text` for covered tracks and falls back to the raw doc otherwise; F1 loads/merges
   A1's enriched-corpus parquet (keyed by canonical `track_id`, path/hash from config) — A1 produces it,
@@ -160,16 +160,17 @@ gold track for turn `t` is returned **only** by `Conversations.gold(...)` — ne
 - All loaders are read-only and deterministic given `seed` (stable row order, sorted id sets).
 
 ## 5. Reuse
-- **Catalog:** port `salvage/mcrs/db_item/music_catalog.py` (`MusicCatalogDB`) — keep its
-  process-wide `_SHARED_METADATA` cache and the `format_catalog_track_text` single-source doc
-  rendering (`salvage/mcrs/retrieval_modules/track_text.py`); **rebuild the surrounding `Catalog`**
-  to add `track_ids`/`id_to_index`/`__contains__` (salvage exposes only `id_to_metadata`). **Port + extend.**
-- **User profile:** port `salvage/mcrs/db_user/user_profile.py` (`UserProfileDB`) → adapt into F2
-  `UserProfile`. Pristine equivalents (`music-crs-baselines/mcrs/db_item/music_catalog.py`,
-  `.../db_user/user_profile.py`) are the simpler reference — start from salvage (caching + canonical
-  text already solved). **Port + adapt.**
-- **Embeddings / ids / conversation→TurnContext loaders:** **new (rewrite)** — salvage had no central
-  embedding loader, no canonical id normalizer, and no causal `TurnContext` builder.
+- **Catalog:** the prior `MusicCatalogDB` pattern (recoverable from the old git branches —
+  recall-union-lgbm, stage-b-cross-encoder, fresh-model, exp/*) had a process-wide `_SHARED_METADATA`
+  cache and a `format_catalog_track_text` single-source doc rendering; **rebuild the surrounding
+  `Catalog`** to add `track_ids`/`id_to_index`/`__contains__` (the prior DB exposed only
+  `id_to_metadata`). **Rebuild, reapplying the cache + single-source-text patterns.**
+- **User profile:** the prior `UserProfileDB` pattern (recoverable from the old git branches) →
+  adapt into F2 `UserProfile`. Pristine equivalents (`music-crs-baselines/mcrs/db_item/music_catalog.py`,
+  `.../db_user/user_profile.py`) are the simpler reference; the prior DB had already solved caching +
+  canonical text. **Rebuild + adapt.**
+- **Embeddings / ids / conversation→TurnContext loaders:** **new (rewrite)** — there was no central
+  embedding loader, no canonical id normalizer, and no causal `TurnContext` builder in the prior tree.
 - **Config shape:** clone `music-crs-baselines/config/llama1b_bm25_devset.yaml` (verified keys:
   `item_db_name`, `user_db_name`, `track_split_types`, `user_split_types`, `corpus_types`,
   `cache_dir`) for the `data.*`/`paths.*` block; the F2 schema owns the typed config object.

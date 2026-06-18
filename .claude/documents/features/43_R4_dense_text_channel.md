@@ -68,7 +68,7 @@ by weighted RRF (`46_R7_…`); `topk` here is the channel's `topk_internal` (≥
 - The catalog matrix `M` is `(n_tracks ≈ 47k, dim)`, **row-aligned to `Catalog.id_to_index`** (the
   load-bearing F1 guarantee). Query batch `Q` is `(b, dim)`. Both L2-normalized ⇒ cosine = dot:
   `scores = Q @ M.T` → `(b, n_tracks)`. Top-`topk` per row via `np.argpartition(-row, topk)[:topk]`
-  then `argsort` of that slice (the salvage pattern), mapping index→`track_id` via `index_to_id`.
+  then `argsort` of that slice (the established pattern), mapping index→`track_id` via `index_to_id`.
 - 47k×1024 fp32 ≈ 190 MB; one matmul per batch is milliseconds. **No FAISS/ANN.** The §8 / plan §11
   contingency: *if* P0 ever confirms a true ~1M catalog, swap the matmul for an ANN index behind the
   same `batch_text_to_item_retrieval` surface — F1's contract and this channel's interface are
@@ -82,8 +82,10 @@ by weighted RRF (`46_R7_…`); `topk` here is the channel's `topk_internal` (≥
   - **`provided` backend:** `TrackEmbeddings.matrix(modality)` is already row-aligned to
     `id_to_index` (F1 §4.3 guarantee). Init still asserts `M.shape[0] == len(catalog)` and
     spot-checks `M[id_to_index[tid]] == TrackEmbeddings.vector(tid, modality)` for a sample.
-- Salvage `dense_local`/`dense_precomputed` carry their **own** `track_ids` list inside the pickle
-  and zip it to rows — on port this is replaced by the F1 id space: build/verify `M` *from*
+- The prior `dense_local`/`dense_precomputed` impls (recoverable from the old git branches —
+  `recall-union-lgbm`, `stage-b-cross-encoder`, `fresh-model`, `exp/*`) carried their **own**
+  `track_ids` list inside the pickle and zipped it to rows — here that is replaced by the F1 id
+  space: build/verify `M` *from*
   `id_to_index` so a channel id can never point at the wrong track. This is the row-alignment guard
   that F1 §6.4 and §8 demand; a misalignment silently scores the wrong track and is invisible to
   recall numbers until audited. See §8.
@@ -100,8 +102,8 @@ by weighted RRF (`46_R7_…`); `topk` here is the channel's `topk_internal` (≥
     (`"Represent this sentence for searching relevant passages: "`), `doc_prefix=""`.
   - BGE-M3 / GTE: no prefix (`""`/`""`).
   The **same** prefix is used to embed docs offline (A1) and queries online here — a prefix
-  train/serve mismatch is a silent recall killer (the salvage `instruct`/`instruct_label` knob exists
-  for exactly this; ported as `query_prefix` + `prefix_label` so different strategies cache to
+  train/serve mismatch is a silent recall killer (the `instruct`/`instruct_label` knob exists
+  for exactly this; carried as `query_prefix` + `prefix_label` so different strategies cache to
   different files). Surface a VISIBLE log of the active `(encoder, query_prefix, doc_prefix)` at init.
 
 ### 4.4 Context-length cap (plan §8)
@@ -110,34 +112,35 @@ by weighted RRF (`46_R7_…`); `topk` here is the channel's `topk_internal` (≥
   always kept, never truncate the latest utterance). This channel sets the tokenizer
   `max_length = query_max_len` (config, default 512) with `truncation=True`; if R1's query still
   exceeds the cap, truncation is **left**-sided so the most-recent intent at the tail survives (the
-  salvage multimodal `truncation_side="left"` lesson). Log a counter of queries that hit the cap (a
+  multimodal `truncation_side="left"` lesson). Log a counter of queries that hit the cap (a
   P0/§8 signal that R1's compression needs tightening, not a silent drop).
 
 ### 4.5 Normalization & determinism
 - L2-normalize **catalog rows once at load** (`norms = max(‖·‖, 1e-9)`) and **query rows per batch**
-  → cosine = dot (salvage pattern, kept). Store `M` as `float32`.
+  → cosine = dot (the established pattern, kept). Store `M` as `float32`.
 - **Determinism:** encoding under `torch.no_grad()` + `model.eval()`, fixed `seed`, fixed batch size,
   fp32 query output (downcast fp16 weights' output to fp32 before the matmul so scores are
   reproducible across CPU/GPU). Ties in the top-k sort broken by ascending index (stable) so repeated
   runs yield byte-identical id lists. The cosine matmul is order-deterministic for a fixed `M`.
 - **Query cache** (ported, throttled): cache `query_text → embedding` keyed by `(encoder, prefix_label)`;
-  persist at most every `cache_save_every` new entries + an `atexit` flush (the salvage Drive
+  persist at most every `cache_save_every` new entries + an `atexit` flush (the Drive
   write-amplification fix). Cache is a speed optimization only — it never changes results.
 
 ### 4.6 Provided modalities vs. a fresh text encoder (both gated by recall)
 - F1 exposes **6 provided modalities**: `metadata-qwen3_embedding_0.6b`, `lyrics-qwen3_embedding_0.6b`,
   `attributes-qwen3_embedding_0.6b`, `audio-laion_clap`, `image-siglip2`, `cf-bpr`. For a **text**
   dense channel the candidate catalog sources are the three **qwen3** text modalities (default
-  consideration: `metadata-qwen3`, which the salvage `dense_precomputed` used) — query-encoded by the
-  matching `Qwen/Qwen3-Embedding-0.6B` (last-token pooling, left padding — ported verbatim from
-  salvage). `audio-laion_clap`/`image-siglip2`/`cf-bpr` are **not** this channel's concern: CLAP is a
+  consideration: `metadata-qwen3`, which the prior `dense_precomputed` impl used) — query-encoded by the
+  matching `Qwen/Qwen3-Embedding-0.6B` (last-token pooling, left padding — the established
+  recipe). `audio-laion_clap`/`image-siglip2`/`cf-bpr` are **not** this channel's concern: CLAP is a
   separate R6 audio channel, `cf-bpr` is R5's CF channel; SigLIP image is not a text source.
 - **Decision is an ablation, not a default-by-fiat.** Treat the *freshly-encoded BGE-large doc/query*
   path (`source: "encoded"`) as the **default** dense source (plan §7.2.2 primary), and the
   *provided qwen3 modality* path (`source: "provided"`) as the **ablation alternative** (cheaper — no
   catalog embedding pass — but fixed-encoder, fixed-doc-text). P0/§7-E2 keeps whichever gives higher
   dev recall@K and unique recall; both are wired behind this one channel so the sweep is a config flip.
-- **User-aware variant (optional, off):** the salvage `dense_multimodal_local` injects the user CF
+- **User-aware variant (optional, off):** the prior `dense_multimodal_local` impl (recoverable from
+  the old git branches) injects the user CF
   vector into the query embedding (per-user query). It is a distinct trained model; if ever revived it
   ports as a `source: "multimodal"` backend that *uses* `user_ids` (cache key = `(query, user_id)`).
   Default off — it is gated separately under R5/R6, not the plain text channel.
@@ -150,22 +153,23 @@ by weighted RRF (`46_R7_…`); `topk` here is the channel's `topk_internal` (≥
   default = no accidental personalization leak in the plain channel.
 
 ## 5. Reuse
-- **Port + extend** `salvage/mcrs/retrieval_modules/dense_local.py` (fresh-encoder catalog pickle +
-  sentence-transformers query encoding + matmul top-k) and `dense_precomputed.py` (provided-modality
+- **Recoverable from the old git branches** (`recall-union-lgbm`, `stage-b-cross-encoder`,
+  `fresh-model`, `exp/*`): the prior `dense_local` impl (fresh-encoder catalog pickle +
+  sentence-transformers query encoding + matmul top-k) and `dense_precomputed` (provided-modality
   catalog + Qwen3-Embedding last-token/left-pad query encoding). Keep: the matmul/top-k path, the
   L2-normalize-on-load, the shared-encoder singleton, the throttled `atexit` query cache.
 - **Pristine reference:** `music-crs-baselines/.../retrieval_modules/bert.py` — the simpler dense
-  baseline; consult for the canonical bi-encoder shape, but start from salvage (caching + prefix +
+  baseline; consult for the canonical bi-encoder shape, but start from the prior impl (caching + prefix +
   multi-instance sharing already solved).
-- **Changes on port (the F2/F1 adaptation):** (1) drop the in-pickle `track_ids` zip — build/verify
+- **Changes on adoption (the F2/F1 adaptation):** (1) drop the in-pickle `track_ids` zip — build/verify
   `M` *from* F1 `id_to_index` (§4.2 guard); (2) read doc text via `Catalog.id_to_metadata(enriched=True)`
-  instead of the salvage doc builder; (3) replace `instruct`/`instruct_label` with config
+  instead of the prior doc builder; (3) replace `instruct`/`instruct_label` with config
   `query_prefix`/`doc_prefix`/`prefix_label`; (4) canonicalize every returned id via
   `canonical_track_id`; (5) match the exact F2 `batch_text_to_item_retrieval(queries, topk,
   batch_context, user_ids)` signature; (6) merge `dense_local` + `dense_precomputed` behind one
-  `source` switch. **Do not** carry over salvage's artist-mean imputation as default — that was a
+  `source` switch. **Do not** carry over the artist-mean imputation as default — that was a
   qwen3-empty-row workaround; only enable it for the `provided` backend if P0 finds empty modality rows.
-- **`dense_multimodal_local.py`** is **referenced, not ported now** — kept as the blueprint for the
+- **`dense_multimodal_local`** is **referenced, not adopted now** — kept as the blueprint for the
   gated `source:"multimodal"` user-aware variant (§4.6) under R5/R6.
 
 ## 6. Eval & acceptance gate
@@ -211,7 +215,7 @@ by weighted RRF (`46_R7_…`); `topk` here is the channel's `topk_internal` (≥
   both doc (A1) and query embedding; visible init log; prefix baked into the cache key.
 - **Wrong dim / empty provided rows** (qwen3 empty embeddings, or mixing a 768-dim encoder query with
   a 1024-dim catalog matrix) → matmul error or garbage. Guard: assert `Q.dim == M.dim`; for `provided`,
-  detect empty rows and either impute (artist-mean, salvage path) or fail loudly per config.
+  detect empty rows and either impute (artist-mean path) or fail loudly per config.
 - **Unnormalized vectors** → dot ≠ cosine, popular/long docs dominate. Guard: L2-normalize on load +
   per batch; assert unit norm in tests.
 - **Silent over-length truncation of the latest utterance** → loses active intent. Guard: left-side
@@ -227,7 +231,7 @@ by weighted RRF (`46_R7_…`); `topk` here is the channel's `topk_internal` (≥
 - **Catalog-size surprise (47k vs 1M)** → brute force too slow. Guard: P0 asserts the count; ANN swap
   behind the same interface is the documented contingency, not a silent default.
 - **GPU OOM on a 4B encoder** → not applicable to BGE-large/E5-large (≤0.5B) at fp16; if a larger
-  encoder is ablated, the salvage `resolve_st_dtype` fp16-on-CUDA + sub-batching path bounds memory.
+  encoder is ablated, the `resolve_st_dtype` fp16-on-CUDA + sub-batching path bounds memory.
 
 ## 9. Config knobs (types validated by the F2 loader; values from P0/§7-E2)
 Per-channel `retrieval.channels[]` entry: `label` (e.g. `"dense_bge"`), `type: "dense_text"`,
@@ -243,7 +247,7 @@ Per-channel `retrieval.channels[]` entry: `label` (e.g. `"dense_bge"`), `type: "
 - `dense.normalize` (default `true`), `dense.batch_size` (default `32`), `dense.dtype` (default `"auto"`).
 - `dense.cache_dir`, `dense.cache_save_every` (default `2000`) — query-embedding cache throttle.
 - `dense.enriched_docs` (default `true`) — read A1-enriched doc text vs raw `corpus_types`.
-- `dense.impute_empty` (default `false`) — provided-modality empty-row imputation (salvage artist-mean).
+- `dense.impute_empty` (default `false`) — provided-modality empty-row imputation (artist-mean).
 - inherited: `seed`, `segment.cold_threshold` (for the cold/warm recall split in §6).
 
 ## 10. Definition of Done & review checklist
@@ -258,7 +262,7 @@ Per-channel `retrieval.channels[]` entry: `label` (e.g. `"dense_bge"`), `type: "
 - [ ] `recall@{50,100,200,500}` overall + cold/warm + unique recall logged for the chosen encoder;
       `encoded` vs `provided` A/B logged; encoder/source locked in `config/<exp>.yaml`.
 - [ ] Context-cap (left-truncation + cap-hit counter) implemented; latest utterance preserved.
-- [ ] Code review approved; no `Any` in public signature; no salvage in-pickle `track_ids` zip left.
+- [ ] Code review approved; no `Any` in public signature; no in-pickle `track_ids` zip left.
 
 ## 11. Build order & dependencies
 **Built in Phase 1 after A1 (enriched docs + catalog embedding for the `encoded` backend) and R1

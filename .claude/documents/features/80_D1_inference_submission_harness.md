@@ -14,14 +14,14 @@ Lives in `mcrs/run/harness.py` + `nb/inference_blindA.ipynb`.
 def run_inference(split: str, cfg: "RunConfig") -> list[SubmissionRow]: ...
     # loads artifacts by Hub revision, runs the spine per turn, returns SubmissionRows
 def write_submission(rows: list[SubmissionRow], path: str) -> None: ...  # strict JSON, ensure_ascii=False
-def precheck(path: str, catalog: "Catalog") -> None: ...                 # salvage precheck_prediction.py
+def precheck(path: str, catalog: "Catalog") -> None: ...                 # mcrs/run/harness.py validate_submission + nb blind guards
 ```
 
 **Wiring (the ordered spine D1 calls per turn, all causal):**
 `F1.Conversations.turns → R1 (build Query) → [R2 refine, gated] → channels R3/R4/R5/R6 → R7 fuse (→ Candidate pool) → K1 features → K2 rerank (→ K3 stack/re-score, gated) → L1 filter (→ ≤20 ids) → S1 respond → assemble SubmissionRow`. Then `write_submission` → `precheck` → (dev only) F3 `score_official`.
 
 ## 3. Dependencies
-Every module (F1–S1) + F3 (`score_official`). Reuse/extend pristine `music-crs-baselines/run_inference_devset.py` / `run_inference_blindset.py` / `mcrs/crs_baseline.py` as the run spine; salvage `precheck_prediction.py` (validation) + `blind_a_score_tracker.py` (score log). Loads trained artifacts (K2 model; K3/S1/SASRec LoRA adapters) **by HF Hub revision**.
+Every module (F1–S1) + F3 (`score_official`). Reuse/extend pristine `music-crs-baselines/run_inference_devset.py` / `run_inference_blindset.py` / `mcrs/crs_baseline.py` as the run spine; `mcrs/run/harness.py` (`validate_submission`) + the notebook's blind guards (validation). A per-submission score log is recoverable from the old git branches (recall-union-lgbm, stage-b-cross-encoder, fresh-model, exp/*). Loads trained artifacts (K2 model; K3/S1/SASRec LoRA adapters) **by HF Hub revision**.
 
 ## 4. Design & logic
 - **Causal orchestration:** for each (session, turn) build the `TurnContext` (≤t) via F1 and run the spine in the fixed order above; gold is never read during inference.
@@ -33,7 +33,7 @@ Every module (F1–S1) + F3 (`score_official`). Reuse/extend pristine `music-crs
 - **Cold-start / missing data:** a turn with no usable channel output still emits 20 via L1 backfill + a (possibly popularity-prior) fill; never crash, never emit < required rows.
 
 ## 5. Reuse
-Extend pristine `run_inference_{devset,blindset}.py` + `crs_baseline.py` (the run spine); reuse salvage `precheck_prediction.py` + `blind_a_score_tracker.py`. **Reuse / extend.**
+Extend pristine `run_inference_{devset,blindset}.py` + `crs_baseline.py` (the run spine); reuse `mcrs/run/harness.py` (`validate_submission`) + the notebook's blind guards (a per-submission score log is recoverable from the old git branches). **Reuse / extend.**
 
 ## 6. Eval & acceptance gate
 End-to-end **schema-valid** `prediction.json` (precheck passes: ≤20, unique, valid ids, all session×turns present, `ensure_ascii=False`); on devset, F3 `score_official` runs and the value **reproduces the Blind A leaderboard** within reconciliation tolerance on the first submit; the full run is reproducible from one config + notebook (config hash recorded).

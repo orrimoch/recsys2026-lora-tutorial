@@ -3,7 +3,7 @@
 > Phase-2 primary reranker. Reorders the fused R7 `Candidate` pool so the gold lands at rank 1–3,
 > consuming **K1's** `Candidate.features` (never recomputing them) and emitting an F2 `RankedList` for
 > L1. A trained artifact (its own §6.1 train→save→eval notebook), but **CPU-only plain LightGBM — NO
-> LoRA** (it is not a foundation model). Grounds in plan §9.1 + salvage `lgbm_rerank.py`. See `000_INDEX.md`.
+> LoRA** (it is not a foundation model). Grounds in plan §9.1 + the prior `lgbm_rerank` harness (recoverable from the old git branches). See `000_INDEX.md`.
 
 ## 1. Purpose
 Learn a `lambdarank` ranking function over the fused candidate pool that pushes the gold track as high as possible (target rank 1–3), turning R7's recall into nDCG. K2 is the precision-stage multiplier on the `R7 → K1 → K2 → L1` spine: it does not retrieve and it does not compute features — it consumes the frozen per-candidate feature vector K1 fills (`Candidate.features`, ordered by `K1.feature_names`) and re-scores it. Its ceiling is R7's recall: a gold absent from the pool can never be reranked into the top-20.
@@ -57,7 +57,7 @@ This is where K2 lives or dies — the prior project repeatedly saw internal val
 
 ### 4.2 Determinism & bagging
 - Fully deterministic: fixed `seed`, `deterministic=True`, `force_row_wise=True`, single-thread or seeded-thread reproducibility recorded. Same data + config + seed → byte-identical booster.
-- Optional multi-seed **bagging** (`n_bag` > 1): train `n_bag` boosters on the same Train with different seeds; serve averages their scores (variance reduction). Backward-compatible with `n_bag=1` (single `booster.txt`). Mirrors the salvage `_predict` averaging.
+- Optional multi-seed **bagging** (`n_bag` > 1): train `n_bag` boosters on the same Train with different seeds; serve averages their scores (variance reduction). Backward-compatible with `n_bag=1` (single `booster.txt`). Mirrors the prior `_predict` averaging.
 
 ### 4.3 Gold-not-in-pool (the recall ceiling, R7 bounds K2)
 When R7's fused pool for a turn does **not** contain the gold, K2 cannot recover it — no reorder of a pool that lacks the answer can score it. Handling:
@@ -66,7 +66,7 @@ When R7's fused pool for a turn does **not** contain the gold, K2 cannot recover
 - **Consequence:** K2's reachable ceiling = R7 fused recall@(pool-K). The gate's "clearly beats RRF-only" is measured on the in-pool turns where K2 can actually act; the absolute dev nDCG@20 ≥ 0.45 is over **all** turns (misses included), so a recall shortfall shows up directly and routes back to R7/A1/R6.
 
 ## 5. Reuse
-Port `salvage/mcrs/rerankers/lgbm_rerank.py` — **keep** the LightGBM load/predict/bagging mechanics (`_predict` score-averaging, text-format `booster.txt` + `metadata.json`, the local-dir/`from_hub`-style load) and the `lambdarank`/`ndcg@20` recipe. **Drop** its feature-computation half (`_compute_feature_matrix`, `_flatten_track_row`, `_load_track_meta`, `_build_pop_rank_pct`, `_load_cfbpr`, the per-candidate metadata/cfbpr/clap lookups) — that is now **K1's** job; the prior project's train/serve skew bugs (dead `pop_rank_pct=0.5`, dropped `same_album`, in-sample `sasrec_rank_inv` leak) all lived in that recompute path and are exactly what the K1/K2 split + frozen `feature_names` eliminates. `relevance_scorer.py` (`qwen_meta_cos`/`bm25_score`) likewise belongs to K1's feature recipes, not K2. **Port the model harness, rewrite the train loop against grouped K1 features.**
+Port the prior `lgbm_rerank` harness (recoverable from the old git branches `recall-union-lgbm`, `stage-b-cross-encoder`, `fresh-model`, `exp/*`) — **keep** the LightGBM load/predict/bagging mechanics (`_predict` score-averaging, text-format `booster.txt` + `metadata.json`, the local-dir/`from_hub`-style load) and the `lambdarank`/`ndcg@20` recipe. **Drop** its feature-computation half (`_compute_feature_matrix`, `_flatten_track_row`, `_load_track_meta`, `_build_pop_rank_pct`, `_load_cfbpr`, the per-candidate metadata/cfbpr/clap lookups) — that is now **K1's** job; the prior project's train/serve skew bugs (dead `pop_rank_pct=0.5`, dropped `same_album`, in-sample `sasrec_rank_inv` leak) all lived in that recompute path and are exactly what the K1/K2 split + frozen `feature_names` eliminates. the prior `relevance_scorer` (`qwen_meta_cos`/`bm25_score`) likewise belongs to K1's feature recipes, not K2. **Port the model harness, rewrite the train loop against grouped K1 features.**
 
 ## 6. Eval & acceptance gate
 **Gate (plan §9.1 DoD):** on **dev** (clean, held out from train + early-stop + HPO), measured by F3's official-parity metrics:
@@ -93,7 +93,7 @@ Reported in `reports/experiments.md` with: the config hash, K1 `feature_names` h
 - **Internal-val-up / dev-down (the canonical trap):** internal val rises while dev falls. Guard: **dev is sacred** (never in train/early-stop/HPO); select on dev only; watch the CV gap; the gate requires beating RRF on *dev*, not on val.
 - **Session leak via wrong CV split:** row/turn-level folds leak in-session continuity → fake val. Guard: session-level splitter + its test.
 - **Train/serve feature skew:** booster expects a `feature_names`/order that K1 no longer emits. Guard: K2 stores `feature_names` + categorical indices in `metadata.json`; `rerank` asserts they match K1's frozen schema; D1 records both hashes.
-- **Recompute drift:** any temptation to compute a feature inside K2 reintroduces the salvage skew bugs. Guard: K2 has **no** catalog/embedding/cfbpr handles; the "feature consumption" test proves it reads only `Candidate.features`.
+- **Recompute drift:** any temptation to compute a feature inside K2 reintroduces the prior skew bugs. Guard: K2 has **no** catalog/embedding/cfbpr handles; the "feature consumption" test proves it reads only `Candidate.features`.
 - **Gold-not-in-pool mishandling:** fabricating a positive or keeping all-negative groups biases LambdaMART. Guard: skip-from-train + the eval test; log skip rate.
 - **Degenerate / leaky dominant feature:** a single feature carries the model (e.g. a model-derived score with in-sample leak, or a rank-inverse re-encoding RRF). Guard: importance audit in FitReport; flag > ~50% single-feature gain on a model-derived feature; prune via K1.
 - **Overfit / underfit:** large train↔val gap (overfit) or both low (underfit). Guard: regularization knobs (§4.1) + the logged gap; gate rejects an uncontrolled gap.

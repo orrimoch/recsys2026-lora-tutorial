@@ -9,7 +9,7 @@
 2. **Interface / contract** — inputs, outputs, types, signature; the up/downstream modules it wires to
 3. **Dependencies** — data, modules, models, external APIs, config
 4. **Design & logic** — algorithm, key decisions, edge cases, causal/no-leak constraints
-5. **Reuse** — salvage/pristine code pointer (plan §6.3 asset map) + keep/port/rewrite call
+5. **Reuse** — prior/pristine code pointer (plan §6.3 asset map) + keep/port/rewrite call
 6. **Eval & acceptance gate** — the module's own metric + threshold + how/where measured
 7. **Tests** — unit, no-leak, wiring/integration, determinism
 8. **Failure modes & guards**

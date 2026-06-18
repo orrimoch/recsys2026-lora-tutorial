@@ -21,7 +21,7 @@ class NeuralReranker:                       # implements F2 Reranker
 **Wiring:** input = K2's `RankedList` (already GBDT-ranked); K3 re-scores the **top `cross_encoder_k`** (≈100–200, from P0/§7.3.1, with `topk_internal ≥ fusion_K ≥ cross_encoder_k`). Two integration modes: (a) **stacking (default)** — `score()` produces an OOF feature consumed by K1 → K2 retrains with it (best-of-both, robust); (b) **final-stage re-score** — `rerank()` directly reorders the top slice. Output `RankedList` → L1.
 
 ## 3. Dependencies
-F2 (`Reranker`, `Candidate`, `RankedList`, `TurnContext`), K1 (stacking feature), K2 (its ranked pool), R7, F3 (nDCG@20 + hit-rank), F1 (`id_to_metadata(enriched=True)` for the doc side). Models (open-weight): `BAAI/bge-reranker-v2-m3` (cross-encoder), ColBERT (pylate/late-interaction). GPU for scoring/training; only top-K pairs/turn. Salvage: `bge_reranker.py`, `multimodal_cross_encoder_rerank.py`, `colbert_late.py`, `scripts/{build_colbert_index,build_colbert_train_data,train_colbert}.py`.
+F2 (`Reranker`, `Candidate`, `RankedList`, `TurnContext`), K1 (stacking feature), K2 (its ranked pool), R7, F3 (nDCG@20 + hit-rank), F1 (`id_to_metadata(enriched=True)` for the doc side). Models (open-weight): `BAAI/bge-reranker-v2-m3` (cross-encoder), ColBERT (pylate/late-interaction). GPU for scoring/training; only top-K pairs/turn. Reference impls: ColBERT in `mcrs/retrieval/colbert_channel.py` + `mcrs/training/colbert_*.py` (+ `nb/phase2_colbert_finetune.ipynb`); the cross-encoder rerankers (`bge_reranker`, `multimodal_cross_encoder_rerank`) are recoverable from the old git branches (`recall-union-lgbm`, `stage-b-cross-encoder`, `fresh-model`, `exp/*`).
 
 ## 4. Design & logic
 - **Cross-encoder:** score `(dialogue-context query, enriched-track-doc)` pairs with `bge-reranker-v2-m3`; strongest single semantic reranker. Doc-side truncation per §8 (truncate the document, preserve the query/latest-intent side).
@@ -31,7 +31,7 @@ F2 (`Reranker`, `Candidate`, `RankedList`, `TurnContext`), K1 (stacking feature)
 - **Stacking vs final-stage:** default **stacking** — K3's score becomes an **OOF** feature (cross-fit per K1 §4.1, else in-sample leak) the GBDT blends with all other signals; usually beats letting the neural model overwrite a well-calibrated GBDT order. Final-stage re-score is the simpler fallback when stacking's OOF plumbing isn't ready.
 
 ## 5. Reuse
-Port `salvage/mcrs/rerankers/bge_reranker.py` + `multimodal_cross_encoder_rerank.py` (cross-encoder), `salvage/mcrs/retrieval_modules/colbert_late.py` + `scripts/{build_colbert_index,build_colbert_train_data,train_colbert}.py` (ColBERT). Prior ColBERT notebooks `salvage/notebooks/82_*`, `90_*` are recipe references only — **no carried-over numbers**. **Port behind gate.**
+Port the cross-encoder rerankers (`bge_reranker` + `multimodal_cross_encoder_rerank`, recoverable from the old git branches `recall-union-lgbm`, `stage-b-cross-encoder`, `fresh-model`, `exp/*`); ColBERT lives in `mcrs/retrieval/colbert_channel.py` + `mcrs/training/colbert_*.py` (index build + train data + train) and `nb/phase2_colbert_finetune.ipynb`. Prior ColBERT notebooks (recoverable from the old git branches) are recipe references only — **no carried-over numbers**. **Port behind gate.**
 
 ## 6. Eval & acceptance gate
 Optional module: ships only if dev **nDCG@20 (and hit-rank) improves over K2-alone** (via F3), within the cross-encoder cost budget (§15). Report the lift per segment (cold/warm) and the latency/cost per turn. If no lift, it does not ship — K2 stands alone.

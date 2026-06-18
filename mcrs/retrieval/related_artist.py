@@ -5,7 +5,7 @@ content/semantic channels structurally miss. Mechanism: from the TRAIN split, co
 artists share a session (`build_artist_cooc`, one count per shared session, replays de-duped). At
 serve: from the session's seen artists, expand to their top co-occurring NEW artists and emit those
 artists' most-popular tracks (minus played). F2 RetrievalChannel; canonical ids; [] on no history.
-Train-only co-occurrence (no dev/blind) → no leak. Port of salvage `related_artist.py` onto F1/F2.
+Train-only co-occurrence (no dev/blind) → no leak. F2-native RelatedArtist channel on F1/F2.
 See `.claude/documents/features/45_R6_extension_channels.md` §4.3.
 """
 from __future__ import annotations

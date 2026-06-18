@@ -58,7 +58,7 @@ def render_per_channel(
 fills `.structured` → each `RetrievalChannel` (R3/R4/R5/R6) reads `Query.text`, or
 `Query.per_channel[label]` when its R7 spec sets `query_key` → R7 fuses. A channel **never**
 re-renders from raw `ctx.utterances`; it consumes the `Query` R1 produced. This guarantees train and
-serve use byte-identical query text per channel (the salvage "single source / byte-identical" rule).
+serve use byte-identical query text per channel (the "single source / byte-identical" rule).
 
 ## 3. Dependencies
 - **Modules:** F2 (`TurnContext`, `Query`, `QueryConfig` slice of the config schema). F1 *optionally*
@@ -86,16 +86,16 @@ serve use byte-identical query text per channel (the salvage "single source / by
   builds the main text by ordering utterances oldest→newest and emphasizing recency via the
   configured `query.recency` strategy:
   - `window` (default): keep the last `recency_window` user turns **verbatim**; drop/compress older
-    ones (the §8 policy — see 4.4). Simple, deterministic, matches salvage `last_user*`/`raw` family.
+    ones (the §8 policy — see 4.4). Simple, deterministic, matches the prior `last_user*`/`raw` family.
   - `repeat`: light recency boost by duplicating the latest user turn once at the front of the text
     (a free, lexical-only "boost" for BM25/dense without a learned weight) — gated, default off.
   - `weighted`: emit a parallel per-token weight vector only if a downstream channel can consume it;
     default off (most encoders/BM25 can't, so it's a no-op — don't ship dead complexity).
-- **User-turn focus.** Like salvage `build_user_dialog`, the default renders **user**-role turn
+- **User-turn focus.** Like the prior `build_user_dialog`, the default renders **user**-role turn
   `content` (assistant/system text and music-turn ids are retrieval noise). A `query.include_roles`
   knob can re-include assistant turns if a P0/ablation shows lift; default = user turns only.
 - **Goal appended (plan §7.1, §5 step 3).** When `ctx.goal` is non-empty, append a labelled
-  `goal: <listener_goal>` line (mirrors salvage `raw_with_goal`'s `f"{base}\ngoal: {gt}" if gt else
+  `goal: <listener_goal>` line (mirrors the prior `raw_with_goal`'s `f"{base}\ngoal: {gt}" if gt else
   base`). Empty/whitespace/None goal degrades **byte-identically** to the goal-less query (no stray
   `goal:` token) — a parity requirement so train==serve and turn-1 cold rows aren't perturbed.
 - **Turn-1 (cold-turn) handling.** A turn-1 ctx may have a single short utterance and often no goal.
@@ -132,23 +132,23 @@ serve use byte-identical query text per channel (the salvage "single source / by
   fits. If even the latest utterance alone exceeds the cap, truncate **that** utterance from its
   **left** (keep its tail — the active ask), and log a WARN (a P0-flagged rarity). The goal line and
   the labelled `culture:` tail (if used) are placed **before** the long-utterance body so a rare
-  right/left-truncation drops query filler, never the durable intent (salvage `compact_colbert`
+  right/left-truncation drops query filler, never the durable intent (the `compact_colbert`
   rationale).
 - **Token-aware, not char-aware.** Measure with the **same tokenizer** the dense encoder uses (§8
   alignment); a char heuristic silently over/under-cuts. BM25 docs are short and unaffected, but R1
   emits one capped text reused across channels — sized to the tightest consumer (the 512-cap encoder).
 - **Train==serve.** The cap, window, tokenizer id, and recency strategy live in `config/*.yaml`; the
   same config object loads in the train-data builder and at serve (F2 §config-drift guard), so the
-  query is byte-identical in both (the salvage `build_colbert_train_data` parity discipline).
+  query is byte-identical in both (the ColBERT train-data parity discipline — `mcrs/training/colbert_*.py`).
 
 ### 4.5 `per_channel` overrides (R7 `query_key` wiring)
 - A channel whose R7 spec sets `query_key` reads its query from `Query.per_channel[query_key]`
-  instead of `Query.text` (R7 §4 "Per-channel queries", salvage `resolve_sub_queries`). R1 populates
+  instead of `Query.text` (R7 §4 "Per-channel queries", the `resolve_sub_queries` contract). R1 populates
   `per_channel` **only** for the keys configured in `query.per_channel_specs` — it does not invent
   keys. Channels with no `query_key` use the shared `Query.text`.
 - **Canonical use-case — a compact / phrase-level query** (e.g. ColBERT, a token-budgeted late-
   interaction channel): goal + culture labelled and placed FIRST, then the bare most-recent user turn
-  (salvage `compact_colbert`), built under a **separate, tighter** `compact_cap`. This is the
+  (the `compact_colbert` recipe), built under a **separate, tighter** `compact_cap`. This is the
   recurring prior-project lesson: the full dialogue truncates to noise past 512 tokens, so phrase-
   level channels get a humble high-signal slice.
 - **Visibility guard (matches R7 §4 / §8):** if a channel declares a `query_key` but R1 produced no
@@ -163,25 +163,26 @@ serve use byte-identical query text per channel (the salvage "single source / by
   a fixed seed/order from F1. No randomness, no clock, no network.
 
 ## 5. Reuse
-- **Port + adapt** salvage `crs_baseline.build_retrieval_query` (the mode zoo: `raw`,
+- **Adapt** the prior `build_retrieval_query` mode zoo (`raw`,
   `raw_with_goal`, `last_user`, `last_user_with_goal`, `compact_colbert`, `bge_m3_structured`) and
-  `sasrec_model.build_user_dialog` / `build_sasrec_context` (user-turns-only + goal-append, with the
-  byte-identical goal-less degradation). **Mine for the rendering recipes, not the outcomes** — the
+  the `build_user_dialog` / `build_sasrec_context` rendering (user-turns-only + goal-append, with the
+  byte-identical goal-less degradation) — recoverable from the old git branches (recall-union-lgbm,
+  fresh-model, exp/*). **Mine for the rendering recipes, not the outcomes** — the
   prior approach plateaued and carried a raw-UUID-in-context bug; keep the *formats* (especially the
   goal/culture-FIRST compact slice and the `f"{base}\ngoal: {gt}" if gt else base` parity rule),
   drop the SASRec/state-tracker coupling and the leaky `thought`/id paths.
 - **Rebuild** the public surface as F2-typed pure helpers (`render_main_query`, `extract_entities`,
-  `render_per_channel`, `QueryBuilder`) — salvage had no central F2 `Query` builder, threaded modes
+  `render_per_channel`, `QueryBuilder`) — the prior approach had no central F2 `Query` builder, threaded modes
   through call sites, and mixed query construction with the responder/SASRec. R1 is the one clean
   source.
-- **Do not reuse** salvage `intent_state`/`state_tracker` outputs as inputs (that's R2's LLM path and
+- **Do not reuse** the prior `intent_state`/`state_tracker` outputs as inputs (that's R2's LLM path and
   was a recorded train/serve-skew hazard); R1 stays model-free.
 
 ## 6. Eval & acceptance gate
 R1 is an **input module** — it has no standalone recall number; its gate is downstream
 **non-regression + causality**:
 1. **Downstream-recall non-regression (the gate).** With R1's query vs a **raw-concat baseline**
-   (newline-join all utterances, no recency/goal/cap policy — salvage `raw`), measured through the
+   (newline-join all utterances, no recency/goal/cap policy — the prior `raw` mode), measured through the
    **R3+R4 channels → R7 fusion** on dev: fused recall@{20,100,200} **≥ baseline** (do **not** make
    recall worse), reported overall + cold/warm + turn-1. Any R1 lever (recency window, goal-append,
    entity-append, compact override) that does **not** hold-or-lift fused recall is dropped/defaulted-

@@ -123,7 +123,7 @@ divergence, and the ablation stays honest because each channel uses its best-sui
 - **Phase B (only if A clears its gate but needs more):** fine-tune on **Train** conversational
   query→gold pairs (contrastive in-batch + optional KD from a cross-encoder teacher; §3.x training
   knobs). The prior (ceilinged) approach invested in ColBERT fine-tuning **early** — do NOT repeat
-  that; gate before sinking GPU. (`salvage/scripts/train_colbert.py` is the port reference.)
+  that; gate before sinking GPU. (`mcrs/training/colbert_*.py` + `nb/phase2_colbert_finetune.ipynb` are the training reference.)
 
 ### 4.6 Canonical ids + row/space alignment
 Every returned id → F1 `canonical_track_id`, and the doc index is built over `Catalog.index_to_id`
@@ -139,12 +139,12 @@ spot-check a pid→track_id round-trip at load (the same row-alignment guard R4 
   distinct representations, not dupes). ColBERT is current-intent only; personalization is orthogonal.
 
 ## 5. Reuse
-- **Port behind the gate:** `salvage/mcrs/retrieval_modules/colbert_late.py` (late-interaction
-  scoring + `strip_track_id_prefix` doc-text helper — note plan §7.3: it's a doc-text helper, **not**
-  an id normalizer; canonicalize ids via F1, not this), `salvage/scripts/build_colbert_index.py`
-  (index build), `salvage/scripts/build_colbert_train_data.py` + `train_colbert.py` (Phase-B
-  fine-tune), nbs `82_colbert_conversational_retrieval` / `90_colbert_dev_experiments` (what was
-  tried + where it ceilinged — mine for the failure mode, don't trust wholesale).
+- **Port behind the gate:** the active ColBERT channel `mcrs/retrieval/colbert_channel.py` (late-interaction
+  scoring + a `strip_track_id_prefix` doc-text helper — note plan §7.3: it's a doc-text helper, **not**
+  an id normalizer; canonicalize ids via F1, not this) for index build, and `mcrs/training/colbert_*.py`
+  + `nb/phase2_colbert_finetune.ipynb` (Phase-B fine-tune). Prior nbs `82_colbert_conversational_retrieval`
+  / `90_colbert_dev_experiments` (what was tried + where it ceilinged — recoverable from the old git
+  branches; mine for the failure mode, don't trust wholesale).
 - **Prefer a maintained library** over hand-rolled: **PyLate** (Sentence-Transformers-based, modular
   train/index/serve) or Stanford **ColBERT** (PLAID). Build the channel as a thin F2 adapter over the
   library so the index/search internals stay swappable.
@@ -232,7 +232,7 @@ Plus the `ColBERTConfig` block this module reads — **the full parameter surfac
 - `colbert.ndocs` — candidates taken to exact MaxSim; default ≈ 256/1024/4096 by k tier.
   *(Verify exact defaults against the installed library version; widen if recall caps.)*
 
-**Training (Phase B only — `salvage/scripts/train_colbert.py`)**
+**Training (Phase B only — `mcrs/training/colbert_*.py` + `nb/phase2_colbert_finetune.ipynb`)**
 - `colbert.train.loss` — `"contrastive"` (in-batch negatives) | `"kldiv"` (KD from a cross-encoder teacher).
 - `colbert.train.teacher` — e.g. `BAAI/bge-reranker-v2-*` for distillation scores.
 - `colbert.train.nway` — negatives per query (in-batch + hard).
@@ -255,7 +255,7 @@ Plus the `ColBERTConfig` block this module reads — **the full parameter surfac
 - [ ] Pretrained Phase-A measured first; Phase-B fine-tune only after the gate; model/source/revision in `config/<exp>.yaml`.
 - [ ] `recall@{50,100,200,500}` overall + cold/warm + unique recall logged; replace-R4 ablation logged.
 - [ ] Determinism tests green; brute-force vs PLAID parity (if PLAID) within recall tolerance.
-- [ ] Code review approved; thin adapter over PyLate/ColBERT; no salvage in-pickle id zip left.
+- [ ] Code review approved; thin adapter over PyLate/ColBERT; no in-pickle id zip left.
 
 ## 11. Build order & dependencies
 **Parked — built in §12 "advanced levers" (plan Day 8–10), after A1 (enriched docs) and R1 (focused

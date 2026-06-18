@@ -16,7 +16,7 @@ catalog by lexical match to the constructed query; it does **not** fuse, rerank,
 
 ## 2. Interface / contract
 Lives in `mcrs/retrieval/bm25_channel.py`. Implements the F2 `RetrievalChannel` Protocol
-(`11_F2_…` §2) verbatim — same signature shape as the salvage RRF sub-retriever, so R7 calls it like
+(`11_F2_…` §2) verbatim — same signature shape as the prior RRF sub-retriever contract, so R7 calls it like
 any channel. Registered under a unique `label` (default `"bm25"`).
 
 ```python
@@ -73,7 +73,7 @@ The index is built over **one doc per canonical `track_id`**, rendered by
 `000_INDEX.md` ("BM25/dense docs come from here — channels never build doc text themselves").
 A1 layers its enrichment (doc2query expansions, inferred mood/genre blurbs for sparse tracks, plan
 §12) **on top of** the base `corpus_types`. The base assumed-doc text is the established
-`format_catalog_track_text` rendering (salvage `track_text.py`):
+`format_catalog_track_text` rendering (owned by A1 / F1 `id_to_metadata`):
 `"track_id: <id>, track_name: <vals>, artist_name: <vals>, album_name: <vals>, release_date: <vals>"`
 with list fields `", ".join(...)`-ed and lowercased — the baseline `corpus_types`
 `[track_name, artist_name, album_name, release_date]` (plan §7.2.1 adds `tags`). `enriched=True` is
@@ -96,9 +96,9 @@ truth, kills train/serve doc-format skew — the documented `bge_m3_ft` failure 
   (sourced from `Catalog.track_ids`), so this is a cheap idempotent pass + a guard — but R3 **must**
   apply it explicitly at its output so the channel boundary is self-certifying (plan §7.3 req #1; F2
   §4 "any channel deriving ids canonicalizes before returning"; R7 then re-asserts `⊆ catalog`). R3
-  never leans on salvage `strip_track_id_prefix` (a doc-text helper, not an id normalizer — F1 §4.1).
+  never leans on `strip_track_id_prefix` (a doc-text helper, not an id normalizer — F1 §4.1).
 
-### 4.3 Pull depth = `topk_internal`, P0-sized, ≥ fusion_K — NOT the salvage default 60 (plan §7.3.1)
+### 4.3 Pull depth = `topk_internal`, P0-sized, ≥ fusion_K — NOT the legacy default 60 (plan §7.3.1)
 R3 is **always** pulled to `topk_internal` before fusion, never the pristine `RRF_MODEL`/`BM25_MODEL`
 default of 60 — "a gold ranked 61–500 in a channel is dropped before fusion ever sees it" (plan
 §7.3.1, the silent-recall-ceiling trap). The value is **set in P0** from the per-channel
@@ -143,7 +143,7 @@ over `test_tracks` or any held split — `all_tracks` only (F1 §8 guard).
   drop the implicit `60`; (4) accept the unused `batch_context`/`user_ids` kwargs for F2 parity;
   (5) skip-if-exists build with a `--force` override (avoid the in-place-overwrite footgun from the
   ColBERT incident in memory). **Reuse + thin adapter.**
-- **Doc-format helpers — PORTED INTO A1, referenced here:** salvage `track_text.py`
+- **Doc-format helpers — OWNED BY A1, referenced here:** `track_text.py`
   (`format_catalog_track_text`) and `bge_m3_format.py` (`format_track_text`, the enriched 5-field
   pipe form) are the canonical renderers. They belong to **A1 / F1 `id_to_metadata`** (the single doc
   source), not R3 — R3 only *consumes* their output via the accessor. Cited so the doc-text contract

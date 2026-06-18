@@ -26,7 +26,7 @@ runs once (resumable), writes artifacts under `paths.cache_root`, and mirrors th
 serve path reads those artifacts exclusively through **F1** — A1 exports no Python surface that R3/R4
 call at request time.
 
-**A1 scripts (ported from salvage — see §5):**
+**A1 scripts (see §5):**
 ```python
 # mcrs/assets/enrich_catalog.py  (CLI; resumable; Gemini-lite, thinking OFF)
 #   reads:  Catalog.metadata(track_id) for every track_id in Catalog.track_ids  (F1, raw row)
@@ -101,7 +101,7 @@ match is preserved and BM25/dense only *gain* the expanded vocabulary. Output is
 indexable line (drop markdown/bullets, collapse whitespace, cap `max_chars` so the embedding stays
 within the encoder seq limit).
 
-**Hallucination guard (prompt, ported verbatim from salvage):** the system prompt forces grounding
+**Hallucination guard (prompt):** the system prompt forces grounding
 strictly in the provided metadata + tags + widely-known facts; if the model doesn't recognize the
 track it must **infer style from tags and invent no specific facts** (no fake dates/collaborators/
 labels/charts). P0 §5 (metadata quality) tells A1 which fields are sparse enough to warrant
@@ -147,7 +147,7 @@ free.
 - API failure on a track → empty enrichment, **not cached**, retried next run; that track's
   `id_to_metadata(enriched=True)` falls back to its raw doc (no gap in the corpus).
 - List[str] metadata fields (`track_name` etc. are **lists**) → `meta_text`/`build_doc_text` `", ".join`
-  them and `_first(...)` for prompt fields (matching salvage); tests cover multi-value rows.
+  them and `_first(...)` for prompt fields; tests cover multi-value rows.
 - A track absent from the enriched parquet (sparse-only run, or a new catalog row) → F1 falls back to
   raw doc; coverage % reflects this.
 - Prompt-injection-safe: track names/tags are sanitized before templating (plan §6.2 guardrail) — they
@@ -162,22 +162,21 @@ conversation/gold data path, and that two runs produce row-identical artifacts g
 pinned LLM/encoder revision.
 
 ## 5. Reuse
-- **Enrichment:** **port** `salvage/scripts/enrich_catalog.py` (doc2query: description + N
-  listener-requests, resumable, checkpointed, non-destructive limited re-run, `build_records`
+- **Enrichment:** the doc2query enrichment lives in `mcrs/enrich/doc2query.py` + `nb/a1_enrich_catalog.ipynb`
+  (description + N listener-requests, resumable, checkpointed, non-destructive limited re-run,
   carry-forward) — its pure helpers (`meta_text`, `build_enrich_prompt`, `clean_enrichment`,
-  `enriched_document`, `select_pending`) are already unit-test-shaped; **extend** to also emit
-  `tags_inferred` and the recipe/`content_hash` columns, and to canonicalize `track_id` via F1.
-  `salvage/scripts/enrich_track_docs.py` (single rich paragraph + HF-local fallback) is the
-  **alternate recipe** — keep its `_hf_generate` path for an API-free run; pick the recipe by P0/gate.
-- **Embedding:** **reuse/port** `salvage/scripts/embed_catalog.py` nearly verbatim — it already has
-  `--doc-source` (enriched parquet), `--doc-col`, fp16-on-CUDA, single batched encode, the
+  `enriched_document`, `select_pending`) are unit-test-shaped; emits
+  `tags_inferred` and the recipe/`content_hash` columns, and canonicalizes `track_id` via F1.
+  The single-rich-paragraph + HF-local-fallback variant is the **alternate recipe** — keep its
+  `_hf_generate` path for an API-free run; pick the recipe by P0/gate.
+- **Embedding:** the catalog embedder lives in `mcrs/enrich/doc2query.py` + `nb/a1_enrich_catalog.ipynb` —
+  it has `--doc-source` (enriched parquet), `--doc-col`, fp16-on-CUDA, single batched encode, the
   `{track_ids, track_mat}` pickle, and `id_to_metadata`/`build_doc_text` recipes. **Extend** to store
   `doc_source_hash` + `model_revision` in the pickle and to push to the Hub.
-- **LLM client:** reuse the ported `GeminiClient` (`thinking_budget=0`, retries, batched threads).
+- **LLM client:** reuse the `GeminiClient` (`thinking_budget=0`, retries, batched threads).
 - **What's new:** the `enriched=` layering lives in **F1's** `id_to_metadata` (A1 only produces the
   parquet); the content-hash cache keys, Hub mirror, `tags_inferred`, and the recall-lift gate harness
-  call are new. Move scripts into `mcrs/assets/` (off `salvage/scripts/`) and align ids to the F1
-  canonical normalizer.
+  call are new. Scripts live in `mcrs/enrich/` and align ids to the F1 canonical normalizer.
 
 ## 6. Eval & acceptance gate
 **Two numbers; both measured via the F3 recall primitives on the P0 dev probe; enrichment is kept

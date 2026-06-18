@@ -53,8 +53,9 @@ F1 (`id_to_metadata(enriched=True)`, `canonical_track_id`, catalog metadata for 
 feature), R7 (`RRFFusion.fuse` candidate pool), A1 (enriched docs / doc2query), P0 (`cross_encoder_k`).
 Libraries: `BAAI/bge-reranker-v2-m3`, `transformers` (`AutoModelForSequenceClassification`, num_labels=1),
 `peft` (LoRA), `sentence-transformers` (serve wrapper), `huggingface_hub` (adapter by revision), Trackio
-(logging). GPU on Colab (MPS too slow for full runs). Recipe-only salvage:
-`salvage/mcrs/training/multimodal_cross_encoder.py` (full-FT + multimodal — reference, not ported).
+(logging). GPU on Colab (MPS too slow for full runs). Recipe-only reference (recoverable from the
+old git branches `recall-union-lgbm`, `stage-b-cross-encoder`, `fresh-model`, `exp/*`): the prior
+full-FT + multimodal cross-encoder trainer — reference, not ported.
 
 ## 4. Design & logic
 
@@ -226,8 +227,8 @@ loss; and rely on the dev nDCG@20 gate as the real check.
 ## 5. Reuse
 Reuse `build_rerank_groups` (pool construction, train==serve), the `cross_encoder.py` truncation helpers,
 `LGBMReranker._session_split`, `score_official`, and `QueryBuilder` (extend, don't fork). Port behind the gate.
-`salvage/mcrs/training/multimodal_cross_encoder.py` and notebooks `82_*`/`90_*` are recipe references only
-(full-FT + multimodal) — this module is text-only LoRA; no carried-over numbers.
+The prior multimodal cross-encoder trainer and notebooks `82_*`/`90_*` (recoverable from the old git
+branches) are recipe references only (full-FT + multimodal) — this module is text-only LoRA; no carried-over numbers.
 
 ## 6. Eval & acceptance gate
 No zero-shot CE baseline is required (per decision). Ships only if dev nDCG@20 improves: (a) K2 vs K2 + K3(fine-

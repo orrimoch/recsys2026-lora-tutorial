@@ -19,7 +19,7 @@ class TopKAssembler:                        # implements F2 Filter
 **Wiring:** input = K2/K3 `RankedList`; output = the ordered ≤20 ids placed on `SubmissionRow.predicted_track_ids` by D1. Pure, deterministic, CPU.
 
 ## 3. Dependencies
-F2 (`Filter`, `RankedList`, `Candidate`), F1 (`Catalog` for the validity guard + `canonical_track_id`; user `history_tids` from `TurnContext`), F3 (nDCG non-regression + diversity), P0 (`gold_in_history_rate` → history-rule default). Salvage: `precheck_prediction.py` (validation hooks). No model/GPU.
+F2 (`Filter`, `RankedList`, `Candidate`), F1 (`Catalog` for the validity guard + `canonical_track_id`; user `history_tids` from `TurnContext`), F3 (nDCG non-regression + diversity), P0 (`gold_in_history_rate` → history-rule default). Validation: `mcrs/run/harness.py` (`validate_submission`) + the notebook's blind guards. No model/GPU.
 
 ## 4. Design & logic
 - **Dedup & uniqueness (hard):** drop duplicate canonical ids, preserve best rank. Output ids must be unique (official scorer raises on dups).
@@ -29,7 +29,7 @@ F2 (`Filter`, `RankedList`, `Candidate`), F1 (`Catalog` for the validity guard +
 - **Validity guard:** every output id ∈ `Catalog.track_ids` (canonical). No catalog subsetting — this only prunes/reorders within the retrieved+reranked set.
 
 ## 5. Reuse
-Dedup/validity/backfill: small new code + the checks in `salvage/scripts/precheck_prediction.py` (reuse as the validator). Tail-MMR: **new** (gated). History-rule: new toggle. **Mostly new (rewrite), reuse precheck.**
+Dedup/validity/backfill: small new code + the checks in `mcrs/run/harness.py` (`validate_submission`) + the notebook's blind guards (reuse as the validator). Tail-MMR: **new** (gated). History-rule: new toggle. **Mostly new (rewrite), reuse the harness validator.**
 
 ## 6. Eval & acceptance gate
 Via F3: output is **always ≤20 unique valid ids** (schema-valid), **nDCG@20 non-regression** vs the raw reranked top-20 (tail-MMR + history-rule must not drop nDCG), and **catalog diversity improves or holds**. The history-rule ships in whichever A/B direction wins on dev nDCG@20.

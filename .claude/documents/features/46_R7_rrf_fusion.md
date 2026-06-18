@@ -2,8 +2,8 @@
 
 > Phase-1 integration hub. Fuses the per-channel ranked lists (R3/R4/R5/R6) into one ordered
 > `Candidate` pool for reranking. Rank-based, training-free, robust. This is where the §7 recall
-> gate (recall@20 ≥ 0.75, recall@200 ≥ 0.90) is met or missed. Grounded in the salvage
-> `rrf.py` (math verified correct in review) + plan §7.3 / §7.3.1. See `000_INDEX.md`.
+> gate (recall@20 ≥ 0.75, recall@200 ≥ 0.90) is met or missed. Grounded in the prior
+> RRF implementation (`rrf.py`, math verified correct in review — recoverable from the old git branches) + plan §7.3 / §7.3.1. See `000_INDEX.md`.
 
 ## 1. Purpose
 Combine the canonical ranked id-lists from all kept retrieval channels into a single fused pool of `Candidate`s (with `rrf_score` + per-channel ranks/scores preserved for K1), sized to the top-K the reranker consumes. Maximize fused recall@K; inject no noise.
@@ -38,15 +38,15 @@ class RRFFusion:                      # implements F2 RetrievalChannel
 - **Config:** `retrieval.fusion.{k, weights, fusion_strategy, channel_quota?}`, `retrieval.channels[]` (label/weight/topk_internal/query_key), `retrieval.topk` (=fusion_K).
 
 ## 4. Design & logic
-- **Per-channel queries:** mirror salvage `resolve_sub_queries` — a channel with `query_key` reads its query from `Query.per_channel[label]` (e.g. ColBERT's compact query); others use `Query.text`. Surface a VISIBLE log if a `query_key` is set but the override is missing (avoid silent fallback — the C2-guard pattern from `rrf.py`).
-- **Pull depth (the §7.3.1 trap):** each channel is pulled to its `topk_internal` (P0-sized, **≥ fusion_K**, target 300–500) *before* fusion — NOT the salvage default of 60. A gold a channel only surfaces at rank 300 must be pulled at ≥300 or fusion never sees it.
+- **Per-channel queries:** mirror the prior `resolve_sub_queries` — a channel with `query_key` reads its query from `Query.per_channel[label]` (e.g. ColBERT's compact query); others use `Query.text`. Surface a VISIBLE log if a `query_key` is set but the override is missing (avoid silent fallback — the C2-guard pattern from `rrf.py`).
+- **Pull depth (the §7.3.1 trap):** each channel is pulled to its `topk_internal` (P0-sized, **≥ fusion_K**, target 300–500) *before* fusion — NOT the prior default of 60. A gold a channel only surfaces at rank 300 must be pulled at ≥300 or fusion never sees it.
 - **Two-tier K:** `fuse(...)` returns the wide pool (K = fusion_K ≈ 300–500) for the GBDT (K2); K3's cross-encoder later re-scores only the GBDT top ~100–200. Invariant `topk_internal ≥ fusion_K ≥ cross_encoder_K`.
 - **Weight sweep:** `fuse_per_sub` is a pure function over cached per-channel rankings, so R7 (and P0) sweep `w_r`/`k` on dev recall without re-running retrieval. Chosen weights lock into `config/<exp>.yaml` (train==serve).
-- **Segment-aware weights (optional):** `cold_weight`/`warm_weight` per channel (salvage `fuse_per_sub_segmented`), keyed off `TurnContext.segment`; default both = `weight` (plain path). Enable only on a P0/ablation per-segment win.
-- **Channel-quota variant (optional, off by default):** salvage `fuse_per_sub_quota` reserves top-q single-channel rescues into the window for orthogonal channels. Treat as a gated lever (plan §7.3 req #2 favors dropping noise over rescuing it); keep behind a flag, default off.
+- **Segment-aware weights (optional):** `cold_weight`/`warm_weight` per channel (`fuse_per_sub_segmented`), keyed off `TurnContext.segment`; default both = `weight` (plain path). Enable only on a P0/ablation per-segment win.
+- **Channel-quota variant (optional, off by default):** `fuse_per_sub_quota` reserves top-q single-channel rescues into the window for orthogonal channels. Treat as a gated lever (plan §7.3 req #2 favors dropping noise over rescuing it); keep behind a flag, default off.
 
 ## 5. Reuse
-Port `salvage/mcrs/retrieval_modules/rrf.py` — `RRF_MODEL` / `fuse_per_sub` / `fuse_per_sub_segmented` / `fuse_per_sub_quota` / `resolve_sub_queries`. **Math verified correct in review (no bug).** Changes on port: (1) raise/require `topk_internal ≥ fusion_K` (don't ship the 60 default); (2) emit F2 `Candidate`s (salvage returned bare id-lists) with ranks/scores for K1; (3) add the `⊆ catalog` assert at the fuse boundary; (4) type against F2. **Port + extend.**
+Port the prior RRF implementation (`rrf.py` — `RRF_MODEL` / `fuse_per_sub` / `fuse_per_sub_segmented` / `fuse_per_sub_quota` / `resolve_sub_queries`; recoverable from the old git branches: recall-union-lgbm, stage-b-cross-encoder, fresh-model, exp/*). **Math verified correct in review (no bug).** Changes on port: (1) raise/require `topk_internal ≥ fusion_K` (don't ship the 60 default); (2) emit F2 `Candidate`s (the prior code returned bare id-lists) with ranks/scores for K1; (3) add the `⊆ catalog` assert at the fuse boundary; (4) type against F2. **Port + extend.**
 
 ## 6. Eval & acceptance gate
 **Gate (plan §7 DoD):** on dev, fused **recall@20 ≥ 0.75** and **recall@200 ≥ 0.90** (F3 `recall_at_k`), reported overall + cold/warm. If recall@200 < 0.90, R7 is NOT done — the gap routes to A1/R6 (enrichment / extension channels) per P0, since no reranker recovers a gold absent from the pool. Secondary: fused recall ≥ the best single channel's recall@K at every K (fusion must not regress its strongest input), and chosen weights logged with the sweep that justified them.

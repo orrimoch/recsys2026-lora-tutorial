@@ -18,12 +18,12 @@ clever idea. Out of scope (these are **R5**): content-kNN-from-history, CF (`use
 same-artist — R6 is strictly the *extension* set beyond those.
 
 ## 2. Interface / contract
-Lives in `mcrs/retrieval_modules/` (new package, ports from salvage). Every R6 retriever is a F2
+Lives in `mcrs/retrieval_modules/` (new package; channel logic recoverable from the old git branches — recall-union-lgbm, stage-b-cross-encoder, fresh-model, exp/*). Every R6 retriever is a F2
 `RetrievalChannel`: it consumes the shared `Query` (or a `per_channel` override) and returns **canonical**
 `track_id`s over `all_tracks`; it does **not** fuse, score-calibrate, or know about other channels.
 
 ```python
-# F2 RetrievalChannel surface (verbatim shape — salvage already conforms):
+# F2 RetrievalChannel surface (verbatim shape — the prior channel impls already conform):
 class <Channel>Retriever:           # implements F2 RetrievalChannel
     label: str                      # unique fusion label, e.g. "clap_text", "related_artist", "sasrec"
     def batch_text_to_item_retrieval(
@@ -66,7 +66,7 @@ to **K1** (e.g. SASRec score / rank, CLAP cosine) — built once, used in both s
 ## 4. Design & logic
 
 ### 4.1 Common contract & invariants (all R6 channels)
-- **Canonical ids at the boundary.** Every list returned passes through `canonical_track_id` *before* return; F3/R7 assert `⊆ catalog`. A channel that derives ids (related-artist from artist→tids, propose-ground from grounded NN) canonicalizes on the way out (plan §7.3 req #1). Channels must **not** lean on salvage `strip_track_id_prefix` (a doc-text helper, not an id normalizer).
+- **Canonical ids at the boundary.** Every list returned passes through `canonical_track_id` *before* return; F3/R7 assert `⊆ catalog`. A channel that derives ids (related-artist from artist→tids, propose-ground from grounded NN) canonicalizes on the way out (plan §7.3 req #1). Channels must **not** lean on `strip_track_id_prefix` (a doc-text helper, not an id normalizer).
 - **No-signal turn → `[]`.** A row with no usable signal (cold turn for CLAP-audio/related-artist/SASRec-history) returns an empty list, contributing **0** to fusion — never a degenerate or padded list. This is what makes a channel safely cold/warm-gated by P0.
 - **Pull depth.** Each channel pulls to its `topk_internal` (P0-sized, ≥ fusion-K, target 300–500) so a gold it only surfaces at rank ~300 still reaches fusion (§7.3.1 trap). For the composed LLM channels, `topk_per_doc/proposal ≈ 100` per seed then RRF up to `topk`.
 - **Determinism.** Fixed model revisions + fixed tie-break (sort by score then id); LLM channels are deterministic *through the cache* (same prompt revision ⇒ same cached output).
@@ -102,19 +102,19 @@ All three are **composed**: an LLM generator/extractor + a **dense inner retriev
 - **Cost (§15):** LLM channels are **cost-capped + dry-run-counted** before any full-dev pass; per-turn ≈ 8k dev turns × (1 small generation) — lite model, short outputs, batched. Prompt-injection-safe (sanitize track names/utterances before templating). Train==serve LLM revision + prompt + truncation. A channel that doesn't move unique recall is **dropped** (it only adds latency/cost otherwise, §6.2).
 
 ## 5. Reuse
-Port **behind the gate** from `salvage/mcrs/retrieval_modules/` (plan §6.3 asset map — "Port behind gate"); each already matches the F2 `batch_text_to_item_retrieval` shape, so porting is canonicalization + F2 typing + wiring, not reshaping.
+Build **behind the gate** in `mcrs/retrieval_modules/` (plan §6.3 asset map — "Port behind gate"). The prior channel impls already match the F2 `batch_text_to_item_retrieval` shape, so adopting them is canonicalization + F2 typing + wiring, not reshaping. `related_artist` lives in the active tree at `mcrs/retrieval/related_artist.py`; the other channels below are recoverable from the old git branches (recall-union-lgbm, stage-b-cross-encoder, fresh-model, exp/*).
 
-| Channel | Salvage source | Call |
+| Channel | Prior source | Call |
 |---|---|---|
-| `clap_audio` | `clap_recall.py` (+ `clap_similarity.py` `clap_session_query`/`load_clap_lookup`) | **Port** — swap `load_clap_lookup` for F1 `TrackEmbeddings.matrix("audio-laion_clap")`; canonicalize output. |
-| `clap_text` | `clap_text.py` (`ClapTextRetriever`, `_load_clap_text_encoder`, `cosine_topk`) | **Port** — keep the module-level encoder cache + `ClapTextModelWithProjection`; F1 audio matrix. |
-| `related_artist` | `related_artist.py` (`RelatedArtistRetriever`) | **Port** — keep the cached co-occurrence build; route catalog access through F1 `Catalog`; canonicalize. |
-| `propose_ground` | `propose_ground_channel.py` (+ `query_rewriters/propose_ground.py` generator) + `hyde_qwen3.py` `rrf_fuse` | **Port behind gate** — inner = R4 dense; add `(session,turn)` cache + cost cap. |
-| `hyde` | `hyde_qwen3.py` (`HydeQwen3Retriever`, `rrf_fuse`) + `query_rewriters/hyde.py` | **Port behind gate** — same. |
-| `structured_query` | `structured_query_channel.py` + `query_rewriters/structured_query.py` | **Port behind gate** — reuse R2's extractor/cache. |
-| `sasrec` | `sasrec_seq.py` (`SasrecRetriever`), `sasrec_model.py` (`SasrecModel`, `build_user_dialog`, `prior_turns`, `next_item_loss`, `apply_item_feats_mode`) | **Port behind gate.** |
-| SASRec training | `scripts/train_sasrec.py` | **Port** into a §6.1 phase notebook (session-disjoint val, Hub save). |
-| RRF helper | `hyde_qwen3.rrf_fuse` (intra-channel seed fusion) | **Reuse** (distinct from R7's cross-channel RRF). |
+| `clap_audio` | `clap_recall.py` (+ `clap_similarity.py` `clap_session_query`/`load_clap_lookup`) — old branches | **Port** — swap `load_clap_lookup` for F1 `TrackEmbeddings.matrix("audio-laion_clap")`; canonicalize output. |
+| `clap_text` | `clap_text.py` (`ClapTextRetriever`, `_load_clap_text_encoder`, `cosine_topk`) — old branches | **Port** — keep the module-level encoder cache + `ClapTextModelWithProjection`; F1 audio matrix. |
+| `related_artist` | `mcrs/retrieval/related_artist.py` (`RelatedArtistRetriever`) | **Port** — keep the cached co-occurrence build; route catalog access through F1 `Catalog`; canonicalize. |
+| `propose_ground` | `propose_ground_channel.py` (+ `query_rewriters/propose_ground.py` generator) + `hyde_qwen3.py` `rrf_fuse` — old branches | **Port behind gate** — inner = R4 dense; add `(session,turn)` cache + cost cap. |
+| `hyde` | `hyde_qwen3.py` (`HydeQwen3Retriever`, `rrf_fuse`) + `query_rewriters/hyde.py` — old branches | **Port behind gate** — same. |
+| `structured_query` | `structured_query_channel.py` + `query_rewriters/structured_query.py` — old branches | **Port behind gate** — reuse R2's extractor/cache. |
+| `sasrec` | `sasrec_seq.py` (`SasrecRetriever`), `sasrec_model.py` (`SasrecModel`, `build_user_dialog`, `prior_turns`, `next_item_loss`, `apply_item_feats_mode`) — old branches | **Port behind gate.** |
+| SASRec training | `scripts/train_sasrec.py` — old branches | **Port** into a §6.1 phase notebook (session-disjoint val, Hub save). |
+| RRF helper | `hyde_qwen3.rrf_fuse` (intra-channel seed fusion) — old branches | **Reuse** (distinct from R7's cross-channel RRF). |
 
 **Do not port** the rejected feature variants (`clap_similarity` *reranker* feature, `sequential_rerank`) — R6 is recall channels only; rerank features are K1.
 
@@ -163,7 +163,7 @@ Port **behind the gate** from `salvage/mcrs/retrieval_modules/` (plan §6.3 asse
 - [ ] No-leak tests green (≤t inputs, train-only co-occurrence, no gold/future in LLM prompt, SASRec selection on val only).
 - [ ] All §7 tests green incl. SASRec `user_dialog`-missing warn guard and CLAP-tower API pin.
 - [ ] Kept channels' weights/keep-list locked in `config/<exp>.yaml` (train==serve); dropped channels left in code, `enabled:false`.
-- [ ] Code review approved; no `Any` in public signatures; salvage ports cleaned (no rejected rerank-feature variants pulled in).
+- [ ] Code review approved; no `Any` in public signatures; ports cleaned (no rejected rerank-feature variants pulled in).
 
 ## 11. Build order & dependencies
 **Built after the core channels and P0**, in parallel as each earns its gate. Depends on: F1 (ids, catalog, audio matrix, conversations), F2 (contracts), R1 (`Query` + `batch_context`), R4 (the dense inner retriever for the LLM-grounded channels), F3 (recall/unique-recall), P0 (cold/warm threshold + channel-keep priors + `topk_internal`). The **SASRec** channel additionally requires its training phase notebook to produce a Hub checkpoint **before** it can be wired/gated. **Blocks:** R7 (only kept R6 channels enter the fusion keep-list) — and R6 is itself the **gap-router target**: if R7's fused recall@200 < 0.90, the shortfall routes here (and to A1) for an orthogonal wall-cracker channel (R7 §6). SASRec also later feeds **K1** as a rerank feature. Off the strict critical path to the first submission, but the primary lever for clearing the recall wall toward the 0.55 target.

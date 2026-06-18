@@ -38,7 +38,7 @@ F2 (`Candidate`, `TurnContext`, config), F1 (`Catalog` metadata + `id_to_index`,
 - **Train==serve:** `feature_names` order + every transform is identical in training-data prep and serve; locked in config.
 
 ## 5. Reuse
-Port the feature logic in `salvage/mcrs/rerankers/lgbm_rerank.py` (`build_lgbm_features`) + `relevance_scorer.py` — **keep the feature recipes, rebuild the OOF/cross-fit harness** for any model-derived feature (the prior project shipped an in-sample-leaking `sasrec_rank_inv`; the recipe is fine, the in-sample fit was the bug). **Port + harden.**
+Port the feature logic from the prior project's `build_lgbm_features` + `relevance_scorer` (recoverable from the old git branches `recall-union-lgbm`, `stage-b-cross-encoder`, `fresh-model`, `exp/*`) — **keep the feature recipes, rebuild the OOF/cross-fit harness** for any model-derived feature (the prior project shipped an in-sample-leaking `sasrec_rank_inv`; the recipe is fine, the in-sample fit was the bug). **Port + harden.**
 
 ## 6. Eval & acceptance gate
 Not a metric module on its own; gate = **purity + no-leak tests pass** and **K2 trained on these features beats RRF-only on dev nDCG@20** (i.e. the features carry signal). Diagnostic: feature importances are sane (no single degenerate feature dominating via leak); train↔dev gap controlled when K2 uses them.

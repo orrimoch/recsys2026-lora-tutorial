@@ -110,8 +110,8 @@ The harness owns the **harness-level** leak checks (F2 owns the per-record causa
 These run as tests (§7) and as optional runtime asserts in `score_diagnostic(strict=True)`.
 
 ## 5. Reuse
-- **Salvage/pristine pointer (plan §6.3):** the official evaluator package `music-crs-evaluator/` is **pristine** — import its three metric functions and replicate `evaluate_devset.py`'s aggregation. **Keep verbatim; do not port or rewrite the metric math.**
-- F3 itself (`mcrs/eval/*`) is **new** (rewrite): the salvage code had only the official script and no diagnostic/segmented layer, no parity test, no F2 typing.
+- **Pristine pointer (plan §6.3):** the official evaluator package `music-crs-evaluator/` is **pristine** — import its three metric functions and replicate `evaluate_devset.py`'s aggregation. **Keep verbatim; do not port or rewrite the metric math.**
+- F3 itself (`mcrs/eval/*`) is **new** (rewrite): the prior tree had only the official script and no diagnostic/segmented layer, no parity test, no F2 typing.
 - Config-shape clone from `music-crs-baselines/config/llama1b_*.yaml` for the `eval.*` block.
 
 ## 6. Eval & acceptance gate

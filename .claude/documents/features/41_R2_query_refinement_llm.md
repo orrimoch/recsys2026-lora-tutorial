@@ -16,7 +16,7 @@ the dialogue, resolve coreference, and surface content/new-artist golds that the
 ## 2. Interface / contract
 A pure-by-default refiner that **reads** an R1 `Query` (+ its `TurnContext`) and **returns an enriched
 `Query`** — it never mutates in place, never opens the catalog, never picks track ids. Lives in
-`mcrs/query_refine.py`; per-rewriter logic ports from `salvage/mcrs/query_rewriters/*`.
+`mcrs/query_refine.py`; the per-rewriter logic is recoverable from the old git branches (recall-union-lgbm, fresh-model, exp/*).
 
 ```python
 class QueryRefiner(Protocol):
@@ -43,9 +43,9 @@ read fixed keys. R2 does not invent new `Query` fields.
 
 ## 3. Dependencies
 - **Upstream:** R1 (`40_*`) supplies the `Query.text` R2 enriches; F2 (`Query`/`TurnContext`); P0 (cold/warm split, recall-ceiling table to judge "did it lift the wall").
-- **Models / APIs:** **Gemini-lite** (`gemini-2.5-flash-lite` — *verify current id*, plan §13) via `GeminiClient` (salvage `gemini_propose.py`, lazy import + `GEMINI_API_KEY`/`GOOGLE_API_KEY`), temperature 0; or a local open-weight LM wrapper (`.lm/.tokenizer/.device`) for the HyDE/structured-query salvage paths. The SDK/key are needed only when a cache miss actually generates.
+- **Models / APIs:** **Gemini-lite** (`gemini-2.5-flash-lite` — *verify current id*, plan §13) via `GeminiClient` (lazy import + `GEMINI_API_KEY`/`GOOGLE_API_KEY`, temperature 0); or a local open-weight LM wrapper (`.lm/.tokenizer/.device`) for the HyDE/structured-query paths (recoverable from the old git branches recall-union-lgbm, fresh-model, exp/*). The SDK/key are needed only when a cache miss actually generates.
 - **Data:** none new — reads turns from `TurnContext` only (≤t). Catalog metadata is **not** consulted (R2 is content-agnostic; grounding artist/track names to ids is R6 propose-ground, not R2).
-- **Config:** `retrieval.query_refine.*` (§9). Cache dir under `experiments/cache/` (NOT `./cache` — `run_inference_devset.py` `rm -rf cache`'s the default; see salvage `state_tracker.py` warning).
+- **Config:** `retrieval.query_refine.*` (§9). Cache dir under `experiments/cache/` (NOT `./cache` — `run_inference_devset.py` `rm -rf cache`'s the default; a recorded prior-project gotcha).
 
 ## 4. Design & logic
 **Each rewriter is an independently-gated variant** (none pre-judged — plan §6.3 reuse policy). R2 is
@@ -57,14 +57,14 @@ agreed `Query` fields. The two primary variants:
   (`parse_structured_json` → tolerant JSON parse → `_coerce` to fixed keys → `assemble_query` content-only
   string) is **pure and unit-tested**; only the generation is integration. Writes `Query.structured`
   and (optionally) `per_channel["bm25_structured"]`/`["dense_structured"]` = `assemble_query(structured)`.
-  The salvage schema (`genres/moods/era/culture/intent/wants_new_artist`) is **remapped** to the §7.1
+  The prior schema (`genres/moods/era/culture/intent/wants_new_artist`) is **remapped** to the §7.1
   keys (genres→genre, moods→mood, intent→positive_attrs, +explicit negative_attrs/seed_artists) — keep
   the remap in one pure function so train==serve.
 - **`hyde`** (port `hyde.py`): one LLM call emits an intent line + N pseudo-track descriptions; the
   pseudo-doc(s) become a **dense** query via `per_channel["dense_hyde"]` (R4 reads it). Pure
   `parse_hyde_output`; falls back to the intent line, then to `query.text`, if no docs parse.
 
-Other salvage variants are **optional, config-listed, not enabled by default** — each must pass its own
+Other prior-project variants (recoverable from the old git branches recall-union-lgbm, fresh-model, exp/*) are **optional, config-listed, not enabled by default** — each must pass its own
 ablation before shipping: `cmqr.py` (multi-query rewrite + inner-RRF — note its retriever-shaped wrapper
 belongs at the channel layer, not here; R2 only emits the rewrites, R7 fuses), `intent_state.py` (Q*
 self-contained query — **off by default; train/serve skew is its known risk, so it only ships if it
@@ -89,14 +89,14 @@ re-proves a fresh recall@K win under the §8 alignment rule — nothing pre-judg
 - **Cache by content hash, per (session,turn).** Key = `sha1(variant ‖ model_revision ‖ prompt_hash ‖
   causal_input)` so a prompt/revision change invalidates cleanly (alignment, §8). Cache value stores the
   parsed structure + the assembled strings + the inputs' hash. Idempotent: the dev pass and re-runs never
-  re-call the LM. (Salvage caches by conversation-hash *or* (session,turn) — we standardize on the
+  re-call the LM. (The prior project cached by conversation-hash *or* (session,turn) — we standardize on the
   content-hash key so a turn whose text is identical across runs reuses the cache, and a prompt bump busts it.)
 - **Prompt-injection safety.** Utterances and any echoed track/artist names are **sanitized before
   templating** (strip/escape control + template/code-fence/role markers like `</s>`, `<|...|>`,
   `system:`, ``` ``` ```, `{...}`); the user content is wrapped in an explicit delimiter the system
   prompt is told to treat as untrusted data, not instructions. Output is parsed as **data only**
   (JSON/numbered-list), never executed; any field that isn't in the fixed schema is discarded by `_coerce`.
-- **Determinism.** Temperature 0 / greedy; longest-first batch with left-pad + attention mask (salvage)
+- **Determinism.** Temperature 0 / greedy; longest-first batch with left-pad + attention mask
   so batched == single-sequence decode and the hash cache stays valid regardless of batching.
 
 ## 5. Reuse
@@ -108,8 +108,8 @@ Per plan §6.3 (Query refinement = **Port behind gate**):
   shaped), `state_tracker.py` (state extraction).
 - **Off by default / re-prove fresh:** `intent_state.py` (Q* — watch for train/serve skew; ship only on a measured win).
 - **Not R2 (belongs to R6 channels):** `artist_hypothesis.py`, `propose_ground.py`, `gemini_propose.GeminiProposeGenerator` — they turn query → *seed items*, which is a retrieval channel, not query enrichment. R2 references them only to delineate scope.
-- **Rewrite (new):** the orchestrator `QueryRefiner` + the salvage→§7.1 schema remap + the unified
-  content-hash cache + the injection sanitizer (salvage had per-rewriter ad-hoc caching and no central
+- **Rewrite (new):** the orchestrator `QueryRefiner` + the prior→§7.1 schema remap + the unified
+  content-hash cache + the injection sanitizer (the prior project had per-rewriter ad-hoc caching and no central
   sanitizer).
 
 ## 6. Eval & acceptance gate

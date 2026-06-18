@@ -19,7 +19,7 @@ class Responder:                            # implements F2 Responder
 **Wiring:** input = `TurnContext` (profile, goal, last utterance + dialogue gist) + the final top tracks (names/artists/tags, from L1's ids resolved via F1 `Catalog.metadata`); output = `SubmissionRow.predicted_response` (set by D1). Cached per (session, turn).
 
 ## 3. Dependencies
-F2 (`Responder`, `TurnContext`), F1 (`Catalog.metadata` to render track names/artists/tags; `UserProfile`), F3 (Distinct-2 + proxy-judge harness). Model: a hosted lite LLM (Gemini-lite, e.g. `gemini-2.5-flash-lite` — **verify current id**) via API key, OR an open-weight LoRA-fine-tuned responder (its own §6.1 notebook → Hub adapter). Salvage: `gemini_responder.py`, `precheck_prediction.py` (response checks). No retrieval coupling.
+F2 (`Responder`, `TurnContext`), F1 (`Catalog.metadata` to render track names/artists/tags; `UserProfile`), F3 (Distinct-2 + proxy-judge harness). Model: a hosted lite LLM (Gemini-lite, e.g. `gemini-2.5-flash-lite` — **verify current id**) via API key, OR an open-weight LoRA-fine-tuned responder (its own §6.1 notebook → Hub adapter). Reuse: `mcrs/lm/responder.py` (Gemini responder), `mcrs/run/harness.py` (`validate_submission`) + the notebook's blind guards (response checks). No retrieval coupling.
 
 ## 4. Design & logic
 - **Grounding inputs:** user profile (age/gender/country, preferred_musical_culture), conversation goal, last utterance + brief dialogue gist, and the **actual** top recommended tracks (names/artists/tags). Grounding in real retrieved tracks + user specifics is what Personalization rewards.
@@ -29,7 +29,7 @@ F2 (`Responder`, `TurnContext`), F1 (`Catalog.metadata` to render track names/ar
 - **Injection safety:** sanitize track names/utterances before templating (they're untrusted text). Length cap; non-empty guarantee (fallback template if the model returns empty/degenerate).
 
 ## 5. Reuse
-Port `salvage/scripts/gemini_responder.py` (prompt + batched/cached Gemini calls) → adapt to the F2 `Responder` interface + S1 grounding inputs. **Port + adapt.** LoRA responder path = a new §6.1 notebook if pursued.
+Port `mcrs/lm/responder.py` (prompt + batched/cached Gemini calls) → adapt to the F2 `Responder` interface + S1 grounding inputs. **Port + adapt.** LoRA responder path = a new §6.1 notebook if pursued.
 
 ## 6. Eval & acceptance gate
 Via the F3 proxy-judge + Distinct-2: **proxy Personalization/Explanation up vs. a plain baseline** and **Distinct-2 ≥ 0.2558** (the baseline floor); every response non-empty & within length. The official LLM-judge score is the real target but unavailable offline — the proxy is explicitly labeled and not over-trusted.

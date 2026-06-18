@@ -15,7 +15,7 @@ P0 is a **notebook + report**, not an importable module. It *consumes* F1 loader
 - `mcrs.data` (F1): the class-based loaders — `Catalog` (canonical `track_id` set, `id_to_index`, `id_to_metadata`), `TrackEmbeddings`, `UserEmbeddings`, `Users.profile`, `Conversations.turns(split)` / `Conversations.gold(...)`, plus `canonical_track_id`/`canonical_track_ids` and `segment_for`. See `10_F1_data_access.md` interfaces — P0 does **not** re-implement loaders.
 - `mcrs.eval` (F3): `recall_at_k(retrieved, gold, k)` and `hit_rank(...)` primitives, the official-parity metric helpers, and the session-disjointness / no-leak split asserts. See `12_F3_eval_harness.md` — P0 reuses F3's recall function so probe numbers match the harness exactly.
 - `mcrs.contracts` (F2): `TurnContext`, `UserProfile`, `Query` — P0 builds causal `TurnContext`s per dev turn to feed the probe; it does **not** define new types.
-- Channel implementations for the probe (salvage, ported **read-only** for measurement, not yet wired into serve): BM25, dense-text, content-kNN-from-history, CF (see §4, §5 channel list).
+- Channel implementations for the probe (prior impls recoverable from the old git branches — recall-union-lgbm, stage-b-cross-encoder, fresh-model, exp/* — rebuilt **read-only** for measurement, not yet wired into serve): BM25, dense-text, content-kNN-from-history, CF (see §4, §5 channel list).
 
 **Outputs:**
 - `reports/eda.md` — findings, plots, and the **DESIGN PARAMETERS** block (§6 deliverable).
@@ -35,7 +35,7 @@ P0 is a **notebook + report**, not an importable module. It *consumes* F1 loader
 
 ## 3. Dependencies
 - **Data/modules:** F1 (loaders + canonical id set) and F3 (recall/metric helpers + split asserts) **must exist first** — P0 is on the critical path right after them (`F1+F2+F3 → P0`, `000_INDEX.md` graph). F2 contracts for `TurnContext`.
-- **Models/assets (probe-only, read-only):** the four candidate generators of §5.7 — BM25 index over baseline track docs, a dense-text encoder (default BGE-large-en-v1.5, per plan §7.2), the provided track embeddings (content-kNN), the provided user embeddings (CF). These are ported salvage/baseline impls used **only to measure ceiling**; the final serve channels are chosen+built in Phase 1 from P0's keep-list.
+- **Models/assets (probe-only, read-only):** the four candidate generators of §5.7 — BM25 index over baseline track docs, a dense-text encoder (default BGE-large-en-v1.5, per plan §7.2), the provided track embeddings (content-kNN), the provided user embeddings (CF). These are prior/baseline impls (recoverable from the old git branches — recall-union-lgbm, stage-b-cross-encoder, fresh-model, exp/*) used **only to measure ceiling**; the final serve channels are chosen+built in Phase 1 from P0's keep-list.
 - **External APIs:** none. P0 is pure analysis; no LLM calls (enrichment/refinement levers are *informed* by P0 but not run here).
 - **Config:** `config/eda.yaml` — probe knobs (§9).
 - **Libraries:** `numpy`, `pandas`/`polars`, `matplotlib`, a tokenizer matching the chosen encoder (for token-length measurement, §5.3), `rank_bm25` or the baseline BM25, `transformers`/`sentence-transformers` for the dense encoder.

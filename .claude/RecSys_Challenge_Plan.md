@@ -13,11 +13,10 @@
 This plan is written for execution by Claude Code on the local repo, with train/inference on HF Colab notebooks connected to the repo/branch, and models saved/loaded from the HF Hub. We fine-tune and ship **open-weight** models (via the Hub); **external LLM APIs (e.g. Gemini-lite) are permitted by the competition rules** and used — behind cost/cache gates — for catalog/doc enrichment, query refinement, and the response (see §6.2). Every phase has: an objective, exact deliverables, configs, tests, a code-review gate, and a "definition of done". Work fail-fast: the cheapest baseline that touches the whole pipeline first, then iterate on the highest-ROI lever.
 
 **Repo starting point (branch `fresh-start`, as of 2026-06-16).** This is a deliberate clean reset. What's on disk:
-- **`music-crs-baselines/`** — *pristine* official baseline (re-cloned from `nlp4musa/music-crs-baselines`, unmodified). The clean foundation: `mcrs/retrieval_modules/{bm25,bert}.py` (the only two retrievers it ships — **no fusion/RRF, no dense-precomputed**), `mcrs/{crs_baseline.py,db_item/music_catalog.py,db_user/user_profile.py,lm_modules/llama.py}`, runnable `run_inference_devset.py` / `run_inference_blindset.py`, `config/` (4 official YAMLs), `lowerbound/{popularity,random_sample}.py`, and the official **`tips/`** notes (`add_reranker.md`, `improve_item_representation.md`, `use_genrec_semantic_ids.md`). RRF fusion + all extra channels come from `salvage/` (see §6.3).
+- **`music-crs-baselines/`** — *pristine* official baseline (re-cloned from `nlp4musa/music-crs-baselines`, unmodified). The clean foundation: `mcrs/retrieval_modules/{bm25,bert}.py` (the only two retrievers it ships — **no fusion/RRF, no dense-precomputed**), `mcrs/{crs_baseline.py,db_item/music_catalog.py,db_user/user_profile.py,lm_modules/llama.py}`, runnable `run_inference_devset.py` / `run_inference_blindset.py`, `config/` (4 official YAMLs), `lowerbound/{popularity,random_sample}.py`, and the official **`tips/`** notes (`add_reranker.md`, `improve_item_representation.md`, `use_genrec_semantic_ids.md`). RRF fusion + all extra channels are reimplemented in our own `mcrs/` package (see §6.3).
 - **`music-crs-evaluator/`** — *pristine* official scorer: `evaluate_devset.py`, `make_ground_truth.py`, `metrics/{metrics_recsys.py,metrics_diversity.py}`. **This is the only local source of truth for metrics.**
-- **`salvage/`** — **prior-work reference implementations** from the previous (ceilinged) approach, kept to *mine and port from*, NOT to trust wholesale. Contains `notebooks/{82_colbert_conversational_retrieval,90_colbert_dev_experiments}.ipynb`, a full custom `mcrs/` package (retrieval/rerank/query-rewrite modules — see §6 asset map), and `scripts/` (ColBERT/SASRec training + index build, catalog enrichment, Gemini responder, prediction precheck, score tracker).
 - **`data/`** — official `TalkPlayData-Challenge-*` datasets on disk (gitignored); re-fetch via `download_data.py` / `download_data.sh`.
-- Env: `requirements.txt`, `setup_venv.sh` (venv `recsys26`, Python 3.10). New work lands in fresh `nb/` notebooks + a rebuilt `mcrs/` (see §6); salvage code is ported in only behind an ablation gate.
+- Env: `requirements.txt`, `setup_venv.sh` (venv `recsys26`, Python 3.10). New work lands in fresh `nb/` notebooks + a rebuilt `mcrs/` (see §6); prior-work code is reintroduced only behind an ablation gate.
 
 **Non-negotiable rules (read before any code):**
 1. Retrieve candidates from the **entire** track catalog (`track_split_types: ["all_tracks"]`). Never subset/filter the catalog universe at retrieval time — doing so invalidates the submission. (Post-retrieval *reranking/pruning to the top-20* is allowed and expected; that is not catalog subsetting.)
@@ -154,13 +153,12 @@ Two-stage retrieve-then-rank, plus a decoupled responder — mirrors and extends
                           submission JSON (strict schema)
 ```
 
-Repo layout — **build the clean spine on the pristine baseline; port salvage code in only behind an ablation gate.** Target structure (new code under `mcrs/` extending the pristine baseline package; do not edit the `music-crs-{baselines,evaluator}/` pristine copies):
+Repo layout — **build the clean spine on the pristine baseline; reintroduce prior-work code only behind an ablation gate.** Target structure (new code under `mcrs/` extending the pristine baseline package; do not edit the `music-crs-{baselines,evaluator}/` pristine copies):
 ```
 music-crs-baselines/   PRISTINE — foundation: mcrs/{retrieval_modules/{bm25,bert}(only these),
                        crs_baseline,db_item/music_catalog,db_user/user_profile,lm_modules/llama},
                        run_inference_{devset,blindset}.py, config/, lowerbound/, tips/
 music-crs-evaluator/   PRISTINE — scorer: evaluate_devset.py, make_ground_truth.py, metrics/
-salvage/               PRIOR WORK to mine/port (see asset map below) — do not trust wholesale
 mcrs/  (new, ours)     retrieval_modules/  rerank_modules/  filter_modules/
                        lm_modules/(query_refine, responder)  enrich/  # extends baseline
 config/                *.yaml per experiment   (shape from baseline config/*.yaml)
@@ -185,7 +183,7 @@ Each phase that trains a model gets **its own self-contained notebook** — clon
 7. **Done criteria** — adapter on Hub + metrics logged + gate check printed.
 
 **Shared notebooks:**
-- **`nb/inference_blindA.ipynb`** — the submission path: load the chosen trained adapter(s) **by Hub revision**, run the full `retrieve → rerank → filter → respond` pipeline over **Blind A**, write the strict submission JSON, run `salvage/scripts/precheck_prediction.py`, and (optionally) the Blind-A score tracker. One config in → one validated `prediction.json` out. (A Blind B variant is a one-line dataset swap at the end.)
+- **`nb/inference_blindA.ipynb`** — the submission path: load the chosen trained adapter(s) **by Hub revision**, run the full `retrieve → rerank → filter → respond` pipeline over **Blind A**, write the strict submission JSON, validate it via `mcrs/run/harness.py` (`validate_submission`) + the notebook blind guards, and (optionally) the Blind-A score tracker. One config in → one validated `prediction.json` out. (A Blind B variant is a one-line dataset swap at the end.)
 - **`nb/experiments.ipynb`** — scratch/ablation space: sweep configs, compare encoders/features/levers, quick recall-ceiling probes. Promising settings get promoted into a phase notebook's `config/<exp_id>.yaml`; this notebook is **not** a source of canonical artifacts.
 
 *(`phase0_eda.ipynb` is analysis-only — no training; `phase3_filter` is rule/config logic exercised inside the experiments + inference notebooks rather than a trainer. When building these, lean on the `huggingface-llm-trainer` skill for the TRL/PEFT + Hub-saving patterns.)*
@@ -196,40 +194,40 @@ LLMs (open-source on Colab, or a hosted lite model — competition rules permit 
 
 | Stage | LLM applied to | What it does | Existing code to port |
 |---|---|---|---|
-| **Catalog / docs** (offline, cached) | the catalog & track docs | doc2query expansion; descriptive blurbs / inferred mood-genre tags for sparse tracks; metadata normalization → richer BM25 + dense docs (closes the conversational↔metadata vocabulary gap — a big recall lever) | `salvage/scripts/{enrich_catalog,enrich_track_docs}.py` |
-| **Query** (per-turn, cached) | the dialogue | structured intent extraction (`{positive/negative attrs, seed_artists, mood, genre, era}`); query rewrite/expansion; **HyDE** pseudo-doc as a dense query; artist/genre hypothesis; multi-query | `salvage/mcrs/query_rewriters/{structured_query,intent_state,hyde,cmqr,gemini_propose,artist_hypothesis,state_tracker,propose_ground}.py` |
-| **Retrieval** (channel) | query → seed items | LLM proposes seed tracks/artists that become a retrieval channel (propose-ground); HyDE doc feeds the dense channel | `salvage/mcrs/retrieval_modules/{propose_ground_channel,hyde_qwen3,structured_query_channel}.py` |
-| **Reranking** | (query, candidate) | LLM listwise/pointwise reranking of the top-K; LLM relevance score folded in as a **GBDT feature** (stacking, §9.2) rather than replacing the GBDT | `salvage/mcrs/rerankers/{llm_listwise_rerank,two_stage_listwise,pro_rank}.py` |
+| **Catalog / docs** (offline, cached) | the catalog & track docs | doc2query expansion; descriptive blurbs / inferred mood-genre tags for sparse tracks; metadata normalization → richer BM25 + dense docs (closes the conversational↔metadata vocabulary gap — a big recall lever) | `mcrs/enrich/doc2query.py` + `nb/a1_enrich_catalog.ipynb` |
+| **Query** (per-turn, cached) | the dialogue | structured intent extraction (`{positive/negative attrs, seed_artists, mood, genre, era}`); query rewrite/expansion; **HyDE** pseudo-doc as a dense query; artist/genre hypothesis; multi-query | recoverable from old git branches (`recall-union-lgbm`, `exp/*`) |
+| **Retrieval** (channel) | query → seed items | LLM proposes seed tracks/artists that become a retrieval channel (propose-ground); HyDE doc feeds the dense channel | recoverable from old git branches (`recall-union-lgbm`, `exp/*`) |
+| **Reranking** | (query, candidate) | LLM listwise/pointwise reranking of the top-K; LLM relevance score folded in as a **GBDT feature** (stacking, §9.2) rather than replacing the GBDT | recoverable from old git branches (`stage-b-cross-encoder`, `exp/*`) |
 | **Filtering** | candidate set + intent | intent-consistency / constraint checks (era/explicit/language/"not too slow"); LLM-assisted dedup of near-duplicate tracks — within the retrieved set only (never re-opens the catalog, §11) | new (small), gated |
-| **Response** | top-20 + profile | grounded, personalized, varied explanation (the LLM-judge track) | `salvage/scripts/gemini_responder.py` |
+| **Response** | top-20 + profile | grounded, personalized, varied explanation (the LLM-judge track) | `mcrs/lm/responder.py` |
 
 **Guardrails:** prompt-injection-safe (sanitize track names/utterances before templating); train/serve use the **same** LLM revision + prompt + truncation (alignment rule, §8); the LLM never sees a future turn or the gold track; and an LLM lever that doesn't move recall@K, hit-rank, or the judge score in ablation is dropped (it adds latency/cost otherwise). See §7.1 (query), §9.2 (rerank), §11 (filter), §12 (catalog/doc levers), §13 (response) for the per-stage detail.
 
 ### 6.3 Asset reuse map — pipeline component → existing code → status
 
-> **Reuse policy:** salvage modules are working *implementations* — treat each as a fast head-start to re-evaluate fresh against the rebuilt spine, **not** as settled results (we're not bound by prior outcomes). **Reuse** = clean, generic infra worth keeping. **Port behind gate** = adopt if it earns an ablation win here and now. **Rebuild** = re-architect fresh. The pristine baseline is always the starting foundation. Every component gets a clean, current ablation — nothing is pre-judged.
+> **Reuse policy:** prior-work modules are working *implementations* — treat each as a fast head-start to re-evaluate fresh against the rebuilt spine, **not** as settled results (we're not bound by prior outcomes). **Reuse** = clean, generic infra worth keeping. **Port behind gate** = adopt if it earns an ablation win here and now. **Rebuild** = re-architect fresh. The pristine baseline is always the starting foundation. Every component gets a clean, current ablation — nothing is pre-judged.
 
 | Component (plan §) | Existing code | Status |
 |---|---|---|
 | Scorer / ground truth (§2, §14) | `music-crs-evaluator/{evaluate_devset,make_ground_truth}.py`, `metrics/*` | **Reuse verbatim** (source of truth) |
 | Inference harness (§14, §18) | `music-crs-baselines/run_inference_{devset,blindset}.py`, `crs_baseline.py` | **Reuse / extend** as the run spine |
-| BM25 sparse (§7.2.1) | pristine `…/retrieval_modules/bm25.py`; salvage `track_text.py`, `bge_m3_format.py` (doc formatting) | **Reuse** (BM25); port doc-format helpers |
-| Dense-text (§7.2.2) | pristine `…/retrieval_modules/bert.py`; salvage `dense_local.py`, `dense_precomputed.py`, `dense_multimodal_local.py` | **Port behind gate** (pick encoder per §7 ablation) |
-| Content-kNN / history (§7.2.3) | salvage `session_history.py`, `session_cf.py`, `same_artist.py`, `related_artist.py` | **Port behind gate** |
-| CF retriever (§7.2.4) | salvage `cf_bpr.py` (user-emb · track-emb) | **Port behind gate** |
-| Audio/CLAP channels (§7) | salvage `clap_recall.py`, `clap_similarity.py`, `clap_text.py` | **Port behind gate** |
-| RRF fusion (§7.3) | salvage `…/retrieval_modules/rrf.py` (weighted RRF; **not in pristine baseline**) | **Port + verify** (math checked correct; size `topk_internal`/K per §7.3.1) |
-| LightGBM LambdaMART rerank (§9.1) | salvage `rerankers/lgbm_rerank.py`, `relevance_scorer.py` | **Port behind gate** (primary reranker) |
-| Cross-encoder / ColBERT rerank (§9.2) | salvage `rerankers/bge_reranker.py`, `multimodal_cross_encoder_rerank.py`; `retrieval_modules/colbert_late.py`; `scripts/{build_colbert_index,build_colbert_train_data,train_colbert}.py`; nbs `82_*`, `90_*` | **Port behind gate** (this is where prior work went deep) |
-| Listwise / two-stage rerank (§9.2) | salvage `rerankers/{llm_listwise_rerank,two_stage_listwise,pro_rank,chain}.py` | **Port behind gate** |
-| Sequential model (SASRec) (§7/§9 feature) | salvage `retrieval_modules/{sasrec_model,sasrec_seq}.py`, `scripts/train_sasrec.py` | **Port behind gate** |
-| Query refinement (§7.1, §12) | salvage `query_rewriters/{structured_query,intent_state,hyde,cmqr,gemini_propose,artist_hypothesis,state_tracker,propose_ground}.py` | **Port behind gate** |
-| Catalog enrichment / doc2query (§12) | salvage `scripts/{enrich_catalog,enrich_track_docs}.py` (Gemini doc2query, resumable) | **Port behind gate** |
-| Catalog embedding (§7, §15) | salvage `scripts/embed_catalog.py` | **Reuse / port** (one-time, cached to Hub) |
-| Responder (§13) | salvage `scripts/gemini_responder.py`; pristine `lm_modules/llama.py` | **Port behind gate** (the LLM-judge lever) |
-| Submission validation (§11, §14) | salvage `scripts/precheck_prediction.py` | **Reuse** (schema/precheck guard) |
-| Score tracking (§18) | salvage `scripts/blind_a_score_tracker.py` | **Reuse** |
-| Semantic-ID / generative retrieval (§12) | salvage `retrieval_modules/sid_generator.py`; baseline `tips/use_genrec_semantic_ids.md` | **Research lever** — pursue if it helps clear 0.55 |
+| BM25 sparse (§7.2.1) | pristine `…/retrieval_modules/bm25.py`; doc-format helpers recoverable from old git branches (`recall-union-lgbm`) | **Reuse** (BM25); port doc-format helpers |
+| Dense-text (§7.2.2) | pristine `…/retrieval_modules/bert.py`; dense-encoder variants recoverable from old git branches (`recall-union-lgbm`) | **Port behind gate** (pick encoder per §7 ablation) |
+| Content-kNN / history (§7.2.3) | `mcrs/retrieval/related_artist.py`; session-history / session-CF / same-artist variants recoverable from old git branches (`recall-union-lgbm`) | **Port behind gate** |
+| CF retriever (§7.2.4) | `cf_bpr` (user-emb · track-emb) recoverable from old git branches (`recall-union-lgbm`) | **Port behind gate** |
+| Audio/CLAP channels (§7) | CLAP recall/similarity/text channels recoverable from old git branches (`recall-union-lgbm`) | **Port behind gate** |
+| RRF fusion (§7.3) | weighted RRF (**not in pristine baseline**) recoverable from old git branches (`recall-union-lgbm`) | **Port + verify** (math checked correct; size `topk_internal`/K per §7.3.1) |
+| LightGBM LambdaMART rerank (§9.1) | LGBM reranker + relevance scorer recoverable from old git branches (`recall-union-lgbm`) | **Port behind gate** (primary reranker) |
+| Cross-encoder / ColBERT rerank (§9.2) | ColBERT training/index → `mcrs/training/colbert_{data,finetune,index}.py` + `nb/phase2_colbert_finetune.ipynb`; cross-encoder / late-interaction variants recoverable from old git branches (`stage-b-cross-encoder`) | **Port behind gate** (this is where prior work went deep) |
+| Listwise / two-stage rerank (§9.2) | listwise / two-stage / chain rerankers recoverable from old git branches (`stage-b-cross-encoder`) | **Port behind gate** |
+| Sequential model (SASRec) (§7/§9 feature) | SASRec model/seq + training recoverable from old git branches (`fresh-model`, `exp/*`) | **Port behind gate** |
+| Query refinement (§7.1, §12) | query rewriters (structured-query / intent-state / HyDE / CMQR / propose-ground / …) recoverable from old git branches (`recall-union-lgbm`, `exp/*`) | **Port behind gate** |
+| Catalog enrichment / doc2query (§12) | `mcrs/enrich/doc2query.py` + `nb/a1_enrich_catalog.ipynb` (Gemini doc2query, resumable) | **Port behind gate** |
+| Catalog embedding (§7, §15) | embed-catalog pass folded into `nb/a1_enrich_catalog.ipynb` | **Reuse / port** (one-time, cached to Hub) |
+| Responder (§13) | `mcrs/lm/responder.py`; pristine `lm_modules/llama.py` | **Port behind gate** (the LLM-judge lever) |
+| Submission validation (§11, §14) | `mcrs/run/harness.py` (`validate_submission`) + notebook blind guards | **Reuse** (schema/precheck guard) |
+| Score tracking (§18) | Blind-A score tracker recoverable from old git branches (`recall-union-lgbm`) | **Reuse** |
+| Semantic-ID / generative retrieval (§12) | SID generator recoverable from old git branches (`exp/*`); baseline `tips/use_genrec_semantic_ids.md` | **Research lever** — pursue if it helps clear 0.55 |
 | Lowerbounds (sanity) | pristine `lowerbound/{popularity,random_sample}.py` | **Reuse** (baseline floors) |
 
 ---
@@ -249,7 +247,7 @@ LLMs (open-source on Colab, or a hosted lite model — competition rules permit 
 4. **CF retriever (provided user embedding):** `user_emb · track_emb` top-N. Personalization prior. Degrades for cold users → gated by history length.
 
 ### 7.3 Fusion — (weighted) Reciprocal Rank Fusion
-`score(d) = Σ_r w_r / (k + rank_r(d))`, `k≈60`, rank 1-indexed, a doc absent from sub-`r` contributes 0. Rank-based ⇒ robust, no score-scale calibration, no training. With `w_r ≡ 1` this is vanilla RRF; **weights `w_r` are the one real fusion knob** (a strong channel whose gold sits at rank ~30 gets swamped by channels stacking the top — so under-weighting a strong channel silently caps recall). *(Ref: Cormack et al. 2009. Impl: `salvage/mcrs/retrieval_modules/rrf.py` — `RRF_MODEL` / `fuse_per_sub`; it caches per-sub rankings so the weight sweep re-fuses cheaply. Note: the official baseline ships NO fusion — this code is salvage-only and must be re-verified, not assumed correct.)*
+`score(d) = Σ_r w_r / (k + rank_r(d))`, `k≈60`, rank 1-indexed, a doc absent from sub-`r` contributes 0. Rank-based ⇒ robust, no score-scale calibration, no training. With `w_r ≡ 1` this is vanilla RRF; **weights `w_r` are the one real fusion knob** (a strong channel whose gold sits at rank ~30 gets swamped by channels stacking the top — so under-weighting a strong channel silently caps recall). *(Ref: Cormack et al. 2009. Impl: weighted RRF (`RRF_MODEL` / `fuse_per_sub`, caches per-sub rankings so the weight sweep re-fuses cheaply) recoverable from old git branches (`recall-union-lgbm`). Note: the official baseline ships NO fusion — this code is prior-work-only and must be re-verified, not assumed correct.)*
 
 **Fusion-correctness requirements (must all hold or recall numbers lie):**
 1. **One shared ID space.** Every channel must emit *canonical* catalog `track_id`s over the **same** universe (`all_tracks`) before fusion. *(Verified: `bm25.py` returns canonical metadata keys, and `fuse_per_sub` does not re-normalize — it relies on channels being canonical. `strip_track_id_prefix` in `colbert_late.py` is a doc-**text** helper, not an id normalizer, so don't lean on it for ids.)* If two channels disagree on a track's id, RRF double-counts or misses it — **add a fusion-time test asserting every per-sub output ⊆ catalog id set**; any channel that derives/prefixes ids must canonicalize before returning.
@@ -289,7 +287,7 @@ There are **two distinct K's**, and getting them wrong is a silent recall ceilin
 **Objective:** reorder the K candidates so the gold track lands as high as possible (ideally rank 1–3).
 
 ### 9.1 Primary reranker — LightGBM LambdaMART (learning-to-rank)
-Cheap, CPU, fast, robust, fuses heterogeneous signals — best ROI. *(Refs: Burges 2010 LambdaMART; Ke et al. 2017 LightGBM. Official "tips": `music-crs-baselines/tips/add_reranker.md`. Existing impl to port: `salvage/mcrs/rerankers/lgbm_rerank.py` + `relevance_scorer.py`.)*
+Cheap, CPU, fast, robust, fuses heterogeneous signals — best ROI. *(Refs: Burges 2010 LambdaMART; Ke et al. 2017 LightGBM. Official "tips": `music-crs-baselines/tips/add_reranker.md`. Existing impl to port (LGBM reranker + relevance scorer) recoverable from old git branches (`recall-union-lgbm`).)*
 
 **Group:** one group per (session, turn). **Label:** 1 for the gold track, 0 otherwise. **Negatives:** hard negatives = the other K−1 retrieved candidates (in-distribution, the realistic confusables). **Objective:** `lambdarank`, eval `ndcg@20`.
 
@@ -339,10 +337,10 @@ Cheap, CPU, fast, robust, fuses heterogeneous signals — best ROI. *(Refs: Burg
 ## 12. Advanced levers (query expansion · doc2query · catalog enrichment)
 
 All **one-time, cached** (compute once over 50k tracks, reuse everywhere → cost control):
-- **Catalog enrichment (Gemini-lite):** for sparse tracks, generate a short descriptive blurb / inferred mood-genre tags from name+artist+album → enrich BM25 docs & dense docs. *(Official "tips": `music-crs-baselines/tips/improve_item_representation.md`. Existing impl to port: `salvage/scripts/{enrich_catalog,enrich_track_docs}.py`.)*
+- **Catalog enrichment (Gemini-lite):** for sparse tracks, generate a short descriptive blurb / inferred mood-genre tags from name+artist+album → enrich BM25 docs & dense docs. *(Official "tips": `music-crs-baselines/tips/improve_item_representation.md`. Existing impl: `mcrs/enrich/doc2query.py` + `nb/a1_enrich_catalog.ipynb`.)*
 - **doc2query / docTTTTTquery (Gemini-lite or a T5):** generate likely user queries a track answers; append to its BM25 doc to close the vocabulary gap between conversational language and metadata. Big sparse-recall lever. *(Ref: Nogueira & Lin 2019; same `enrich_*` scripts cover this.)*
-- **Query expansion / refinement (Gemini-lite):** §7.1 — structured intent extraction; pseudo-relevance feedback from top content-neighbors. *(Existing impls to port behind gate: `salvage/mcrs/query_rewriters/*`.)*
-- **Generative retrieval / Semantic IDs (research, only if core plateaus):** RQ-VAE codebook over track embeddings + small LM to generate IDs. *(Official "tips": `music-crs-baselines/tips/use_genrec_semantic_ids.md`; existing scaffold to build on: `salvage/mcrs/retrieval_modules/sid_generator.py`.)* High effort; pursue if it helps clear 0.55.
+- **Query expansion / refinement (Gemini-lite):** §7.1 — structured intent extraction; pseudo-relevance feedback from top content-neighbors. *(Existing impls to port behind gate, recoverable from old git branches (`recall-union-lgbm`, `exp/*`).)*
+- **Generative retrieval / Semantic IDs (research, only if core plateaus):** RQ-VAE codebook over track embeddings + small LM to generate IDs. *(Official "tips": `music-crs-baselines/tips/use_genrec_semantic_ids.md`; existing scaffold to build on (SID generator) recoverable from old git branches (`exp/*`).)* High effort; pursue if it helps clear 0.55.
 
 Each lever ships behind an **ablation gate**: keep only if it lifts devset nDCG@20 (or the judge dimension) at acceptable cost.
 
@@ -437,7 +435,7 @@ Each lever ships behind an **ablation gate**: keep only if it lifts devset nDCG@
 - Scorer & ground truth: `music-crs-evaluator/{evaluate_devset.py, make_ground_truth.py, metrics/{metrics_recsys.py, metrics_diversity.py}}`.
 - Baseline foundation: `music-crs-baselines/{run_inference_devset.py, run_inference_blindset.py, mcrs/, config/, lowerbound/}`.
 - Official tips: `music-crs-baselines/tips/{improve_item_representation.md, add_reranker.md, use_genrec_semantic_ids.md}`.
-- Prior-work implementations to mine/port (§6.3 asset map): `salvage/mcrs/` (retrieval/rerank/query-rewrite modules), `salvage/scripts/` (ColBERT & SASRec training, catalog enrichment, Gemini responder, prediction precheck, score tracker), `salvage/notebooks/{82_colbert_conversational_retrieval, 90_colbert_dev_experiments}.ipynb`.
+- Prior-work implementations to mine/port (§6.3 asset map): ported code lives under `mcrs/` (e.g. `mcrs/enrich/doc2query.py`, `mcrs/lm/responder.py`, `mcrs/retrieval/related_artist.py`, `mcrs/training/colbert_*.py`, `mcrs/run/harness.py`); the rest (extra retrieval/rerank/query-rewrite modules, SASRec & ColBERT scaffolds, score tracker, the `82_*`/`90_*` ColBERT notebooks) is recoverable from old git branches (`recall-union-lgbm`, `stage-b-cross-encoder`, `fresh-model`, `exp/*`).
 - Data & env: `data/TalkPlayData-Challenge-*` (gitignored), `download_data.py` / `download_data.sh`, `requirements.txt`, `setup_venv.sh`.
 
 ---

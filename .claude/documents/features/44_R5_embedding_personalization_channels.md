@@ -5,8 +5,10 @@
 > ranked candidate list, complementing the conversation-driven channels (R3 BM25 / R4 dense-text).
 > Each captures "more of what they've been playing"; each **degrades to empty for cold users**, so
 > the gating is the load-bearing design decision here. Grounds in plan §7.2.3 (content-kNN from
-> history), §7.2.4 (CF), §10 (cold vs warm), and ports salvage `session_history.py` / `session_cf.py`
-> / `cf_bpr.py` / `same_artist.py` behind an ablation gate. See `000_INDEX.md` for the catalogue.
+> history), §7.2.4 (CF), §10 (cold vs warm), and adapts the prior `session_history` / `session_cf`
+> / `cf_bpr` / `same_artist` channel logic (recoverable from the old git branches —
+> `recall-union-lgbm`, `stage-b-cross-encoder`, `fresh-model`, `exp/*`) behind an ablation gate.
+> See `000_INDEX.md` for the catalogue.
 
 ## 1. Purpose
 Generate personalized candidate tracks from the user's session/listening history and their provided
@@ -21,8 +23,8 @@ cleanly to empty on cold** — and is gated on a warm-segment recall@K lift with
 Lives in `mcrs/retrieval/personalization.py` (one module, three classes). Each implements the F2
 `RetrievalChannel` Protocol (`11_F2`): same `batch_text_to_item_retrieval` shape as every other
 channel, returns **canonical** ids only (F1 `canonical_track_id`), registered by a unique `label`,
-fuses nothing. All three read history via the **shared** `_history_tids(ctx)` helper (ported from
-salvage `session_history.played_tids_from_context`) so train and serve recover identical history.
+fuses nothing. All three read history via the **shared** `_history_tids(ctx)` helper (the prior
+`session_history.played_tids_from_context` logic) so train and serve recover identical history.
 
 ```python
 class ContentKNNChannel:                 # implements F2 RetrievalChannel — plan §7.2.3
@@ -52,7 +54,7 @@ class SameArtistChannel:                  # implements F2 RetrievalChannel — p
 **Inputs.** `batch_context[i]` is the per-turn context dict for query `i` — it MUST carry
 `history_tids` (the causal listening history up to turn `t`, canonical ids; F1 `TurnContext.history_tids`
 flows in here) and `segment` (`"cold"`/`"warm"`). `user_ids[i]` is the CF lookup key. The channels
-read history from `batch_context` (matching the salvage sub-retriever contract) rather than from the
+read history from `batch_context` (matching the prior sub-retriever contract) rather than from the
 typed `TurnContext` so the shape is identical to R3/R4 and R7 can call all channels uniformly.
 
 **Outputs.** `list[list[str]]`, one ranked canonical-id list per query, length ≤ `topk`
@@ -78,7 +80,7 @@ channel → ranked ids → **R7 fuses** (segment-aware weights, `46_R7`) → K1/
   the `cf-bpr` track matrix **and** `UserEmbeddings` (cf-bpr user vectors). Both are L2-normalized
   by F1 (or normalized here once; never per-call).
 - **Libs:** `numpy` only. **No GPU, no model, no external API** — these are matmul/index-lookup
-  channels over precomputed embeddings (matches salvage `cf_bpr` / `session_cf` "numpy-only").
+  channels over precomputed embeddings (the prior `cf_bpr` / `session_cf` "numpy-only" approach).
 - **Config:** `retrieval.channels[]` entries for `content_knn`/`cf`/`same_artist`
   (`label`, `type`, `weight`, `topk_internal`, `cold_weight`, `warm_weight`, `extra`), and `extra`
   knobs in §9. `segment.cold_threshold` (shared with F1/P0).
@@ -87,7 +89,7 @@ channel → ranked ids → **R7 fuses** (segment-aware weights, `46_R7`) → K1/
 
 ### 4.1 Shared history recovery (causal, single source)
 All three channels recover the played track ids through **one** helper `_history_tids(ctx)` — ported
-from salvage `played_tids_from_context` — which prefers `ctx["history_tids"]` (explicit canonical ids
+from the prior `played_tids_from_context` logic — which prefers `ctx["history_tids"]` (explicit canonical ids
 populated by F1/D1) and intersects with `catalog.track_ids`. **No-leak invariant:** `history_tids` is
 sliced ≤ turn `t` by F1 and the turn-`t` gold is held in `Conversations.gold(...)` (F1 §4.6), so R5
 structurally cannot see a future turn or the gold. R5 additionally **asserts the gold is not in its
@@ -100,7 +102,7 @@ is also **removed from the output** so the channel never "rediscovers" a track t
    `track_embs.matrix(content_modality)` (rows L2-normalized).
 3. **Recency-weighted pool:** weight more-recent history tracks higher. Default weight for the
    `j`-th-from-most-recent track is `decay ** j` (`decay` in config, default `0.9`; `decay = 1.0` ⇒
-   plain mean — the salvage `session_cf` centroid behavior). Pool vector `p = Σ_j w_j · e_j`,
+   plain mean — the prior `session_cf` centroid behavior). Pool vector `p = Σ_j w_j · e_j`,
    L2-normalize (skip query if `||p|| < 1e-9`).
 4. **Score** all catalog rows by `M · p` (one matmul, plan "brute-force cosine = one matmul"),
    `argsort` desc, drop the played set, take `topk`. Deterministic tie-break by `id_to_index`.
@@ -114,14 +116,14 @@ is also **removed from the output** so the channel never "rediscovers" a track t
    embeddings has no CF vector and the channel contributes nothing (so fusion falls back to
    conversation channels). Never fabricate a vector.
 2. Score `cf_track_mat · u` (cf-bpr 128-d, L2-normalized both sides), top-`topk` via
-   `argpartition`+sort (salvage `cf_bpr` batched path: stack warm users, one matmul). Drop the
+   `argpartition`+sort (the prior `cf_bpr` batched path: stack warm users, one matmul). Drop the
    played set, take `topk`. Query text unused.
-3. **Batch:** collect warm rows, single `(W, T)` matmul, scatter back — cold rows stay `[]` (verbatim
-   salvage batching, so cold users cost ~0).
+3. **Batch:** collect warm rows, single `(W, T)` matmul, scatter back — cold rows stay `[]` (the
+   prior batching, so cold users cost ~0).
 
 ### 4.4 (c) Same-artist channel (plan §7.2.3) — warm
 1. Build once at init from `catalog.metadata`: `tid → artist` (lower/trimmed) and
-   `artist → [tids sorted by popularity desc]` (salvage `_build_index`).
+   `artist → [tids sorted by popularity desc]` (the prior `_build_index`).
 2. Per query: recover `played`; if empty → `[]`. Count artists in the played set
    (`Counter(artist for played tid)`); for each artist in `most_common()` order, emit its catalog
    tracks (popularity-desc) minus the played set, until `topk`. Deterministic.
@@ -132,7 +134,7 @@ is also **removed from the output** so the channel never "rediscovers" a track t
 - **Mechanism = empty list + segment-aware fusion weight, not a crash.** For cold users (empty
   `history_tids` and/or missing cf-bpr vector → `UserEmbeddings.vector()==None`), all three channels
   return `[]`. An empty list contributes **0** to weighted-RRF (`46_R7` math), so cold users fall back
-  cleanly to R3/R4 + popularity priors — *zero regression by construction* (salvage `cf_bpr` docstring:
+  cleanly to R3/R4 + popularity priors — *zero regression by construction* (the prior `cf_bpr` docstring:
   "Zero regression for cold, net positive for warm").
 - **`cold_weight` ≤ `warm_weight` in R7** (default `cold_weight = 0.0` for all three R5 channels): even
   if a cold user has a *short* degenerate history (1–2 tracks below the `cold_threshold`), the channel
@@ -152,21 +154,25 @@ indices built once at init). Argsort ties broken by `id_to_index` (stable). Two 
 identical output. No state mutated across calls.
 
 ## 5. Reuse
-Port behind gate (plan §6.3: "Content-kNN / history §7.2.3" + "CF retriever §7.2.4" = *Port behind gate*):
-- **`salvage/mcrs/retrieval_modules/session_history.py`** → `_history_tids` helper. **Keep verbatim**
+Build behind gate (plan §6.3: "Content-kNN / history §7.2.3" + "CF retriever §7.2.4" = *behind gate*).
+The prior channel implementations below are recoverable from the old git branches
+(`recall-union-lgbm`, `stage-b-cross-encoder`, `fresh-model`, `exp/*`) as design references; adapt them
+to the fresh-start F1/F2 contracts:
+- **`session_history` channel** → `_history_tids` helper. **Keep the logic verbatim**
   (the `history_tids`-first recovery is exactly the F1 contract). `session_match_features` is a *reranker*
   feature (K1), out of scope here.
-- **`salvage/mcrs/retrieval_modules/session_cf.py`** (`SessionCFRetriever`, centroid recall@100 ~0.24)
-  → **content-kNN** logic. **Port + extend:** add recency weighting (salvage is a plain mean) and read
+- **`session_cf` channel** (`SessionCFRetriever`, centroid recall@100 ~0.24)
+  → **content-kNN** logic. **Adapt + extend:** add recency weighting (the prior impl is a plain mean) and read
   embeddings through F1 `TrackEmbeddings.matrix(content_modality)` instead of donating from `CF_BPR`
-  (salvage coupled it to cf-bpr; R5 decouples so content-kNN uses a *content* modality, CF uses cf-bpr).
-- **`salvage/mcrs/retrieval_modules/cf_bpr.py`** (`CF_BPR`, batched warm matmul, cold→`[]`) → **CFChannel**.
-  **Port + adapt:** drop the embedded HF-dataset loaders/pickle caches (F1 `TrackEmbeddings`/`UserEmbeddings`
+  (the prior impl coupled it to cf-bpr; R5 decouples so content-kNN uses a *content* modality, CF uses cf-bpr).
+- **`cf_bpr` channel** (`CF_BPR`, batched warm matmul, cold→`[]`) → **CFChannel**.
+  **Adapt:** drop the embedded HF-dataset loaders/pickle caches (F1 `TrackEmbeddings`/`UserEmbeddings`
   own loading now); keep the batched `(W,T)` matmul + cold-skip + L2-norm exactly.
-- **`salvage/mcrs/retrieval_modules/same_artist.py`** (`SameArtistRetriever`) → **SameArtistChannel**.
-  **Port + adapt:** read catalog via F1 `Catalog.metadata` (was `MusicCatalogDB.metadata_dict`); keep
+- **`same_artist` channel** (`SameArtistRetriever`) → **SameArtistChannel** (the related-artist logic
+  also lives at `mcrs/retrieval/related_artist.py`).
+  **Adapt:** read catalog via F1 `Catalog.metadata` (was `MusicCatalogDB.metadata_dict`); keep
   the (artist-session-count, popularity) ranking verbatim.
-- All four salvage channels already match the F2 `batch_text_to_item_retrieval` shape — **no reshaping**,
+- All four channels already match the F2 `batch_text_to_item_retrieval` shape — **no reshaping**,
   only canonicalization at the boundary (F1) and F1-typed deps.
 
 ## 6. Eval & acceptance gate
@@ -189,7 +195,7 @@ and memory. Final fusion gate (recall@20 ≥ 0.75, recall@200 ≥ 0.90) lives in
 ## 7. Tests
 - **Unit — content-kNN:** known history of 2 tracks with crafted embeddings → the nearest catalog row
   ranks first; recency `decay < 1` shifts ranking toward the most-recent track; `decay = 1.0` reproduces
-  the salvage plain-centroid output (byte-identical).
+  the prior plain-centroid output (byte-identical).
 - **Unit — CF:** crafted user vector + track matrix → expected top-K; `user_id is None` → `[]`;
   `user_id` absent from `UserEmbeddings` (`vector()==None`) → `[]`; batched call matches per-query calls.
 - **Unit — same-artist:** history by artists {A,B}, A played twice → A's tracks rank before B's; played
@@ -246,7 +252,7 @@ Shared: `segment.cold_threshold` (read for routing; **value set in P0**), `seed`
       reported as ~0 lift and non-regressing** (not hidden); per-channel unique-recall table logged.
 - [ ] No-leak (gold/future-turn never in output, played excluded), id-space ⊆ catalog, and determinism
       tests green; embeddings indexed via `id_to_index`.
-- [ ] Salvage ported (session_history/session_cf/cf_bpr/same_artist) with F1-typed deps; content-kNN
+- [ ] Channels ported (history/content-kNN/CF/related-artist) with F1-typed deps; content-kNN
       decoupled from cf-bpr (content modality); CF keeps batched warm matmul + cold-skip.
 - [ ] Chosen weights/decay locked in `config/<exp>.yaml` (train==serve); sweep logged to
       `reports/experiments.md`; code review approved; no `Any` in public signatures.

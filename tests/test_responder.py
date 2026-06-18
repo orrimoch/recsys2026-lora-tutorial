@@ -1,8 +1,8 @@
 """S1 — grounded Gemini responder (mcrs/lm/responder.py).
 
-Pure helpers (prompt/context/track rendering, sanitize, fallback) are ported from
-salvage/scripts/gemini_responder.py. The Gemini client is INJECTED, so these tests
-run with a fake client and never touch the network or import google-genai.
+Pure helpers (prompt/context/track rendering, sanitize, fallback) are exercised here. The Gemini
+client is INJECTED, so these tests run with a fake client and never touch the network or import
+google-genai.
 """
 from __future__ import annotations
 

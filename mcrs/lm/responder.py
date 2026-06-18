@@ -4,12 +4,11 @@ Generates `SubmissionRow.predicted_response`: a short, grounded, personalized re
 official Gemini judge scores on Personalization + Explanation Quality (decoupled from nDCG — it
 only reads the final top tracks + conversation context). See `.claude/documents/features/70_S1_responder.md`.
 
-The prompts and the context/track rendering are ported VERBATIM from
-`salvage/scripts/gemini_responder.py` (single-shot / plain path only — best-of-N, the
-structured-personality mode, and the self-judge are intentionally dropped). What's new here vs the
-salvage script: the modern `google-genai` async client (injected, so this module imports no SDK and
-stays unit-testable), prompt-injection `sanitize`-ing of untrusted track/utterance text, a non-empty
-grounded `fallback_response`, and an F2 `Responder`-conformant class.
+The prompts and the context/track rendering reuse the proven prior responder (single-shot / plain
+path only — best-of-N, the structured-personality mode, and the self-judge are intentionally
+dropped). What's new: the modern `google-genai` async client (injected, so this module imports no
+SDK and stays unit-testable), prompt-injection `sanitize`-ing of untrusted track/utterance text, a
+non-empty grounded `fallback_response`, and an F2 `Responder`-conformant class.
 """
 from __future__ import annotations
 
@@ -23,7 +22,7 @@ from typing import Any, Optional
 
 from mcrs.contracts import TurnContext
 
-# ── prompts (ported verbatim from salvage/scripts/gemini_responder.py) ────────
+# ── prompts (proven responder prompts, single-shot path) ─────────────────────
 RESPONDER_INSTRUCTIONS = """You are an expert music recommender replying to a user mid-conversation.
 Write ONE reply, 2-3 short sentences, no lists, no preamble.
 
@@ -89,7 +88,7 @@ def sanitize(text: Any) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-# ── context / track rendering (ported from salvage, with sanitize added) ──────
+# ── context / track rendering (with sanitize added) ──────────────────────────
 def _first(v: Any) -> Any:
     """HF metadata fields are often singleton lists; unwrap to a scalar."""
     if isinstance(v, list):
