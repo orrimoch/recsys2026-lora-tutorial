@@ -61,6 +61,28 @@ class Conversations:
                     history_tids=history, segment=segment_for(history, self.cold_threshold),
                 )
 
+    def target_turns(self) -> Iterator[TurnContext]:
+        """One TurnContext per session at the trailing (prediction) turn — for blind / no-gold sets
+        where the final entry is a user query carrying no `music` gold. `turns()` enumerates only
+        gold-bearing turns and so never yields these targets; this mirrors the official
+        run_inference_blindset.py, which predicts `conversations[-1]`.
+        """
+        for sid in self._order:
+            row = self._rows[sid]
+            by = self._by_turn(row)
+            profile = self._profile(row)
+            goal = (row.get("conversation_goal") or {}).get("listener_goal")
+            t = int(row["conversations"][-1]["turn_number"])     # official target turn
+            gold_turns = sorted(k for k, e in by.items() if "music" in e and k < t)
+            session_golds = {k: canonical_track_id(by[k]["music"]) for k in gold_turns}
+            utterances = [by.get(k, {}).get("user", "") for k in range(1, t + 1)]
+            history = [session_golds[k] for k in range(1, t) if k in session_golds]
+            yield TurnContext(
+                session_id=sid, user_id=row["user_id"], turn_number=t,
+                utterances=utterances, goal=goal, user_profile=profile,
+                history_tids=history, segment=segment_for(history, self.cold_threshold),
+            )
+
     @classmethod
     def from_disk(cls, path: str, split: str = "test", cold_threshold: int = 1) -> "Conversations":
         from datasets import load_from_disk
