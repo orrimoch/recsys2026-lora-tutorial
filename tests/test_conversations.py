@@ -31,6 +31,13 @@ def test_gold_is_the_music_entry_per_turn():
     assert c.gold("u1__d", 2) == "track-2"
 
 
+def test_gold_unknown_session_returns_none_not_keyerror():
+    # callers probe gold across multiple Conversations splits (train+dev); a session not in THIS split
+    # must return None, not raise — else the cross-split lookup crashes (blind K2 train-gold).
+    c = Conversations([_ROW])
+    assert c.gold("not-a-session", 1) is None
+
+
 def test_turns_are_causal_and_carry_session_history():
     c = Conversations([_ROW], cold_threshold=0)
     turns = list(c.turns())

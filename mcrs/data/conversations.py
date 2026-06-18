@@ -29,7 +29,10 @@ class Conversations:
         return by
 
     def gold(self, session_id: str, turn_number: int) -> Optional[str]:
-        entry = self._by_turn(self._rows[session_id]).get(int(turn_number))
+        row = self._rows.get(session_id)        # unknown session -> None (not KeyError), so callers can
+        if row is None:                         # safely probe across multiple Conversations splits
+            return None
+        entry = self._by_turn(row).get(int(turn_number))
         if not entry or "music" not in entry:
             return None
         return canonical_track_id(entry["music"])
