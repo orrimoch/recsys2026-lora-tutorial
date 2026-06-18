@@ -211,18 +211,9 @@ def render_context(conversations, item_db_meta, target_turn):
     return "\n".join(lines)
 
 
-def _trim_doc(doc, max_chars=280):
-    """Collapse whitespace and trim the enriched doc2query text to a compact, word-boundary blurb."""
-    s = re.sub(r"\s+", " ", str(doc)).strip()
-    if len(s) <= max_chars:
-        return s
-    return s[:max_chars].rsplit(" ", 1)[0] + "…"
-
-
 def format_tracks(tids, item_db_meta, n=1):
-    """Format the top-n recommended tracks as grounding for the reply. Prefers the track's enriched
-    doc2query description (real, track-specific musical attributes) when present; otherwise falls back
-    to the cleaned tag list. Skips ids with no metadata (never emits a bare 'None by None')."""
+    """Format the top-n recommended tracks (cleaned tag list) as grounding for the reply.
+    Skips ids with no metadata (never emits a bare 'None by None')."""
     out = []
     for tid in (tids or [])[:n]:
         m = item_db_meta.get(str(tid))
@@ -232,18 +223,14 @@ def format_tracks(tids, item_db_meta, n=1):
         artist = _first(m.get("artist_name"))
         if name is None and artist is None:
             continue
+        tags = m.get("tags") or m.get("tag_list") or []
+        tags = tags if isinstance(tags, list) else [str(tags)]
         part = f"{name} by {artist}"
         album = _first(m.get("album_name"))
         if album:
             part += f" (album {album})"
-        doc = m.get("enriched_doc")
-        if doc:
-            part += f" — {_trim_doc(doc)}"            # rich, accurate, track-specific grounding
-        else:
-            tags = m.get("tags") or m.get("tag_list") or []
-            tags = tags if isinstance(tags, list) else [str(tags)]
-            if tags:
-                part += f" [{', '.join(str(x) for x in tags[:5])}]"
+        if tags:
+            part += f" [{', '.join(str(x) for x in tags[:5])}]"
         out.append(part)
     return "; ".join(out) if out else "(none)"
 
@@ -533,7 +520,7 @@ def clean_tags(tags, df, artists, track_name, artist_name, keep=8):
     return out[:keep]
 
 
-def _load_item_meta(enriched_path=None):
+def _load_item_meta():
     import collections
     import datasets as _d
     from datasets import load_dataset
@@ -548,24 +535,14 @@ def _load_item_meta(enriched_path=None):
         a = _first(r.get("artist_name"))
         if a:
             artists.add(str(a).strip().lower())
-    # optional A1 doc2query enrichment: real, track-specific musical descriptions (better grounding than
-    # the folksonomy tags). Keyed by track_id; missing tracks fall back to cleaned tags in format_tracks.
-    enriched = {}
-    if enriched_path:
-        import pandas as _pd
-        edf = _pd.read_parquet(enriched_path)
-        enriched = {str(k): v for k, v in zip(edf["track_id"], edf["enriched_doc"]) if v}
-        print(f"[responder] enriched docs: {len(enriched)} from {enriched_path}")
     meta = {}
     for r in idb:
-        tid = str(r["track_id"])
-        meta[tid] = {
+        meta[str(r["track_id"])] = {
             "track_name": r.get("track_name"),
             "artist_name": r.get("artist_name"),
             "album_name": r.get("album_name"),
             "tags": clean_tags(r.get("tag_list"), df, artists,
                                _first(r.get("track_name")), _first(r.get("artist_name"))),
-            "enriched_doc": enriched.get(tid),
         }
     return meta
 
@@ -598,9 +575,6 @@ def main():
     ap.add_argument("--pred", required=True, help="existing prediction.json (keeps predicted_track_ids)")
     ap.add_argument("--out", required=True, help="output prediction.json with regenerated responses")
     ap.add_argument("--dataset", default=DEFAULT_DATASET, help="HF dataset for conversation context (split=test)")
-    ap.add_argument("--enriched", default=None,
-                    help="path to catalog_enriched_*.parquet (A1 doc2query). When set, the responder grounds "
-                         "on each track's enriched musical description instead of its raw folksonomy tags.")
     ap.add_argument("--top-n", type=int, default=1, help="how many reranked tracks the responder sees")
     ap.add_argument("--limit", type=int, default=0, help="cap rows (0 = all)")
     ap.add_argument("--sleep", type=float, default=0.2, help="seconds between API calls")
@@ -651,7 +625,7 @@ def main():
 
     ds = load_dataset(args.dataset, split="test")
     sess_by_id = {s["session_id"]: s for s in ds}
-    item_db_meta = _load_item_meta(args.enriched)
+    item_db_meta = _load_item_meta()
 
     reuse_map = load_reuse_map(args.reuse_from)
     if reuse_map:
