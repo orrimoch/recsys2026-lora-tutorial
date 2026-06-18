@@ -13,8 +13,50 @@ from mcrs.training.colbert_finetune import (
     existing_artifact_blocks,
     rerank_pool,
     triples_to_contrastive_rows,
+    update_best_state,
     wall_recall_at_k,
 )
+
+
+def _fresh():
+    return {"best": -1.0, "since_improve": 0}
+
+
+class TestUpdateBestState:
+    def test_first_eval_is_best_no_stop(self):
+        st = _fresh()
+        is_best, stop = update_best_state(0.33, st, patience=2)
+        assert is_best is True and stop is False
+        assert st["best"] == 0.33 and st["since_improve"] == 0
+
+    def test_improvement_resets_counter(self):
+        st = _fresh()
+        update_best_state(0.30, st, 2)
+        update_best_state(0.25, st, 2)            # 1 since best
+        is_best, stop = update_best_state(0.40, st, 2)  # new best -> reset
+        assert is_best is True and stop is False and st["since_improve"] == 0
+
+    def test_stops_after_patience_consecutive_non_improvements(self):
+        # mirrors the observed curve: 0.33 peak, then 0.31, 0.30 -> stop at patience=2
+        st = _fresh()
+        update_best_state(0.33, st, 2)            # best
+        _, s1 = update_best_state(0.31, st, 2)    # 1 since best
+        _, s2 = update_best_state(0.30, st, 2)    # 2 since best -> stop
+        assert s1 is False and s2 is True
+        assert st["best"] == 0.33                 # best preserved
+
+    def test_patience_zero_never_stops(self):
+        st = _fresh()
+        update_best_state(0.33, st, 0)
+        for v in (0.2, 0.1, 0.05):
+            _, stop = update_best_state(v, st, 0)
+            assert stop is False
+
+    def test_tie_is_not_best(self):
+        st = _fresh()
+        update_best_state(0.33, st, 5)
+        is_best, _ = update_best_state(0.33, st, 5)   # equal -> not a new best (>, ties keep earlier)
+        assert is_best is False and st["since_improve"] == 1
 
 
 class TestTriplesToContrastiveRows:
