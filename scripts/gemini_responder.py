@@ -142,6 +142,8 @@ given. Citeable types: artist, title, album, genre/tags, mood, instrumentation, 
 NEVER make reception, popularity, chart, or critical-acclaim claims — they are NOT in the data and read as
 guesses (and risk being wrong). Banned: "fan favorite", "beloved", "iconic", "classic", "a standout", "one of
 the best", "everyone loves", "quintessential", and any chart position, award, or critic mention.
+Describe ONLY the music (sound, instruments, rhythm, mood, genre, era) — NEVER the album art, cover,
+packaging, artwork, or any visual; if you have no real sonic detail, say less rather than invent one.
 
 VARY YOUR OPENING — rotate between these shapes, and never repeat one back-to-back:
   (a) name the track + one concrete trait;  (b) echo the exact track/artist the user named, then pivot to the pick;
@@ -149,18 +151,20 @@ VARY YOUR OPENING — rotate between these shapes, and never repeat one back-to-
   (e) answer their exact question head-on.
 Never open with "For …", "Since …", "Absolutely", or "Yes".
 
-TONE: at most ONE intensifier in the whole reply and never as the opener (absolutely, truly, definitely,
-literally, incredible, captivating, amazing, perfect); no exclamation-mark openers."""
+TONE: cut empty intensifiers — at most ONE in the whole reply, never as the opener: absolutely, truly,
+definitely, literally, really, simply, perfectly, incredible, captivating, amazing, fantastic, wonderfully,
+deeply, perfect. No exclamation-mark openers. And drop the "that [vibe] you're after / you're looking for"
+crutch — name the concrete thing instead (say "that stop-start funk riff", not "that energy you're after")."""
 
 
 # Hard constraints, restated as a short checklist placed at the VERY END of the prompt (after the tracks) —
 # recency lifts compliance far more than the same rules buried in the prose block above.
 FINAL_CHECKLIST = """=== CHECK BEFORE YOU REPLY ===
 1. Name ONE specific track from the candidates and say why it fits.
-2. Cite at least one CONCRETE attribute you were given; make NO reception / popularity / chart / "iconic / classic / fan-favorite" claims.
+2. Cite at least one CONCRETE musical attribute you were given; NO reception/popularity/"iconic/classic/fan-favorite" claims and NO album-art/visual mentions.
 3. Echo one specific thing the user said — and the earlier liked track BY NAME if the conversation has one.
 4. Vary the opener: not "For …/Since …/Absolutely/Yes", and not the same shape as the last reply.
-5. At most one intensifier; no exclamation-mark opener.
+5. At most one intensifier (no "definitely/truly/perfectly/really/absolutely"); no "you're looking for" crutch; no exclamation-mark opener.
 6. 2-3 tight sentences; output the reply text only."""
 
 
@@ -207,9 +211,18 @@ def render_context(conversations, item_db_meta, target_turn):
     return "\n".join(lines)
 
 
+def _trim_doc(doc, max_chars=280):
+    """Collapse whitespace and trim the enriched doc2query text to a compact, word-boundary blurb."""
+    s = re.sub(r"\s+", " ", str(doc)).strip()
+    if len(s) <= max_chars:
+        return s
+    return s[:max_chars].rsplit(" ", 1)[0] + "…"
+
+
 def format_tracks(tids, item_db_meta, n=1):
-    """Format the top-n recommended tracks as grounding for the reply.
-    Skips ids with no metadata (never emits a bare 'None by None')."""
+    """Format the top-n recommended tracks as grounding for the reply. Prefers the track's enriched
+    doc2query description (real, track-specific musical attributes) when present; otherwise falls back
+    to the cleaned tag list. Skips ids with no metadata (never emits a bare 'None by None')."""
     out = []
     for tid in (tids or [])[:n]:
         m = item_db_meta.get(str(tid))
@@ -219,14 +232,18 @@ def format_tracks(tids, item_db_meta, n=1):
         artist = _first(m.get("artist_name"))
         if name is None and artist is None:
             continue
-        tags = m.get("tags") or m.get("tag_list") or []
-        tags = tags if isinstance(tags, list) else [str(tags)]
         part = f"{name} by {artist}"
         album = _first(m.get("album_name"))
         if album:
             part += f" (album {album})"
-        if tags:
-            part += f" [{', '.join(str(x) for x in tags[:5])}]"
+        doc = m.get("enriched_doc")
+        if doc:
+            part += f" — {_trim_doc(doc)}"            # rich, accurate, track-specific grounding
+        else:
+            tags = m.get("tags") or m.get("tag_list") or []
+            tags = tags if isinstance(tags, list) else [str(tags)]
+            if tags:
+                part += f" [{', '.join(str(x) for x in tags[:5])}]"
         out.append(part)
     return "; ".join(out) if out else "(none)"
 
@@ -516,7 +533,7 @@ def clean_tags(tags, df, artists, track_name, artist_name, keep=8):
     return out[:keep]
 
 
-def _load_item_meta():
+def _load_item_meta(enriched_path=None):
     import collections
     import datasets as _d
     from datasets import load_dataset
@@ -531,14 +548,24 @@ def _load_item_meta():
         a = _first(r.get("artist_name"))
         if a:
             artists.add(str(a).strip().lower())
+    # optional A1 doc2query enrichment: real, track-specific musical descriptions (better grounding than
+    # the folksonomy tags). Keyed by track_id; missing tracks fall back to cleaned tags in format_tracks.
+    enriched = {}
+    if enriched_path:
+        import pandas as _pd
+        edf = _pd.read_parquet(enriched_path)
+        enriched = {str(k): v for k, v in zip(edf["track_id"], edf["enriched_doc"]) if v}
+        print(f"[responder] enriched docs: {len(enriched)} from {enriched_path}")
     meta = {}
     for r in idb:
-        meta[str(r["track_id"])] = {
+        tid = str(r["track_id"])
+        meta[tid] = {
             "track_name": r.get("track_name"),
             "artist_name": r.get("artist_name"),
             "album_name": r.get("album_name"),
             "tags": clean_tags(r.get("tag_list"), df, artists,
                                _first(r.get("track_name")), _first(r.get("artist_name"))),
+            "enriched_doc": enriched.get(tid),
         }
     return meta
 
@@ -571,6 +598,9 @@ def main():
     ap.add_argument("--pred", required=True, help="existing prediction.json (keeps predicted_track_ids)")
     ap.add_argument("--out", required=True, help="output prediction.json with regenerated responses")
     ap.add_argument("--dataset", default=DEFAULT_DATASET, help="HF dataset for conversation context (split=test)")
+    ap.add_argument("--enriched", default=None,
+                    help="path to catalog_enriched_*.parquet (A1 doc2query). When set, the responder grounds "
+                         "on each track's enriched musical description instead of its raw folksonomy tags.")
     ap.add_argument("--top-n", type=int, default=1, help="how many reranked tracks the responder sees")
     ap.add_argument("--limit", type=int, default=0, help="cap rows (0 = all)")
     ap.add_argument("--sleep", type=float, default=0.2, help="seconds between API calls")
@@ -621,7 +651,7 @@ def main():
 
     ds = load_dataset(args.dataset, split="test")
     sess_by_id = {s["session_id"]: s for s in ds}
-    item_db_meta = _load_item_meta()
+    item_db_meta = _load_item_meta(args.enriched)
 
     reuse_map = load_reuse_map(args.reuse_from)
     if reuse_map:

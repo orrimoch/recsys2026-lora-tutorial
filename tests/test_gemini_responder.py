@@ -460,3 +460,26 @@ def test_clean_tags_keeps_descriptors_and_drops_junk():
 def test_clean_tags_handles_empty_and_none():
     assert gr.clean_tags(None, {}, set(), "X", "Y") == []
     assert gr.clean_tags([], {}, set(), "X", "Y") == []
+
+
+def test_format_tracks_prefers_enriched_doc_over_tags():
+    meta = {"t1": {"track_name": ["Song A"], "artist_name": ["Artist A"], "album_name": ["Alb"],
+                   "tags": ["jazz"],
+                   "enriched_doc": "A slow piano ballad built on brushed drums and a warm upright bass."}}
+    s = gr.format_tracks(["t1"], meta, n=1)
+    assert "Song A by Artist A" in s
+    assert "brushed drums" in s        # grounds on the enriched description
+    assert "[jazz]" not in s           # enriched replaces the raw tag list
+
+
+def test_format_tracks_falls_back_to_tags_without_enriched():
+    meta = {"t1": {"track_name": ["Song A"], "artist_name": ["Artist A"],
+                   "tags": ["jazz", "piano"], "enriched_doc": None}}
+    s = gr.format_tracks(["t1"], meta, n=1)
+    assert "[jazz, piano]" in s
+
+
+def test_trim_doc_collapses_and_caps():
+    long = "word " * 200
+    out = gr._trim_doc(long, max_chars=50)
+    assert len(out) <= 51 and "\n" not in out and out.endswith("…")
