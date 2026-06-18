@@ -456,18 +456,89 @@ def generate_best_of_n(gen_model, judge_model, prompt, judge_context, tracks_str
     return pick_best(scored)
 
 
+# ── tag cleaning ──────────────────────────────────────────────────────────────
+# TalkPlayData tag_list is last.fm-style folksonomy: real musical descriptors (genre/mood/instrument/era)
+# mixed with junk — ratings ("8 of 10 stars"), playlist names ("ion b chill station"), opinions
+# ("favorites", "awesome"), sentences ("songs i absolutely love"), and other-artist names. Feeding the raw
+# list tempts ungrounded/generic explanations; we keep a diverse set of concrete descriptors and drop junk.
+_TAG_MOODS = frozenset({
+    "chill", "mellow", "relaxing", "energetic", "upbeat", "dark", "melancholic", "melancholy", "dreamy",
+    "atmospheric", "aggressive", "soothing", "uplifting", "haunting", "romantic", "sad", "happy", "epic",
+    "smooth", "groovy", "moody", "intense", "soft", "calm", "peaceful", "ethereal", "nostalgic", "hypnotic",
+    "driving", "anthemic", "raw", "gentle", "bittersweet", "euphoric", "brooding", "funky", "chillout",
+    "laid-back", "danceable", "emotional", "powerful", "melodic", "lo-fi", "catchy", "spacey", "trippy"})
+_TAG_INSTR = frozenset({
+    "piano", "guitar", "bass", "drums", "synth", "synths", "strings", "saxophone", "sax", "violin", "organ",
+    "acoustic guitar", "electric guitar", "brass", "flute", "trumpet", "cello", "harp", "percussion",
+    "acoustic", "instrumental", "female vocalists", "male vocalists", "female vocalist", "male vocalist"})
+_TAG_STOP = frozenset({
+    "favorites", "favorite", "favourites", "favourite", "fav", "favs", "love", "loved", "awesome", "good",
+    "cool", "nice", "great", "amazing", "best", "beautiful", "perfect", "wonderful", "masterpiece", "music",
+    "seen live", "top quality", "killer", "owned", "wishlist", "all", "various", "misc", "stuff", "heard",
+    "genius", "american", "british", "usa", "uk", "sexy", "sex", "cap", "body parts", "life is easy", "good music"})
+_TAG_NORM = {"male vocalist": "male vocals", "male vocalists": "male vocals",
+             "female vocalist": "female vocals", "female vocalists": "female vocals"}
+_TAG_DROP_RE = re.compile(r"\bstars?\b|\d+ of \d+|^\d+$|\bvia\b|\bi\b|\bmy\b|\bme\b|wishlist|tagme|^\W")
+_TAG_ERA_RE = re.compile(r"^(19|20)\d0s?$|^\d0s$")
+
+
+def clean_tags(tags, df, artists, track_name, artist_name, keep=8):
+    """Filter a raw tag_list down to concrete musical descriptors. `df` = {tag: doc-frequency across the
+    catalog} (long-tail junk like playlist names is rare -> dropped via a min-frequency floor); `artists` =
+    set of lowercased artist names (drops 'similar artist' tags). Returns a diverse, specific mix — genres
+    (specific first), moods, instruments, era — with ratings/opinions/self-references removed."""
+    nm = set(re.findall(r"\w+", (str(track_name) + " " + str(artist_name)).lower()))
+    seen, genres, moods, instr, era = set(), [], [], [], []
+    for t in (tags or []):
+        sl = str(t).strip().lower()
+        if not sl or sl in seen or sl in _TAG_STOP or _TAG_DROP_RE.search(sl) or len(sl.split()) > 4:
+            continue
+        toks = set(re.findall(r"\w+", sl))
+        if (toks and toks <= nm) or (sl in artists and sl not in nm):   # self-name / other-artist tag
+            continue
+        seen.add(sl)
+        if _TAG_ERA_RE.match(sl):
+            era.append(sl)
+        elif sl in _TAG_INSTR:
+            instr.append((_TAG_NORM.get(sl, sl), df.get(sl, 0)))
+        elif sl in _TAG_MOODS:
+            moods.append((sl, df.get(sl, 0)))
+        elif df.get(sl, 0) >= 30:                                       # genre-ish: common enough to be real
+            genres.append((sl, df.get(sl, 0)))
+    genres.sort(key=lambda x: (-(" " in x[0]), -x[1]))                  # prefer specific (multi-word) genres
+    out, s = [], set()
+    for t in ([g for g, _ in genres[:3]]
+              + [m for m, _ in sorted(moods, key=lambda x: -x[1])[:2]]
+              + [i for i, _ in sorted(instr, key=lambda x: -x[1])[:2]]
+              + era[:1]):
+        if t not in s:
+            out.append(t); s.add(t)
+    return out[:keep]
+
+
 def _load_item_meta():
+    import collections
     import datasets as _d
     from datasets import load_dataset
     idb = load_dataset(ITEM_DB)
     idb = _d.concatenate_datasets([idb[s] for s in idb])
+    # global tag doc-frequency + artist-name set, used by clean_tags to drop long-tail junk + artist tags
+    df, artists = collections.Counter(), set()
+    for r in idb:
+        for t in {str(x).strip().lower() for x in (r.get("tag_list") or [])}:
+            if t:
+                df[t] += 1
+        a = _first(r.get("artist_name"))
+        if a:
+            artists.add(str(a).strip().lower())
     meta = {}
     for r in idb:
         meta[str(r["track_id"])] = {
             "track_name": r.get("track_name"),
             "artist_name": r.get("artist_name"),
             "album_name": r.get("album_name"),
-            "tags": r.get("tag_list"),
+            "tags": clean_tags(r.get("tag_list"), df, artists,
+                               _first(r.get("track_name")), _first(r.get("artist_name"))),
         }
     return meta
 

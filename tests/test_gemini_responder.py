@@ -439,3 +439,24 @@ def test_load_reuse_map_reads_prediction_json_from_a_zip(tmp_path):
              "predicted_track_ids": ["a"], "predicted_response": "R"}]))
     m = gr.load_reuse_map(str(zf))   # pass the saved Drive submission zip directly
     assert m[("s1", 1)]["resp"] == "R"
+
+
+def test_clean_tags_keeps_descriptors_and_drops_junk():
+    df = {"rock": 3000, "alternative rock": 500, "funk metal": 40, "energetic": 300,
+          "bass": 200, "death metal": 400, "megadeth": 60, "soundtrack": 120}
+    artists = {"megadeth", "red hot chili peppers"}
+    raw = ["energetic", "alternative rock", "funk metal", "favorites", "8 of 10 stars",
+           "songs i absolutely love", "red hot chili peppers", "bass", "90s", "megadeth", "via pandora"]
+    out = gr.clean_tags(raw, df, artists, "Suck My Kiss", "Red Hot Chili Peppers")
+    # junk gone
+    for junk in ["favorites", "8 of 10 stars", "songs i absolutely love", "via pandora",
+                 "red hot chili peppers", "megadeth"]:
+        assert junk not in out, junk
+    # descriptors kept (genre + mood + instrument + era)
+    assert "alternative rock" in out or "funk metal" in out
+    assert "energetic" in out and "bass" in out and "90s" in out
+
+
+def test_clean_tags_handles_empty_and_none():
+    assert gr.clean_tags(None, {}, set(), "X", "Y") == []
+    assert gr.clean_tags([], {}, set(), "X", "Y") == []
