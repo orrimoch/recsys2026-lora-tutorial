@@ -34,6 +34,22 @@ SCHEMA: dict[str, Any] = {
     "retrieval": {
         "topk": _Leaf(int, 300),          # fusion-K (P0-sized)
         "fusion_k": _Leaf(int, 60),        # RRF k constant
+        # R8 ColBERT late-interaction channel (47_R8 §9). Brute-force MaxSim at 47k by default.
+        "colbert": {
+            "model":           _Leaf(str,           "colbert-ir/colbertv2.0"),
+            "model_revision":  _Leaf(type(None),    None),   # pinned commit (D1 records it)
+            "dim":             _Leaf(int,           128),
+            "query_maxlen":    _Leaf(int,           32),     # incl. [MASK] query augmentation
+            "doc_maxlen":      _Leaf(int,           300),    # doc cap; trim raw tags, keep doc2query
+            "mask_punctuation": _Leaf(bool,         True),
+            "bsize":           _Leaf(int,           32),
+            "dtype":           _Leaf(str,           "auto"),
+            "normalize":       _Leaf(bool,          True),   # cosine MaxSim (L2-normalize tokens)
+            "chunk_docs":      _Leaf(int,           4096),   # brute-force memory-safe doc chunking
+            "query_key":       _Leaf(str,           "colbert"),  # Query.per_channel focused query
+            "topk_internal":   _Leaf(int,           500),    # >= fusion_K (R7)
+            "weight":          _Leaf(float,         1.0),    # R7 RRF weight
+        },
     },
     "eval": {
         "parity_atol": _Leaf(float, 1e-9),
