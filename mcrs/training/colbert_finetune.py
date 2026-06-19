@@ -120,7 +120,8 @@ def rerank_pool(query_emb: np.ndarray, pool_embs: Sequence[np.ndarray],
 # Dev-eval callback (GPU integration; run on Colab, not unit-tested).
 # --------------------------------------------------------------------------- #
 def make_dev_eval_callback(pack: dict, eval_steps: int, dev_subset: int, k: int,
-                           seed: int, save_best_fn, early_stop_patience: int = 0):  # pragma: no cover
+                           seed: int, save_best_fn, early_stop_patience: int = 0,
+                           metrics_path: Optional[str] = None):  # pragma: no cover
     """TrainerCallback: every `eval_steps`, rerank a dev turn-1 subset with the LIVE model (same
     MaxSim re-probe as the gate); on a new best dev recall@k call `save_best_fn(model)` to persist it.
 
@@ -131,11 +132,24 @@ def make_dev_eval_callback(pack: dict, eval_steps: int, dev_subset: int, k: int,
     `pack` (built offline from the dev split + fusion pool) has: queries, pools (list[list[tid]]),
     golds, wall, tid_to_text. We encode the live model's query/doc tokens and rerank each pool —
     pool-reranking (not full-catalog) keeps eval cheap during training."""
+    import json
     import random
     import sys
 
     import torch
     from transformers import TrainerCallback
+
+    def _dump(record: dict):
+        """Append one metric record as a JSONL line to `metrics_path` (a Drive path) so the loss /
+        recall history SURVIVES a VM kill — cell output + in-memory state are lost on preemption.
+        Never let logging crash training."""
+        if not metrics_path:
+            return
+        try:
+            with open(metrics_path, "a") as f:
+                f.write(json.dumps(record) + "\n")
+        except Exception as e:
+            print(f"[dev-eval] metrics dump skipped: {e!r}", file=sys.stderr)
 
     n = len(pack["queries"])
     order = list(range(n))
@@ -176,10 +190,17 @@ def make_dev_eval_callback(pack: dict, eval_steps: int, dev_subset: int, k: int,
                 save_best_fn(model)
             tail = "  <- NEW BEST, saved" if is_best else f"  ({state['since_improve']} eval(s) since best)"
             print(f"[dev-eval] step {step} ({tag}) recall@{k}={score:.4f}{tail}", file=sys.stderr)
+            _dump({"kind": "eval", "step": step, "tag": tag, f"recall@{k}": score,
+                   "is_best": is_best, "best": state["best"]})
             if should_stop and control is not None:
                 control.should_training_stop = True
                 print(f"[dev-eval] EARLY STOP: {state['since_improve']} evals without improvement "
                       f"(best recall@{k}={state['best']:.4f})", file=sys.stderr)
+
+        def on_log(self, args, st, control, logs=None, **kwargs):
+            # HF Trainer emits train loss / lr / epoch here every logging_steps -> persist them too.
+            if logs:
+                _dump({"kind": "train", "step": st.global_step, **logs})
 
         def on_step_end(self, args, st, control, **kwargs):
             if st.global_step > 0 and st.global_step % eval_steps == 0:
@@ -199,7 +220,7 @@ def train_colbert(triples: Sequence[dict], out_dir: str, *, base_model: str = "l
                   k: int = 20, seed: int = 42, force: bool = False,
                   use_lora: bool = True, lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05,
                   lora_target_modules="all-linear", early_stop_patience: int = 2,
-                  use_distillation: bool = False) -> str:  # pragma: no cover
+                  use_distillation: bool = False, metrics_path: Optional[str] = None) -> str:  # pragma: no cover
     """Fine-tune ColBERT with PyLate Contrastive on the builder triples. Selects the best checkpoint
     via the dev-recall callback (with early stopping) when `dev_eval_pack` is given. Returns out_dir.
 
@@ -276,7 +297,8 @@ def train_colbert(triples: Sequence[dict], out_dir: str, *, base_model: str = "l
     callbacks = []
     if dev_eval_pack is not None:
         callbacks.append(make_dev_eval_callback(dev_eval_pack, eval_steps, dev_subset, k, seed,
-                                                save_best_fn, early_stop_patience=early_stop_patience))
+                                                save_best_fn, early_stop_patience=early_stop_patience,
+                                                metrics_path=metrics_path))
     else:
         print("[train-colbert] no dev_eval_pack: final-only save, NO dev selection", file=sys.stderr)
 

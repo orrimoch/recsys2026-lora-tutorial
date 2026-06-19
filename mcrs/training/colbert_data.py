@@ -233,6 +233,7 @@ def build_colbert_train_data(
     teacher_score_fn: Optional[Callable[[str, list[str]], Sequence[float]]] = None,
     fp_quantile: float = 0.0,
     teacher_query_builder: Any = None,
+    fusion_chunk: int = 2000,
 ) -> list[dict]:
     """End-to-end (TRAIN SPLIT ONLY): TurnContext stream -> contrastive triples.
 
@@ -254,14 +255,25 @@ def build_colbert_train_data(
     bc = [{"history_tids": r["history_tids"], "user_id": r["user_id"], "segment": r["segment"]}
           for r in positives]
     uids = [r["user_id"] for r in positives]
-    rng = range(len(queries))
+    # Chunk the fusion so the progress bar advances per-chunk (retrieval is per-query independent, so
+    # chunked == one batched call) AND peak memory is bounded. fusion_chunk<=0 = one call (old behavior).
+    chunk = fusion_chunk if (fusion_chunk and fusion_chunk > 0) else (len(queries) or 1)
+    pbar = None
     if show_progress:
         try:
             from tqdm.auto import tqdm
-            rng = tqdm(rng, desc="fusion pools (turns)")  # noqa: F841 (kept for symmetry/UX)
+            pbar = tqdm(total=len(queries), desc="fusion pools (turns)", unit="turn")
         except Exception:
-            pass
-    pools = fusion.batch_text_to_item_retrieval(queries, pool_size, batch_context=bc, user_ids=uids)
+            pbar = None
+    pools: list = []
+    for s in range(0, len(queries), chunk):
+        e = s + chunk
+        pools.extend(fusion.batch_text_to_item_retrieval(
+            queries[s:e], pool_size, batch_context=bc[s:e], user_ids=uids[s:e]))
+        if pbar is not None:
+            pbar.update(min(chunk, len(queries) - s))
+    if pbar is not None:
+        pbar.close()
 
     triples, stats = build_triples_from_pools(positives, pools, doc_text_fn, k_negs, min_negs=min_negs,
                                               teacher_score_fn=teacher_score_fn, fp_quantile=fp_quantile)
