@@ -36,7 +36,8 @@ def build_finetuned_k3_chain(
     adapter: str,
     adapter_revision: Optional[str] = None,
     ce_model: str = "BAAI/bge-reranker-v2-m3",
-    cross_encoder_k: int = 100,
+    cross_encoder_k: int = 200,   # MUST match the K3b train re-score depth (phase2_ce_finetune T1.1);
+                                  # serving a different depth than training is a train/serve skew.
     max_length: int = 2048,
     max_doc_tokens: int = 1100,
     dtype: str = "auto",

@@ -111,4 +111,15 @@ def test_features_handle_no_catalog():
     cands = [Candidate("x", channel_ranks={"bm25": 1}, rrf_score=0.1)]
     out = fb.build(_ctx(), cands)
     assert out[0].features["popularity_percentile"] == 0.5
+    assert out[0].features["s_norm"] == 0.0        # single/all-equal pool -> rng=1.0, no div0 (M2)
+    assert out[0].features["recency"] == 0.0       # 'x' not in catalog -> year 0 -> recency 0 (M3)
     assert set(out[0].features) == set(fb.feature_names)
+
+
+def test_recency_clamped_to_unit_interval():
+    # a future/garbage release year must not push recency above 1.0 (L1 upper clamp)
+    cat = Catalog([{"track_id": "fut", "popularity": 1.0, "release_date": "2099",
+                    "artist_name": ["X"]}], corpus_types=[])
+    fb = FeatureBuilder(cat, channel_labels=["bm25"])
+    out = fb.build(_ctx(), [Candidate("fut", channel_ranks={"bm25": 1}, rrf_score=0.1)])
+    assert out[0].features["recency"] == 1.0

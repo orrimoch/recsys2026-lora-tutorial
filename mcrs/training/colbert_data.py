@@ -86,7 +86,7 @@ def build_triples_from_pools(
     scores as relevant (likely unlabeled positives, T2.4) BEFORE taking the top-`k_negs`.
     Returns (triples, stats) where stats = {kept, dropped_no_gold, dropped_no_neg}."""
     triples: list[dict] = []
-    dropped_no_gold = dropped_no_neg = 0
+    dropped_no_gold = dropped_no_neg = dropped_fp = 0
     for row, pool in zip(positive_rows, pools):
         gold = row["gold_tid"]
         if gold not in pool:
@@ -95,10 +95,15 @@ def build_triples_from_pools(
         cand = [t for t in pool if t != gold]              # hardest-first non-gold candidates
         pos_score = neg_scores = None
         if teacher_score_fn is not None:
+            # The teacher scores relevance with its OWN query (`teacher_query` = the full query the
+            # cross-encoder serves with), NOT the student's focused ColBERT query — else the soft
+            # labels come from a query distribution the CE never saw. Falls back to row["query"].
+            tq = row.get("teacher_query") or row["query"]
             tids = [gold] + cand
-            score_of = dict(zip(tids, teacher_score_fn(row["query"], tids)))
+            score_of = dict(zip(tids, teacher_score_fn(tq, tids)))
             if fp_quantile > 0:                             # T2.4: drop teacher-flagged false negatives
                 drop = false_negative_drop_set(cand, score_of, fp_quantile)
+                dropped_fp += len(drop)
                 cand = [t for t in cand if t not in drop]
             negs = cand[:k_negs]
             pos_score = score_of[gold]
@@ -112,7 +117,8 @@ def build_triples_from_pools(
             query=row["query"], pos_text=doc_text_fn(gold), neg_texts=[doc_text_fn(t) for t in negs],
             pos_tid=gold, neg_tids=negs, session_id=row.get("session_id"),
             turn_number=row["turn_number"], pos_score=pos_score, neg_scores=neg_scores))
-    stats = {"kept": len(triples), "dropped_no_gold": dropped_no_gold, "dropped_no_neg": dropped_no_neg}
+    stats = {"kept": len(triples), "dropped_no_gold": dropped_no_gold,
+             "dropped_no_neg": dropped_no_neg, "dropped_fp": dropped_fp}
     return triples, stats
 
 
@@ -148,6 +154,7 @@ def iter_colbert_positives(
     query_builder: Any,
     gp_fn: Callable[[Any], Optional[str]],
     label_pos: str = LABEL_POS,
+    teacher_query_builder: Any = None,
 ) -> list[dict[str, Any]]:
     """One positive-training row per qualifying TurnContext: {query, gold_tid, turn_number,
     session_id, user_id, history_tids}.
@@ -167,7 +174,7 @@ def iter_colbert_positives(
         gold = gold_fn(ctx)
         if gold is None:
             continue
-        rows.append({
+        row = {
             "query": query_builder.build(ctx).text,
             "gold_tid": gold,
             "turn_number": tn,
@@ -175,7 +182,10 @@ def iter_colbert_positives(
             "user_id": ctx.user_id,
             "history_tids": list(ctx.history_tids),
             "segment": ctx.segment,
-        })
+        }
+        if teacher_query_builder is not None:           # full-query the teacher CE serves with (H2)
+            row["teacher_query"] = teacher_query_builder.build(ctx).text
+        rows.append(row)
     return rows
 
 
@@ -222,6 +232,7 @@ def build_colbert_train_data(
     report: Optional[dict] = None,
     teacher_score_fn: Optional[Callable[[str, list[str]], Sequence[float]]] = None,
     fp_quantile: float = 0.0,
+    teacher_query_builder: Any = None,
 ) -> list[dict]:
     """End-to-end (TRAIN SPLIT ONLY): TurnContext stream -> contrastive triples.
 
@@ -235,7 +246,8 @@ def build_colbert_train_data(
     gp_fn = lambda ctx: gp.get((ctx.session_id, ctx.turn_number))
 
     turns = list(conversations.turns())
-    positives = iter_colbert_positives(turns, gold_fn, query_builder, gp_fn)
+    positives = iter_colbert_positives(turns, gold_fn, query_builder, gp_fn,
+                                       teacher_query_builder=teacher_query_builder)
 
     queries = [r["query"] for r in positives]
     # segment plumbed through so the hard-neg pool matches serve once segment-weighted RRF is on (#4)

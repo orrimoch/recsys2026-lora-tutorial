@@ -107,7 +107,7 @@ class FeatureBuilder:
                                                and ranks.get("dense", 10**9) <= 5) else 0.0
             # T3.4 popularity-debias + recency
             f["popularity_percentile"] = self._pop_percentile(float(_first(meta.get("popularity"), 0.0)))
-            f["recency"] = max(0.0, 1.0 - (2026.0 - f["release_year"]) / 30.0) if f["release_year"] > 0 else 0.0
+            f["recency"] = min(1.0, max(0.0, 1.0 - (2026.0 - f["release_year"]) / 30.0)) if f["release_year"] > 0 else 0.0
             for name in self.score_names:
                 f[name] = float(self.score_fns[name](ctx, c.track_id))
             c.features = f

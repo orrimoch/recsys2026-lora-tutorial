@@ -231,6 +231,15 @@ def train_colbert(triples: Sequence[dict], out_dir: str, *, base_model: str = "l
         if not rows:
             raise ValueError("use_distillation=True but no triple carries teacher scores — build the "
                              "triples with a teacher_score_fn (see build_colbert_train_data) first")
+        # Guard a PARTIAL teacher-score cache (e.g. a teacher batch failed mid-build): KD silently
+        # training on a fraction of the data would look fine but learn little. Surface the ratio loudly.
+        if len(rows) < 0.5 * len(triples):
+            raise ValueError(f"only {len(rows)}/{len(triples)} triples carry teacher scores (<50%) — "
+                             "the KD score cache looks partial; rebuild the triples (FORCE_REBUILD).")
+        # Decorrelate session/turn-ordered rows: HF Trainer shuffles, but pre-shuffle deterministically
+        # so KD batches never depend on the trainer's sampler defaults (review H1).
+        import random as _random
+        _random.Random(seed).shuffle(rows)
     else:
         rows = triples_to_contrastive_rows(triples)
     mode = "distillation (KD)" if use_distillation else "contrastive"

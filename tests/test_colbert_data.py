@@ -237,3 +237,36 @@ class TestTeacherScoredTriples:
                                               teacher_score_fn=self._teacher(scores), fp_quantile=0.25)
         assert "a" not in triples[0]["neg_tids"]           # floor(4*0.25)=1 highest dropped
         assert len(triples[0]["neg_scores"]) == len(triples[0]["neg_tids"])
+
+
+# ----- review fixes: teacher_query (H2) + dropped_fp stat (M2) -----
+class _TeacherQB:
+    def build(self, ctx):
+        from mcrs.contracts import Query
+        return Query(text=f"TQ:{ctx.session_id}:{ctx.turn_number}")
+
+
+def test_iter_positives_adds_teacher_query_when_builder_given():
+    golds = {("s1", 1): "tGOLD1"}
+    rows = iter_colbert_positives([_ctx(1)], lambda ctx: golds.get((ctx.session_id, ctx.turn_number)),
+                                  _FakeQB(), lambda ctx: None, teacher_query_builder=_TeacherQB())
+    assert rows[0]["query"] == "Q:s1:1"            # student (focused) query
+    assert rows[0]["teacher_query"] == "TQ:s1:1"   # teacher (full) query, separate field
+
+
+def test_teacher_scores_with_teacher_query_not_student_query():
+    seen = {}
+    def teacher(q, tids):
+        seen["q"] = q
+        return [0.0 for _ in tids]
+    rows = [{"query": "focused", "gold_tid": "g", "turn_number": 1, "teacher_query": "FULL QUERY"}]
+    build_triples_from_pools(rows, [["g", "a", "b"]], _DOC, k_negs=2, teacher_score_fn=teacher)
+    assert seen["q"] == "FULL QUERY"               # H2: teacher uses the full query, not "focused"
+
+
+def test_dropped_fp_stat_counts_filtered_negatives():
+    scores = {"g": 9.0, "a": 8.5, "b": 1.0, "c": 2.0, "d": 0.5}
+    teacher = lambda q, tids: [scores[t] for t in tids]
+    _, stats = build_triples_from_pools([_pos("g")], [["g", "a", "b", "c", "d"]], _DOC, k_negs=3,
+                                        teacher_score_fn=teacher, fp_quantile=0.25)
+    assert stats["dropped_fp"] == 1                 # floor(4*0.25)=1 false-negative dropped

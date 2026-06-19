@@ -36,6 +36,26 @@ Conventions
 - [ ] T3.5 Per-segment cold/warm boosters (`mcrs/rerank/lgbm.py:fit/rerank`). NOT STARTED — structural (changes the saved-model format + serve routing in phase3_blindA); do as a focused increment.
 - [ ] T3.6 GATED: goal-progress graded labels (`mcrs/rerank/train.py:build_rerank_groups`, `mcrs/rerank/lgbm.py:_xy/fit`). Pre-gate: confirm `goal_progress_assessments` present on serve/blind rows; mind the train/test shift (44/43 vs 77/10). Ship gate: overall lift AND `DOES_NOT_MOVE_TOWARD_GOAL` slice not regressed — else revert.
 
+## Review (Phases 1–3) — adversarial, 3 reviewers, one per phase
+
+Verdict: SHIP. No CRITICAL/HIGH leak; every default-off lever proven an EXACT no-op until enabled.
+Fix-first items applied + tested in this batch:
+- K3b serve depth: `mcrs/run/k3b_serve.py` default `cross_encoder_k` 100 → 200 (was a latent train/serve skew vs T1.1).
+- ColBERT KD teacher query (H2): the teacher CE now scores with the FULL query it serves with (threaded `teacher_query_builder=qb_full`), not ColBERT's focused query — else KD soft labels come from an unseen query dist.
+- ColBERT KD robustness: seeded pre-shuffle of KD rows (decorrelate session order); raise if <50% of triples carry teacher scores (partial-cache guard); `dropped_fp` stat surfaced.
+- K2 `recency` clamped to [0,1]; added edge-case tests (all-equal `_norm`, missing-date recency, future-year clamp).
+
+KEY CAVEAT (Phase 1 H1): the K3b LoRA adapter is NOT chained in `phase3_blindA_submission.ipynb`
+today (blind serve = fusion → K2, with the cross-encoder only as a frozen K2 feature at K=50). So the
+K3b K=200 lever improves the K3b gate and its role as the ColBERT distillation teacher, but will NOT
+move the leaderboard until the adapter is chained at serve with matching `cross_encoder_k=200` — and
+chained-K3 previously regressed dev, so that wiring is its own gated decision (see T4 / Avoid list).
+
+Colab pre-flight (cannot verify locally): K2 `eval_at` in both constructor + fit (lightgbm absent);
+the PyLate KD dataset/collator API for the pinned pylate; enable + gate the off-by-default levers
+(K3b/ColBERT false-neg denoise, ColBERT distillation) on dev nDCG@20 + the off-goal slice +
+`dropped_few_neg`/`dropped_fp` on-vs-off.
+
 ## Phase 4 — integrate + submit
 - [ ] T4.1 Wire winners into `nb/phase3_blindA_submission.ipynb` (new K2 path / `K2_MODEL_PATH`, ColBERT checkpoint, K3b adapter). Run `BLIND=False` dev-confirm; read nDCG@20.
 - [ ] T4.2 If dev-confirm beats the current Blind-A best, retrain winners on train+dev, then `BLIND=True` submit. Gate: blind layout checks pass (80 rows, keys==targets, non-empty).
