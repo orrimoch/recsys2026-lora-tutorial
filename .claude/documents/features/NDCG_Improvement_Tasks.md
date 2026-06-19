@@ -29,11 +29,11 @@ Conventions
 - [x] T2.5 `K_NEGS` 15 → 25 — applied in `nb/phase2_colbert_finetune.ipynb`. COLAB GATE PENDING: small G3 lift.
 
 ## Phase 3 — K2 LGBM (re-rank the richer pool; recompute CE feature at new depth)
-- [ ] T3.1 BIGGEST-a (low risk): consensus/interaction features (`top5_bm25_and_dense`, `consensus_3plus`, `dense_cf_agree`) + per-turn calibration of `dense_cos` in `mcrs/rerank/features.py:build()`. Gate: proxy nDCG@20 up; check feature importances are non-dead.
-- [ ] T3.2 BIGGEST-b: `lambdarank_truncation_level=20` in `mcrs/rerank/lgbm.py:fit()`. Gate: lift or neutral (keep if ≥0).
-- [ ] T3.3 Recompute the frozen `ce_score` K2 feature at the T1.5 depth (`nb/phase2_rerank.ipynb` CE-stack block). Gate: lift from a better-aligned feature.
-- [ ] T3.4 Popularity-percentile + recency features (`mcrs/rerank/features.py`). Gate: lift, and catalog-diversity not worse.
-- [ ] T3.5 Per-segment cold/warm boosters (`mcrs/rerank/lgbm.py:fit/rerank`). Gate: cold-slice lift, warm not regressed.
+- [x] T3.1 BIGGEST-a (low risk): interaction/consensus features (`n_channels_top10`, `consensus_3plus`, `top5_bm25_and_dense`) + per-turn min-max calibration of every injected score (`<score>_norm`) in `mcrs/rerank/features.py:build()`. Built + unit-tested (on by default). COLAB GATE PENDING: proxy nDCG@20 up; importances non-dead.
+- [x] T3.2 BIGGEST-b: `lambdarank_truncation_level=20` (+ `eval_at=[20]`) in `mcrs/rerank/lgbm.py:fit()`. Applied (on by default). COLAB GATE PENDING: lift or neutral.
+- [ ] T3.3 Recompute the frozen `ce_score` K2 feature at the T1.5 depth (`nb/phase2_rerank.ipynb` CE-stack block). NOT STARTED (minor notebook knob; the frozen-CE K is separate from K3b's re-score depth).
+- [x] T3.4 Popularity-percentile + recency features (`mcrs/rerank/features.py`). Built + unit-tested (on by default). COLAB GATE PENDING: lift, catalog-diversity not worse.
+- [ ] T3.5 Per-segment cold/warm boosters (`mcrs/rerank/lgbm.py:fit/rerank`). NOT STARTED — structural (changes the saved-model format + serve routing in phase3_blindA); do as a focused increment.
 - [ ] T3.6 GATED: goal-progress graded labels (`mcrs/rerank/train.py:build_rerank_groups`, `mcrs/rerank/lgbm.py:_xy/fit`). Pre-gate: confirm `goal_progress_assessments` present on serve/blind rows; mind the train/test shift (44/43 vs 77/10). Ship gate: overall lift AND `DOES_NOT_MOVE_TOWARD_GOAL` slice not regressed — else revert.
 
 ## Phase 4 — integrate + submit

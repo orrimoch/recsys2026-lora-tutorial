@@ -40,13 +40,37 @@ class FeatureBuilder:
         # Not label-derived (fixed encoder/index) -> leak-free; a TRAINED score would need OOF.
         self.score_fns = dict(score_fns or {})
         self.score_names = sorted(self.score_fns)
+        # T3.4: precompute the catalog popularity distribution once for percentile lookup (debias —
+        # lets K2 down-weight popularity except when the query matches). None when no catalog (tests).
+        self._pop_sorted = None
+        ids = getattr(catalog, "index_to_id", None) if catalog is not None else None
+        if ids:
+            try:
+                self._pop_sorted = sorted(
+                    float(_first(catalog.metadata(t).get("popularity"), 0.0)) for t in ids)
+            except Exception:
+                self._pop_sorted = None
         self.feature_names = (
             ["rrf_score", "n_channels_hit", "best_rank_inv"]
             + [f"rank_inv__{l}" for l in self.channel_labels]
             + ["turn_number", "history_len", "is_cold", "query_len",
                "log_popularity", "release_year", "artist_in_history"]
+            # T3.1 interaction/consensus (multi-view agreement — leak-free, built from existing ranks)
+            + ["n_channels_top10", "consensus_3plus", "top5_bm25_and_dense"]
+            # T3.4 popularity-debias + recency
+            + ["popularity_percentile", "recency"]
             + self.score_names
+            # T3.1 per-turn min-max calibration of each injected score (scale-comparable across turns)
+            + [f"{n}_norm" for n in self.score_names]
         )
+
+    def _pop_percentile(self, pop: float) -> float:
+        """Fraction of catalog tracks no more popular than `pop` (0..1). 0.5 when no catalog dist."""
+        arr = self._pop_sorted
+        if not arr:
+            return 0.5
+        import bisect
+        return bisect.bisect_right(arr, pop) / len(arr)
 
     def build(self, ctx: TurnContext, candidates: list[Candidate]) -> list[Candidate]:
         hist_artists: set = set()
@@ -74,9 +98,27 @@ class FeatureBuilder:
             }
             for l in self.channel_labels:
                 f[f"rank_inv__{l}"] = (1.0 / ranks[l]) if l in ranks else 0.0
+            # T3.1 interaction/consensus: agreement across channels is a strong relevance signal that
+            # per-channel rank_inv alone can't express (a tree can't AND two columns without a split).
+            n_top10 = sum(1 for r in ranks.values() if r <= 10)
+            f["n_channels_top10"] = float(n_top10)
+            f["consensus_3plus"] = 1.0 if n_top10 >= 3 else 0.0
+            f["top5_bm25_and_dense"] = 1.0 if (ranks.get("bm25", 10**9) <= 5
+                                               and ranks.get("dense", 10**9) <= 5) else 0.0
+            # T3.4 popularity-debias + recency
+            f["popularity_percentile"] = self._pop_percentile(float(_first(meta.get("popularity"), 0.0)))
+            f["recency"] = max(0.0, 1.0 - (2026.0 - f["release_year"]) / 30.0) if f["release_year"] > 0 else 0.0
             for name in self.score_names:
                 f[name] = float(self.score_fns[name](ctx, c.track_id))
             c.features = f
+        # T3.1 per-turn calibration: min-max each injected score WITHIN this turn's pool so magnitudes
+        # are comparable across turns (query length/specificity shifts the raw scale otherwise).
+        for name in self.score_names:
+            vals = [c.features[name] for c in candidates]
+            lo, hi = (min(vals), max(vals)) if vals else (0.0, 0.0)
+            rng = (hi - lo) or 1.0
+            for c in candidates:
+                c.features[f"{name}_norm"] = (c.features[name] - lo) / rng
         return candidates
 
     def matrix(self, candidates: list[Candidate]):

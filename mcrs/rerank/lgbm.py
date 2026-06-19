@@ -102,7 +102,10 @@ class LGBMReranker:
         import lightgbm as lgb
 
         params = dict(objective="lambdarank", metric="ndcg", n_estimators=self.n_estimators,
-                      random_state=self.seed, verbosity=-1, num_leaves=15, min_child_samples=5)
+                      random_state=self.seed, verbosity=-1, num_leaves=15, min_child_samples=5,
+                      # T3.2: align LambdaMART's pair generation with the eval horizon (nDCG@20) instead
+                      # of the default 30 — concentrate the gradient on the top-20 we're scored on.
+                      lambdarank_truncation_level=20, eval_at=[20])
         params.update(self.params)
         self.model = lgb.LGBMRanker(**params)
         self.feature_names_ = list(self.fb.feature_names)   # pin the trained feature spec

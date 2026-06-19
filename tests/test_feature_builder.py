@@ -68,3 +68,47 @@ def test_build_is_pure_and_keys_match_feature_names():
     twice = fb.build(_ctx(), _cands())[0].features
     assert once == twice
     assert set(once) == set(fb.feature_names)
+
+
+# ----- T3.1: interaction / consensus features + per-turn score calibration -----
+def test_interaction_consensus_features():
+    fb = FeatureBuilder(_CAT, channel_labels=["bm25", "dense", "cf"])
+    # gold-ish cand hit top-5 by both bm25 AND dense, and by 3 channels within top-10
+    cand = Candidate("c", channel_ranks={"bm25": 1, "dense": 3, "cf": 8}, rrf_score=0.05)
+    other = Candidate("b", channel_ranks={"bm25": 40}, rrf_score=0.01)
+    c, b = fb.build(_ctx(), [cand, other])
+    assert c.features["n_channels_top10"] == 3.0
+    assert c.features["consensus_3plus"] == 1.0
+    assert c.features["top5_bm25_and_dense"] == 1.0
+    assert b.features["n_channels_top10"] == 0.0       # rank 40 is outside top-10
+    assert b.features["consensus_3plus"] == 0.0
+    assert b.features["top5_bm25_and_dense"] == 0.0
+
+
+def test_per_turn_score_calibration_minmax():
+    fb = FeatureBuilder(_CAT, channel_labels=["bm25"],
+                        score_fns={"dense_cos": lambda ctx, tid: {"c": 0.9, "b": 0.1}[tid]})
+    assert "dense_cos_norm" in fb.feature_names
+    c, b = fb.build(_ctx(), _cands())
+    assert c.features["dense_cos"] == 0.9 and b.features["dense_cos"] == 0.1   # raw preserved
+    assert c.features["dense_cos_norm"] == 1.0 and b.features["dense_cos_norm"] == 0.0  # min-max in pool
+
+
+# ----- T3.4: popularity percentile + recency -----
+def test_popularity_percentile_and_recency():
+    fb = FeatureBuilder(_CAT, channel_labels=["bm25"])
+    c, b = fb.build(_ctx(), _cands())
+    # catalog pops: a=50, b=10, c=5 -> c (5.0) is the least popular -> low percentile; b (10.0) higher
+    assert 0.0 < c.features["popularity_percentile"] <= b.features["popularity_percentile"]
+    # recency: 1994 is more recent than 1959 -> higher recency, both in [0,1]
+    assert 0.0 <= b.features["recency"] <= c.features["recency"] <= 1.0
+
+
+def test_features_handle_no_catalog():
+    # catalog=None path: percentile defaults to 0.5, no crash, *_norm present
+    fb = FeatureBuilder(None, channel_labels=["bm25"],
+                        score_fns={"s": lambda ctx, tid: 1.0})
+    cands = [Candidate("x", channel_ranks={"bm25": 1}, rrf_score=0.1)]
+    out = fb.build(_ctx(), cands)
+    assert out[0].features["popularity_percentile"] == 0.5
+    assert set(out[0].features) == set(fb.feature_names)
