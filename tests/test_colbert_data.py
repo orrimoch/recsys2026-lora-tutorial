@@ -204,3 +204,36 @@ class TestDevEvalPackFromPools:
         pack = dev_eval_pack_from_pools(rows, [["x"], ["g2"]], _DOC)
         assert pack["queries"] == ["q2"] and pack["golds"] == ["g2"]
         assert pack["pools"] == [["g2"]]
+
+
+# ----- T2.1 / T2.4: teacher distillation scores + false-negative drop on hard negs -----
+class TestTeacherScoredTriples:
+    def _teacher(self, scores):
+        # teacher_score_fn(query, tids) -> scores; lookup from a fixed {tid: score} map
+        return lambda q, tids: [scores[t] for t in tids]
+
+    def test_teacher_attaches_pos_and_neg_scores(self):
+        rows = [_pos("g")]
+        pools = [["g", "a", "b", "c"]]
+        scores = {"g": 5.0, "a": 1.0, "b": 2.0, "c": 3.0}
+        triples, _ = build_triples_from_pools(rows, pools, _DOC, k_negs=3,
+                                              teacher_score_fn=self._teacher(scores))
+        t = triples[0]
+        assert t["pos_score"] == 5.0                       # gold's teacher score
+        assert t["neg_tids"] == ["a", "b", "c"]
+        assert t["neg_scores"] == [1.0, 2.0, 3.0]          # aligned to neg_tids order
+
+    def test_no_teacher_omits_scores(self):
+        triples, _ = build_triples_from_pools([_pos("g")], [["g", "a", "b"]], _DOC, k_negs=2)
+        assert "pos_score" not in triples[0] and "neg_scores" not in triples[0]
+
+    def test_fp_quantile_drops_teacher_false_negatives(self):
+        # 'a' is a likely unlabeled positive (teacher scores it ~gold); fp_quantile must drop it
+        # BEFORE the top-k cut, so it never becomes a negative.
+        rows = [_pos("g")]
+        pools = [["g", "a", "b", "c", "d"]]               # 4 non-gold candidates
+        scores = {"g": 9.0, "a": 8.5, "b": 1.0, "c": 2.0, "d": 0.5}
+        triples, _ = build_triples_from_pools(rows, pools, _DOC, k_negs=3,
+                                              teacher_score_fn=self._teacher(scores), fp_quantile=0.25)
+        assert "a" not in triples[0]["neg_tids"]           # floor(4*0.25)=1 highest dropped
+        assert len(triples[0]["neg_scores"]) == len(triples[0]["neg_tids"])

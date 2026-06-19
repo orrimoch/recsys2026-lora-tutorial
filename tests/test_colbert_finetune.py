@@ -14,6 +14,7 @@ from mcrs.training.colbert_finetune import (
     existing_artifact_blocks,
     rerank_pool,
     triples_to_contrastive_rows,
+    triples_to_distillation_rows,
     update_best_state,
     wall_recall_at_k,
 )
@@ -78,6 +79,28 @@ class TestTriplesToContrastiveRows:
 
     def test_empty_input_yields_empty(self):
         assert triples_to_contrastive_rows([]) == []
+
+
+class TestTriplesToDistillationRows:
+    def test_builds_query_documents_scores(self):
+        # T2.1: documents = [positive] + negatives; scores = [pos_score] + neg_scores, aligned.
+        triples = [{"query": "q", "positive": "p", "negatives": ["n1", "n2"],
+                    "pos_score": 5.0, "neg_scores": [1.0, 2.0]}]
+        assert triples_to_distillation_rows(triples) == [
+            {"query": "q", "documents": ["p", "n1", "n2"], "scores": [5.0, 1.0, 2.0]}]
+
+    def test_skips_triples_without_teacher_scores(self):
+        # the plain contrastive triples (no scores) have nothing to distill -> dropped.
+        triples = [{"query": "q", "positive": "p", "negatives": ["n1"]}]
+        assert triples_to_distillation_rows(triples) == []
+
+    def test_skips_malformed_score_length_mismatch(self):
+        triples = [{"query": "q", "positive": "p", "negatives": ["n1", "n2"],
+                    "pos_score": 1.0, "neg_scores": [1.0]}]      # 2 negs but 1 score
+        assert triples_to_distillation_rows(triples) == []
+
+    def test_empty_input_yields_empty(self):
+        assert triples_to_distillation_rows([]) == []
 
 
 class TestCountQueryCollisions:

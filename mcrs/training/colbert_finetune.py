@@ -34,6 +34,30 @@ def triples_to_contrastive_rows(triples: Sequence[dict]) -> list[dict[str, str]]
     return rows
 
 
+def triples_to_distillation_rows(triples: Sequence[dict]) -> list[dict]:
+    """Builder triples -> PyLate knowledge-distillation rows for `losses.Distillation` (T2.1).
+
+    Each row is {query, documents: [positive] + negatives, scores: [pos_score] + neg_scores} — the
+    teacher's relevance over the document list is the soft label the student MaxSim learns to match.
+    `documents[0]` is always the positive, aligned with `scores[0]`. Triples WITHOUT teacher scores
+    (the plain contrastive path) are skipped — KD has nothing to distill from them. Malformed rows
+    (scores/negatives length mismatch) are skipped rather than silently misaligned."""
+    rows: list[dict] = []
+    for t in triples:
+        if t.get("pos_score") is None or t.get("neg_scores") is None:
+            continue
+        negs = list(t.get("negatives") or [])
+        neg_scores = list(t["neg_scores"])
+        if len(negs) != len(neg_scores):
+            continue
+        rows.append({
+            "query": t["query"],
+            "documents": [t["positive"]] + negs,
+            "scores": [float(t["pos_score"])] + [float(s) for s in neg_scores],
+        })
+    return rows
+
+
 def count_query_collisions(batch_rows: Sequence[dict]) -> int:
     """Number of rows whose `query` repeats an earlier row in the same batch. 0 means every
     (query, positive) gold is unique within the batch, so no query's own gold becomes an in-batch
@@ -174,7 +198,8 @@ def train_colbert(triples: Sequence[dict], out_dir: str, *, base_model: str = "l
                   eval_steps: int = 500, dev_subset: int = 300, q_len: int = 96, d_len: int = 96,
                   k: int = 20, seed: int = 42, force: bool = False,
                   use_lora: bool = True, lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.05,
-                  lora_target_modules="all-linear", early_stop_patience: int = 2) -> str:  # pragma: no cover
+                  lora_target_modules="all-linear", early_stop_patience: int = 2,
+                  use_distillation: bool = False) -> str:  # pragma: no cover
     """Fine-tune ColBERT with PyLate Contrastive on the builder triples. Selects the best checkpoint
     via the dev-recall callback (with early stopping) when `dev_eval_pack` is given. Returns out_dir.
 
@@ -201,8 +226,15 @@ def train_colbert(triples: Sequence[dict], out_dir: str, *, base_model: str = "l
     from sentence_transformers.training_args import BatchSamplers
     from pylate import losses, models, utils
 
-    rows = triples_to_contrastive_rows(triples)
-    print(f"[train-colbert] {len(rows)} contrastive rows | base={base_model} | "
+    if use_distillation:
+        rows = triples_to_distillation_rows(triples)
+        if not rows:
+            raise ValueError("use_distillation=True but no triple carries teacher scores — build the "
+                             "triples with a teacher_score_fn (see build_colbert_train_data) first")
+    else:
+        rows = triples_to_contrastive_rows(triples)
+    mode = "distillation (KD)" if use_distillation else "contrastive"
+    print(f"[train-colbert] {len(rows)} {mode} rows | base={base_model} | "
           f"{'LoRA r=%d a=%d' % (lora_r, lora_alpha) if use_lora else 'full-FT'} | lr={lr}", file=sys.stderr)
     train_dataset = Dataset.from_list(rows)
 
@@ -224,7 +256,13 @@ def train_colbert(triples: Sequence[dict], out_dir: str, *, base_model: str = "l
             Path(out_dir).mkdir(parents=True, exist_ok=True)
             m.save_pretrained(out_dir)
 
-    train_loss = losses.Contrastive(model=model)
+    # KD (T2.1): distill the K3b cross-encoder teacher's graded relevance into the late-interaction
+    # student — the standard ColBERTv2-style recipe (KL/margin-MSE on teacher vs student scores).
+    # VERIFY ON COLAB for the pinned pylate version: some versions expect the KD dataset pre-processed
+    # via Dataset.map(utils.KDProcessing(...)) and/or a distillation-specific collator. The data shape
+    # produced above ({query, documents, scores}) is the inline form; adjust the two lines below if the
+    # installed pylate's losses.Distillation expects the id-based (query_id, document_ids) form.
+    train_loss = losses.Distillation(model=model) if use_distillation else losses.Contrastive(model=model)
 
     callbacks = []
     if dev_eval_pack is not None:
@@ -237,26 +275,28 @@ def train_colbert(triples: Sequence[dict], out_dir: str, *, base_model: str = "l
         output_dir=out_dir, num_train_epochs=epochs, per_device_train_batch_size=batch_size,
         learning_rate=lr, weight_decay=weight_decay, warmup_ratio=warmup_ratio, max_grad_norm=1.0,
         bf16=True, seed=seed, logging_steps=50, save_strategy="no",  # callback owns saving
-        # Exploded triples -> the same (query, positive) appears K_NEGS times; Contrastive uses IN-BATCH
-        # negatives, so two copies in a batch would make a query's own gold an in-batch negative (false
-        # negative). NO_DUPLICATES rejects a row whose any column value already appears in the batch, so a
-        # repeated `query` value is dropped — preventing the collision. The guard below VERIFIES this on
-        # the first real batch; the robust v3 fix (if it ever fails) is one row per triple + negatives list.
-        batch_sampler=BatchSamplers.NO_DUPLICATES)
+        # Contrastive: exploded triples -> the same (query, positive) appears K_NEGS times; Contrastive
+        # uses IN-BATCH negatives, so two copies in a batch would make a query's own gold an in-batch
+        # negative. NO_DUPLICATES drops a row whose any column value already appears in the batch. The
+        # guard below VERIFIES this on the first batch. Distillation rows are one-per-query with an
+        # explicit documents+scores list (no in-batch-negative reuse), so the default sampler is correct.
+        batch_sampler=(BatchSamplers.BATCH_SAMPLER if use_distillation else BatchSamplers.NO_DUPLICATES))
     trainer = SentenceTransformerTrainer(
         model=model, args=targs, train_dataset=train_dataset, loss=train_loss,
         data_collator=utils.ColBERTCollator(model.tokenize), callbacks=callbacks)
 
     # VERIFY the NO_DUPLICATES sampler on the first real batch: count repeated queries (in-batch false
     # negatives). 0 = safe. If >0, the sampler did not dedup and the v3 one-row-per-triple fix is needed.
-    try:
-        first_idx = next(iter(trainer.get_train_dataloader().batch_sampler))
-        dups = count_query_collisions([train_dataset[int(i)] for i in first_idx])
-        warn = "" if dups == 0 else "  WARNING: NO_DUPLICATES did NOT dedup — apply the v3 fix"
-        print(f"[train-colbert] first-batch query collisions: {dups} (0 = no in-batch false negatives)"
-              f"{warn}", file=sys.stderr)
-    except Exception as e:                            # never block training on the diagnostic
-        print(f"[train-colbert] first-batch collision check skipped: {e!r}", file=sys.stderr)
+    # (Contrastive only — distillation rows are one-per-query, no in-batch-negative collision to check.)
+    if not use_distillation:
+        try:
+            first_idx = next(iter(trainer.get_train_dataloader().batch_sampler))
+            dups = count_query_collisions([train_dataset[int(i)] for i in first_idx])
+            warn = "" if dups == 0 else "  WARNING: NO_DUPLICATES did NOT dedup — apply the v3 fix"
+            print(f"[train-colbert] first-batch query collisions: {dups} (0 = no in-batch false negatives)"
+                  f"{warn}", file=sys.stderr)
+        except Exception as e:                        # never block training on the diagnostic
+            print(f"[train-colbert] first-batch collision check skipped: {e!r}", file=sys.stderr)
 
     trainer.train()
 

@@ -22,11 +22,11 @@ Conventions
 - [ ] T1.5 Freeze the winning K3b adapter as the teacher for Phase 2 and as the K2 frozen-CE source (record adapter id + depth).
 
 ## Phase 2 — ColBERT (uses the Phase 1 teacher)
-- [ ] T2.1 BIGGEST: distillation D3 — add per-neg teacher scores to triples (`mcrs/training/colbert_data.py:42-53`), offline-score `(query,[gold+negs])` with the T1.5 K3b, switch loss Contrastive→`pylate.losses.Distillation` behind `USE_DISTILLATION` (`mcrs/training/colbert_finetune.py:227`, `nb/phase2_colbert_finetune.ipynb`). Gate: G3 recall gate passes AND proxy nDCG@20 up. Est +0.015–0.03 ceiling.
-- [ ] T2.2 `D_LEN` 300 → 512 (`nb/phase2_colbert_finetune.ipynb`, re-index `mcrs/training/colbert_index.py`). Gate: G3 recall up (~14% docs were truncated); index size acceptable.
-- [ ] T2.3 Faceted / multi-aspect query A3 (`mcrs/retrieval/query.py:_build_enriched` + notebook wiring). Gate: G3 recall up vs focused-only; keep query focused, just richer aspects.
-- [ ] T2.4 False-negative filter on hard negs via teacher (`mcrs/training/colbert_data.py:32-37`). Gate: lift or cleaner contrast (no recall loss).
-- [ ] T2.5 `K_NEGS` 15 → 25 (`nb/phase2_colbert_finetune.ipynb`). Gate: small G3 lift; cheap.
+- [x] T2.1 BIGGEST: distillation D3 — DATA LAYER BUILT + TESTED (`build_triples_from_pools(teacher_score_fn)` attaches `pos_score`/`neg_scores`; `triples_to_distillation_rows` -> `{query, documents, scores}`); loss switch wired behind `USE_DISTILLATION` (`losses.Distillation` + non-NO_DUPLICATES sampler). COLAB: VERIFY the pinned-pylate KD dataset/collator API, then enable + gate (G3 recall AND proxy nDCG@20 up). Teacher = K3b adapter.
+- [x] T2.2 `D_LEN` 300 → 512 — applied in `nb/phase2_colbert_finetune.ipynb`; busts the PLAID index via the `d{D_LEN}` doc-sig. COLAB GATE PENDING: G3 recall up; index size acceptable.
+- [ ] T2.3 Faceted / multi-aspect query A3 (`mcrs/retrieval/query.py` + notebook wiring). Gate: G3 recall up vs focused-only; keep query focused, just richer aspects. NOT STARTED.
+- [x] T2.4 False-negative filter on hard negs via teacher — BUILT + TESTED (`build_triples_from_pools(fp_quantile)` reuses `ce_data.false_negative_drop_set`); wired behind `FALSE_NEG_DROP_QUANTILE` (default 0.0). COLAB: enable + gate (lift / no recall loss).
+- [x] T2.5 `K_NEGS` 15 → 25 — applied in `nb/phase2_colbert_finetune.ipynb`. COLAB GATE PENDING: small G3 lift.
 
 ## Phase 3 — K2 LGBM (re-rank the richer pool; recompute CE feature at new depth)
 - [ ] T3.1 BIGGEST-a (low risk): consensus/interaction features (`top5_bm25_and_dense`, `consensus_3plus`, `dense_cf_agree`) + per-turn calibration of `dense_cos` in `mcrs/rerank/features.py:build()`. Gate: proxy nDCG@20 up; check feature importances are non-dead.

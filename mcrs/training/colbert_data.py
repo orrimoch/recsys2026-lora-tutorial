@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Optional, Sequence
 
+from mcrs.training.ce_data import false_negative_drop_set
+
 LABEL_POS = "MOVES_TOWARD_GOAL"
 
 
@@ -39,10 +41,13 @@ def select_hard_negatives(pool: Sequence[str], gold_tid: str, k: int) -> Optiona
 
 def build_colbert_triple(query: str, pos_text: str, neg_texts: list[str], pos_tid: str,
                          neg_tids: list[str], session_id: Optional[str],
-                         turn_number: int) -> dict[str, Any]:
+                         turn_number: int, *, pos_score: Optional[float] = None,
+                         neg_scores: Optional[list[float]] = None) -> dict[str, Any]:
     """One JSONL training row. `negatives` are doc texts (what ColBERT trains on); `*_tids` are
-    kept for diagnostics / val nDCG."""
-    return {
+    kept for diagnostics / val nDCG. When a distillation teacher is used, `pos_score`/`neg_scores`
+    carry the teacher's relevance for the positive and each negative (soft labels for KD); they are
+    omitted entirely for the plain contrastive path so those JSONL rows are byte-identical."""
+    row = {
         "query": query,
         "positive": pos_text,
         "negatives": list(neg_texts),
@@ -51,6 +56,11 @@ def build_colbert_triple(query: str, pos_text: str, neg_texts: list[str], pos_ti
         "session_id": session_id,
         "turn_number": turn_number,
     }
+    if pos_score is not None:
+        row["pos_score"] = float(pos_score)
+    if neg_scores is not None:
+        row["neg_scores"] = [float(s) for s in neg_scores]
+    return row
 
 
 def build_triples_from_pools(
@@ -59,29 +69,49 @@ def build_triples_from_pools(
     doc_text_fn: Callable[[str], str],
     k_negs: int,
     min_negs: int = 1,
+    *,
+    teacher_score_fn: Optional[Callable[[str, list[str]], Sequence[float]]] = None,
+    fp_quantile: float = 0.0,
 ) -> tuple[list[dict], dict]:
-    """Assemble contrastive triples from positive rows + their aligned candidate pools.
+    """Assemble triples from positive rows + their aligned candidate pools.
 
     `pools[i]` is the hardest-first candidate tids for `positive_rows[i]` (e.g. an RRF fusion pool).
-    For each row: take the gold from the pool's negatives (`select_hard_negatives`), render gold +
-    negatives to doc text, emit a `build_colbert_triple`. Drops the row when the gold is not in the
-    pool (unrecoverable recall miss) or it yields < `min_negs` negatives (no pair to contrast).
+    For each row: take the gold + top-`k_negs` non-gold pool items, render to doc text, emit a
+    `build_colbert_triple`. Drops the row when the gold is not in the pool (unrecoverable recall miss)
+    or it yields < `min_negs` negatives.
+
+    `teacher_score_fn(query, tids) -> scores` (a frozen/fine-tuned cross-encoder, T2.1/T2.4): when given,
+    scores [gold] + candidate negatives so the triple carries teacher soft labels (`pos_score`/
+    `neg_scores`) for KD, AND — when `fp_quantile>0` — drops the top fraction of negatives the teacher
+    scores as relevant (likely unlabeled positives, T2.4) BEFORE taking the top-`k_negs`.
     Returns (triples, stats) where stats = {kept, dropped_no_gold, dropped_no_neg}."""
     triples: list[dict] = []
     dropped_no_gold = dropped_no_neg = 0
     for row, pool in zip(positive_rows, pools):
         gold = row["gold_tid"]
-        negs = select_hard_negatives(pool, gold, k_negs)
-        if negs is None:
+        if gold not in pool:
             dropped_no_gold += 1
             continue
+        cand = [t for t in pool if t != gold]              # hardest-first non-gold candidates
+        pos_score = neg_scores = None
+        if teacher_score_fn is not None:
+            tids = [gold] + cand
+            score_of = dict(zip(tids, teacher_score_fn(row["query"], tids)))
+            if fp_quantile > 0:                             # T2.4: drop teacher-flagged false negatives
+                drop = false_negative_drop_set(cand, score_of, fp_quantile)
+                cand = [t for t in cand if t not in drop]
+            negs = cand[:k_negs]
+            pos_score = score_of[gold]
+            neg_scores = [score_of[t] for t in negs]
+        else:
+            negs = cand[:k_negs]
         if len(negs) < min_negs:
             dropped_no_neg += 1
             continue
         triples.append(build_colbert_triple(
             query=row["query"], pos_text=doc_text_fn(gold), neg_texts=[doc_text_fn(t) for t in negs],
             pos_tid=gold, neg_tids=negs, session_id=row.get("session_id"),
-            turn_number=row["turn_number"]))
+            turn_number=row["turn_number"], pos_score=pos_score, neg_scores=neg_scores))
     stats = {"kept": len(triples), "dropped_no_gold": dropped_no_gold, "dropped_no_neg": dropped_no_neg}
     return triples, stats
 
@@ -190,6 +220,8 @@ def build_colbert_train_data(
     min_negs: int = 1,
     show_progress: bool = False,
     report: Optional[dict] = None,
+    teacher_score_fn: Optional[Callable[[str, list[str]], Sequence[float]]] = None,
+    fp_quantile: float = 0.0,
 ) -> list[dict]:
     """End-to-end (TRAIN SPLIT ONLY): TurnContext stream -> contrastive triples.
 
@@ -219,7 +251,8 @@ def build_colbert_train_data(
             pass
     pools = fusion.batch_text_to_item_retrieval(queries, pool_size, batch_context=bc, user_ids=uids)
 
-    triples, stats = build_triples_from_pools(positives, pools, doc_text_fn, k_negs, min_negs=min_negs)
+    triples, stats = build_triples_from_pools(positives, pools, doc_text_fn, k_negs, min_negs=min_negs,
+                                              teacher_score_fn=teacher_score_fn, fp_quantile=fp_quantile)
     if report is not None:
         report.update(positives=len(positives), **stats)
     return triples
