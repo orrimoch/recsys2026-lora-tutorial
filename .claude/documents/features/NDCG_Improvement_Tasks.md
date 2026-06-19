@@ -57,7 +57,25 @@ the PyLate KD dataset/collator API for the pinned pylate; enable + gate the off-
 `dropped_few_neg`/`dropped_fp` on-vs-off.
 
 ## Phase 4 — integrate + submit
-- [ ] T4.1 Wire winners into `nb/phase3_blindA_submission.ipynb` (new K2 path / `K2_MODEL_PATH`, ColBERT checkpoint, K3b adapter). Run `BLIND=False` dev-confirm; read nDCG@20.
+
+### Wiring audit — every change → blind serve (`phase3_blindA_submission.ipynb`)
+- ColBERT `D_LEN` 300 → 512 (T2.2): FIXED in blindA + dev_experiments configs; serving the 512-trained
+  checkpoint at 300 would re-truncate docs vs how it learned. doc-sig now `|d{D_LEN}|ef{EXPANSION_FIRST}`
+  in all three nbs (finetune/blindA/dev_experiments) — identical format, so blindA REUSES the index the
+  fine-tune built (no re-encode) and a future D_LEN/expansion change busts it.
+- K2 new features (T3.1 interaction/`<score>_norm`, T3.4 popularity_percentile/recency): AUTOMATIC —
+  blindA builds the SAME `FeatureBuilder(cat, labels, score_fns)` (labels incl. `colbert`, dense_cos +
+  ce_score), so the new columns are produced at serve; the `rerank()` feature-spec guard enforces
+  train==serve and rejects an old K2. Per-turn `_norm` calibration works because `k2.rerank(t, pool)`
+  builds all of a turn's candidates together.
+- K2 frozen-CE feature depth: blindA `CROSS_ENCODER_K=50` matches phase2_rerank's frozen-feature K
+  (NOT K3b's 200 — different knob; K3b is not chained in blind serve).
+- mcrs package changes (features/lgbm/ce_data/colbert_data/k3b_serve): picked up automatically via the
+  Colab `git pull` — no per-notebook wiring needed.
+- K3b K=200 / distillation / false-neg denoise: TRAINING-side — they produce a better K2-feature CE and a
+  better ColBERT checkpoint; blindA just loads the resulting artifacts. K3b adapter still not chained (by design).
+
+- [x] T4.1 Wire winners into `nb/phase3_blindA_submission.ipynb` — done (audit above): ColBERT D_LEN/sig aligned, K2 features automatic via the shared FeatureBuilder, K2/ColBERT artifact paths confirmed. COLAB: run `BLIND=False` dev-confirm; read nDCG@20.
 - [ ] T4.2 If dev-confirm beats the current Blind-A best, retrain winners on train+dev, then `BLIND=True` submit. Gate: blind layout checks pass (80 rows, keys==targets, non-empty).
 
 ---
