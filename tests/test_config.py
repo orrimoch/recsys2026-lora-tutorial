@@ -23,6 +23,14 @@ def test_provided_value_overrides_default():
     assert cfg.segment.cold_threshold == 1  # untouched default
 
 
+def test_colbert_expansion_first_default_and_override():
+    # C1: serve-side ColBERT doc recipe must match training (expansion_first=True by default).
+    assert load_config({}).retrieval.colbert.expansion_first is True
+    assert load_config(
+        {"retrieval": {"colbert": {"expansion_first": False}}}
+    ).retrieval.colbert.expansion_first is False
+
+
 def test_unknown_top_level_key_rejected():
     with pytest.raises(ValueError):
         load_config({"nonsense": 1})

@@ -19,6 +19,18 @@ def build_rerank_groups(
     queries = [query_builder.build(t).text for t in turns]
     bc = [{"history_tids": t.history_tids, "user_id": t.user_id} for t in turns]
     uids = [t.user_id for t in turns]
+    # Fail loud if a routing key matches no channel's query_key — otherwise that channel silently
+    # falls back to the full query and the focused-query routing is a no-op, mistraining K2 on a
+    # full-vs-focused-skewed pool (mirrors the same guard in InferenceHarness.__init__).
+    channels = getattr(fusion, "channels", None)
+    if per_channel_query_builders and channels is not None:
+        channel_keys = {getattr(ch, "query_key", None) for ch in channels}
+        unmatched = [k for k in per_channel_query_builders if k not in channel_keys]
+        if unmatched:
+            raise ValueError(
+                f"per_channel_query_builders keys {unmatched} match no channel query_key "
+                f"{sorted(k for k in channel_keys if k)} — routing would silently fall back to the "
+                f"full query (train/serve skew)")
     # Route per-channel queries (e.g. ColBERT's focused query) EXACTLY like InferenceHarness.run, so the
     # K2 training pool == the serve pool for every channel (no train/serve skew on a routed channel).
     pcq = {key: [qb.build(t).text for t in turns]

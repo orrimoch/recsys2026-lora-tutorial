@@ -41,6 +41,7 @@ SCHEMA: dict[str, Any] = {
             "dim":             _Leaf(int,           128),
             "query_maxlen":    _Leaf(int,           32),     # incl. [MASK] query augmentation
             "doc_maxlen":      _Leaf(int,           300),    # doc cap; trim raw tags, keep doc2query
+            "expansion_first": _Leaf(bool,          True),   # 'expansion | base' so doc2query survives truncation (train==serve)
             "mask_punctuation": _Leaf(bool,         True),
             "bsize":           _Leaf(int,           32),
             "dtype":           _Leaf(str,           "auto"),

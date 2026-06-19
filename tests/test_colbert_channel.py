@@ -44,6 +44,23 @@ def _channel(index=None, matrix=None, **kw):
                           _fake_q_encoder(_QTOK), **kw)
 
 
+class _FakeCatalog:
+    """Minimal F1-Catalog stand-in: just the surface from_catalog/colbert_doc_text touch."""
+    def __init__(self, docs):                 # docs: {track_id: enriched_doc_text}
+        self._docs = docs
+        self.index_to_id = list(docs)
+
+    def id_to_metadata(self, track_id, enriched=True):
+        return self._docs[track_id]
+
+
+def _capture_docs_encoder(store):
+    def enc(texts):
+        store.extend(texts)
+        return [np.ones((1, 3), dtype=np.float32) for _ in texts]
+    return enc
+
+
 # ----- pure MaxSim core -----
 def test_maxsim_hand_computed():
     q = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
@@ -233,3 +250,31 @@ def test_from_catalog_records_doc_cap_hits():
         doc_token_budget=1,          # 'rock' (1 tok) ok; both docs are 1 tok -> 0 over
     )
     assert ch.n_docs_over_budget == 0
+
+
+# ----- C1: train==serve doc-text recipe (expansion_first threaded through from_catalog) -----
+def test_from_catalog_defaults_to_expansion_first():
+    """C1 fix: from_catalog defaults expansion_first=True, matching the training/index recipe, so the
+    doc2query expansion is placed FIRST (survives doc_maxlen truncation). Serving 'base | expansion'
+    while the model was indexed on 'expansion | base' is a silent train/serve doc-text skew."""
+    cat = _FakeCatalog({"t1": "base meta tags | doc2query expansion"})
+    seen = []
+    ColBERTChannel.from_catalog(cat, _fake_q_encoder(_QTOK), _capture_docs_encoder(seen))
+    assert seen == ["doc2query expansion | base meta tags"]
+
+
+def test_from_catalog_expansion_first_can_be_disabled():
+    cat = _FakeCatalog({"t1": "base meta tags | doc2query expansion"})
+    seen = []
+    ColBERTChannel.from_catalog(cat, _fake_q_encoder(_QTOK), _capture_docs_encoder(seen),
+                                expansion_first=False)
+    assert seen == ["base meta tags | doc2query expansion"]
+
+
+def test_from_catalog_explicit_doc_text_fn_overrides_expansion_first():
+    """An injected doc_text_fn wins over the expansion_first default (custom recipes stay possible)."""
+    cat = _FakeCatalog({"t1": "base meta tags | doc2query expansion"})
+    seen = []
+    ColBERTChannel.from_catalog(cat, _fake_q_encoder(_QTOK), _capture_docs_encoder(seen),
+                                doc_text_fn=lambda c, t: "CUSTOM")
+    assert seen == ["CUSTOM"]

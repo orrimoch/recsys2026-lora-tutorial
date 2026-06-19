@@ -44,19 +44,24 @@ class LGBMReranker:
         self.feature_names_: Optional[list[str]] = None
 
     # ---- group / feature assembly ----
-    def _cap(self, cands: list[Candidate], gold: str) -> list[Candidate]:
+    def _cap(self, cands: list[Candidate], gold: str, salt=None) -> list[Candidate]:
         """Keep the gold + a RANDOM sample of neg_cap negatives.
 
         Random (not top-N): keeping only the highest-ranked negatives biases them to higher
         rrf_score than the gold, which teaches the inverted 'high score => not gold' correlation
         and wrecks ranking. Sampling preserves the pool's score distribution.
+
+        `salt` (per-group, e.g. (session_id, turn_number)) is mixed into the seed so each group
+        draws an INDEPENDENT-but-deterministic sample. Reusing one fixed seed across all groups
+        makes the sampled positions correlated with the (fusion-ordered) pool — a biased subset
+        that doesn't match the full-pool eval/serve distribution.
         """
         if not self.neg_cap:
             return cands
         pos = [c for c in cands if c.track_id == gold]
         negs = [c for c in cands if c.track_id != gold]
         if len(negs) > self.neg_cap:
-            negs = random.Random(self.seed).sample(negs, self.neg_cap)
+            negs = random.Random(f"{self.seed}|{salt}").sample(negs, self.neg_cap)
         return pos + negs
 
     @staticmethod
@@ -67,7 +72,7 @@ class LGBMReranker:
         # cap negatives for TRAINING efficiency only; eval/val uses the full pool (what serve ranks)
         X, y, gsizes = [], [], []
         for ctx, cands, gold in groups:
-            cc = self._cap(cands, gold) if cap else list(cands)
+            cc = self._cap(cands, gold, salt=(ctx.session_id, ctx.turn_number)) if cap else list(cands)
             self.fb.build(ctx, cc)
             for c in cc:
                 X.append([c.features[n] for n in self.fb.feature_names])

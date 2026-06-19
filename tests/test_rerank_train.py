@@ -46,6 +46,18 @@ def test_build_groups_routes_focused_query_to_keyed_channel():
     assert dense.seen == ["hi g", "hi more g"]   # dense keeps the FULL query
 
 
+def test_build_groups_raises_on_unmatched_routing_key():
+    # A routing key that matches no channel query_key would SILENTLY fall back to the full query,
+    # mistraining K2 on a full-vs-focused-skewed pool. Mirror InferenceHarness: fail loud.
+    import pytest
+    cb = _RecCh("colbert", query_key="colbert")
+    fusion = RRFFusion([cb], k=60)
+    with pytest.raises(ValueError):
+        build_rerank_groups(QueryBuilder(), fusion, _turns(),
+                            lambda t: "a", topk=3,
+                            per_channel_query_builders={"colbert_ft": QueryBuilder(recency_window=1)})
+
+
 def test_build_groups_runs_fusion_and_attaches_gold():
     fusion = RRFFusion([_Fake("bm25", [["a", "b", "c"], ["d", "e", "f"]])], k=60)
     golds = {("s1", 1): "b", ("s1", 2): "zzz"}  # turn 2 gold not in pool

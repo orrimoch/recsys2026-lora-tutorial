@@ -59,6 +59,26 @@ def test_negative_cap_limits_group_size_keeping_the_gold():
     assert int(y.sum()) == 1             # gold retained
 
 
+def test_cap_negative_sampling_is_per_group_and_deterministic():
+    """K1 fix: _cap mixes a per-group salt into the seed, so different (session, turn) groups draw
+    DIFFERENT negative subsets (a single fixed seed would draw the identical positional slice every
+    time), while a given group stays reproducible run-to-run."""
+    rk = LGBMReranker(_fb(), neg_cap=3, seed=42)
+    gold = "g"
+    cands = [Candidate("g", channel_ranks={"bm25": 1}, rrf_score=1.0)] + [
+        Candidate(f"n{i}", channel_ranks={"bm25": i + 2}, rrf_score=0.1) for i in range(20)
+    ]
+    # deterministic for a fixed (seed, salt)
+    a1 = [c.track_id for c in rk._cap(cands, gold, salt=("s1", 1))]
+    a2 = [c.track_id for c in rk._cap(cands, gold, salt=("s1", 1))]
+    assert a1 == a2
+    assert a1[0] == "g" and len([t for t in a1 if t != "g"]) == 3   # gold kept + neg_cap negatives
+    # decorrelated across groups: many distinct salts -> more than one distinct negative draw
+    draws = {tuple(sorted(c.track_id for c in rk._cap(cands, gold, salt=(f"s{i}", i))))
+             for i in range(8)}
+    assert len(draws) > 1   # a single fixed seed (the old bug) would collapse this to exactly 1
+
+
 def test_session_split_is_disjoint():
     rk = LGBMReranker(_fb(), val_fraction=0.3, seed=1)
     groups = [_group("g", ["g", "x", "y"], session=f"s{i}") for i in range(10)]

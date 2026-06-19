@@ -134,13 +134,18 @@ class ColBERTChannel:
         doc_token_budget: Optional[int] = None,
         tokenize: Optional[Callable[[str], Sequence]] = None,
         query_key: Optional[str] = None,
+        expansion_first: bool = True,
     ) -> "ColBERTChannel":
         """Build the channel from an F1 `Catalog`: encode each track's A1-enriched doc to ColBERT
         token embeddings, indexed over `catalog.index_to_id` (the F1 id space, §4.6 row alignment).
         Encoders are injected so this is testable without `pylate`; `from_pylate` wires the real
-        model. When `doc_token_budget` is given, `n_docs_over_budget` records the cap-hit count."""
+        model. When `doc_token_budget` is given, `n_docs_over_budget` records the cap-hit count.
+
+        `expansion_first` MUST match the training/index recipe (default True) — the fine-tune indexes
+        'expansion | base' docs, so serving 'base | expansion' here is a train/serve doc-text skew
+        that silently deflates live recall. Only used when `doc_text_fn` is not overridden."""
         ids = list(catalog.index_to_id)
-        text_of = doc_text_fn or colbert_doc_text
+        text_of = doc_text_fn or (lambda c, t: colbert_doc_text(c, t, expansion_first=expansion_first))
         texts = [text_of(catalog, t) for t in ids]
         doc_embs = list(encode_docs_fn(texts))
         if len(doc_embs) != len(ids):
@@ -184,6 +189,7 @@ class ColBERTChannel:
             doc_token_budget=c.doc_maxlen,
             tokenize=lambda s: model.tokenize([s], is_query=False)["input_ids"][0],
             query_key=getattr(c, "query_key", None),  # focused per-channel query routing (R7/A1)
+            expansion_first=getattr(c, "expansion_first", True),  # train==serve doc-text recipe
         )
 
     def batch_text_to_item_retrieval(
