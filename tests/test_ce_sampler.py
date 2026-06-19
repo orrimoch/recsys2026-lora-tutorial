@@ -107,3 +107,23 @@ def test_pool_all_gold_returns_empty():
                             title_fn=lambda tid: "gold",
                             n=5, k_min=1, seed=0)
     assert negs == []
+
+
+# ----- T1.3: false-negative (teacher) denoise -----
+def test_false_negative_drop_set_drops_top_quantile_by_teacher_score():
+    from mcrs.training.ce_data import false_negative_drop_set
+    tids = ["a", "b", "c", "d", "e"]
+    scores = {"a": 0.1, "b": 0.2, "c": 0.9, "d": 0.95, "e": 0.0}   # c,d are teacher-high
+    assert false_negative_drop_set(tids, scores, 0.4) == {"c", "d"}   # floor(5*0.4)=2 highest
+    assert false_negative_drop_set(tids, scores, 0.0) == set()        # off by default (no-op)
+    assert false_negative_drop_set([], scores, 0.5) == set()
+
+
+def test_sample_negatives_drops_teacher_false_negatives():
+    # the rank-1 negative t1 is a likely unlabeled positive (teacher scores it ~gold); with the
+    # filter on it must never be sampled, even at n>=pool (so it can't be a sampling fluke).
+    neg_scores = {f"t{i}": (10.0 if i == 1 else 0.0) for i in range(1, 41)}
+    with_filter = sample_negatives(POOL, **_kw(n=40, neg_scores=neg_scores, fp_quantile=0.1))
+    assert "t1" not in with_filter
+    # default (no scores / quantile 0) keeps it -> proves the filter, not some other rule, removed it
+    assert "t1" in sample_negatives(POOL, **_kw(n=40))

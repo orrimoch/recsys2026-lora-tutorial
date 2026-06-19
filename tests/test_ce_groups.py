@@ -236,3 +236,20 @@ def test_list_valued_metadata_is_coerced_not_crashed():
     groups = build_ce_training_groups(FakeQB(), FakeFusion([pool]), [_turn(1)], lambda t: "g", catalog=cat,
                                       cross_encoder_k=5, n_negatives=2, k_min=1, seed=0)
     assert len(groups) == 1                                          # built, no crash on list fields
+
+
+def test_teacher_score_fn_drops_false_negative_from_group():
+    # T1.3 wiring: a frozen-CE teacher scores 'x' (rank-1 negative) as highly relevant -> it must be
+    # filtered out of the group's negatives; with the lever off (default) it stays.
+    cat = FakeCat()
+    pool = [Candidate(track_id=t, channel_ranks={"c": i}) for i, t in enumerate(["g","x","y","z","w"], 1)]
+    turns = [_turn(1)]
+    teacher = lambda q, tids: [9.0 if t == "x" else 0.0 for t in tids]   # 'x' looks like a positive
+
+    on = build_ce_training_groups(FakeQB(), FakeFusion([pool]), turns, lambda t: "g", catalog=cat,
+                                  cross_encoder_k=5, n_negatives=4, k_min=1, seed=0,
+                                  teacher_score_fn=teacher, fp_quantile=0.25)
+    off = build_ce_training_groups(FakeQB(), FakeFusion([pool]), turns, lambda t: "g", catalog=cat,
+                                   cross_encoder_k=5, n_negatives=4, k_min=1, seed=0)
+    assert "doc-x" not in on[0][1]      # teacher false-negative dropped
+    assert "doc-x" in off[0][1]         # default keeps it -> the filter (not sampling) removed it

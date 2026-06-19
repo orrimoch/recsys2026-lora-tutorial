@@ -45,15 +45,34 @@ def is_same_artist(tid_a: str, tid_b: str, artist_fn: Callable[[str], Optional[s
     return bool(a) and bool(b) and a.strip().lower() == b.strip().lower()
 
 
+def false_negative_drop_set(tids, scores: dict, quantile: float) -> set:
+    """The set of candidate negatives to DROP as likely unlabeled positives (T1.3).
+
+    A frozen cross-encoder scores each (query, candidate) pair; the highest-scoring negatives are the
+    ones the teacher thinks are relevant — i.e. probable unlabeled positives. Training against them
+    teaches the model to push apart true matches. Drop the top `quantile` fraction by teacher score.
+
+    Deterministic: ties broken by ascending tid so the cut is stable. `quantile<=0` (default) drops
+    nothing — a pure no-op, so this lever is off unless explicitly enabled."""
+    if quantile <= 0 or not tids:
+        return set()
+    ranked = sorted(tids, key=lambda t: (scores.get(t, float("-inf")), t))   # ascending teacher score
+    n_drop = int(len(ranked) * quantile)                                     # floor; <1 frac -> 0
+    return set(ranked[len(ranked) - n_drop:]) if n_drop > 0 else set()
+
+
 def sample_negatives(pool, *, gold_tid, gold_title, gold_artist,
                      artist_fn, title_fn, n, k_min, seed,
                      sampling="rank_strat", same_artist="soft_downweight",
                      denoise_near_dup=True, skip_top_rank=False,
-                     same_artist_weight=0.25):
+                     same_artist_weight=0.25,
+                     neg_scores=None, fp_quantile=0.0):
     """Pick up to `n` negative track_ids from `pool` (list of (tid, rank), rank-ascending).
 
     Deterministic given `seed`. Near-dup titles are dropped; same-artist is dropped/down-weighted/
-    kept per `same_artist`; rank-1 optionally skipped. Returns [] if the eligible set is empty.
+    kept per `same_artist`; rank-1 optionally skipped. When `neg_scores` (a {tid: teacher_score} map)
+    and `fp_quantile>0` are given, the top `fp_quantile` of eligible negatives by teacher score are
+    dropped as likely unlabeled positives (T1.3 false-negative denoise). Returns [] if empty.
     """
     rng = random.Random(seed)
     cands = sorted(pool, key=lambda x: x[1])                       # stable, rank-ascending
@@ -65,7 +84,7 @@ def sample_negatives(pool, *, gold_tid, gold_title, gold_artist,
             continue
         title = title_fn(tid) or ""
         if denoise_near_dup and is_near_dup(gold_title, title):
-            continue                                               # true false negative
+            continue                                               # true false negative (title)
         cand_artist = artist_fn(tid)
         same = (bool(gold_artist) and bool(cand_artist)
                 and gold_artist.strip().lower() == cand_artist.strip().lower())
@@ -73,6 +92,10 @@ def sample_negatives(pool, *, gold_tid, gold_title, gold_artist,
             continue
         w = same_artist_weight if (same and same_artist == "soft_downweight") else 1.0
         eligible.append((tid, rank, w))
+    # T1.3: drop teacher-scored false negatives (likely unlabeled positives) before sampling.
+    if neg_scores and fp_quantile > 0:
+        drop = false_negative_drop_set([e[0] for e in eligible], neg_scores, fp_quantile)
+        eligible = [e for e in eligible if e[0] not in drop]
     if not eligible:
         return []
     if sampling == "rank_strat":
@@ -116,7 +139,8 @@ def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, 
                              n_negatives=15, sampling="rank_strat", same_artist="soft_downweight",
                              denoise_near_dup=True, skip_top_rank=False, k_min=4, seed,
                              gp_fn=None, w_low=0.3, fusion_query_builder=None,
-                             fusion_chunk=0, show_progress=False, report=None):
+                             fusion_chunk=0, show_progress=False, report=None,
+                             teacher_score_fn=None, fp_quantile=0.0):
     """Build [(ce_query_text, [pos_doc, neg_doc...], group_weight)] for gold-in-pool turns.
 
     `query_builder` builds the CROSS-ENCODER pair query (e.g. the enriched/markered query).
@@ -172,12 +196,18 @@ def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, 
             dropped_no_gold += 1
             continue
         ranked = [(c.track_id, i + 1) for i, c in enumerate(top)]      # fused-pool rank (RRF-sorted position)
+        # T1.3: if a frozen-CE teacher is supplied, score the pool once so sample_negatives can drop
+        # the top-`fp_quantile` likely-unlabeled-positives. Off by default (teacher_score_fn=None).
+        neg_scores = None
+        if teacher_score_fn is not None and fp_quantile > 0:
+            neg_scores = dict(zip(ids, teacher_score_fn(qtext, ids)))
         negs = sample_negatives(ranked, gold_tid=gold, gold_title=(title_fn(gold) or ""),
                                 gold_artist=(artist_fn(gold) or ""), artist_fn=artist_fn,
                                 title_fn=title_fn, n=n_negatives, k_min=k_min,
                                 seed=_stable_seed(seed, turn.session_id, turn.turn_number),
                                 sampling=sampling, same_artist=same_artist,
-                                denoise_near_dup=denoise_near_dup, skip_top_rank=skip_top_rank)
+                                denoise_near_dup=denoise_near_dup, skip_top_rank=skip_top_rank,
+                                neg_scores=neg_scores, fp_quantile=fp_quantile)
         if len(negs) < k_min:
             dropped_few_neg += 1
             continue

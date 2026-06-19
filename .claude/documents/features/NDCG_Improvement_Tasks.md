@@ -15,9 +15,9 @@ Conventions
 - [ ] T0.1 Retrain each model at larger data/epochs as the cheap floor (K3b `TRAIN_SUBSET`↑, ColBERT `K_NEGS`↑ / more sessions, K2 more train sessions). Gate: no regression vs current; record the number as the floor to beat. (Plan: "obvious lever" note.)
 
 ## Phase 1 — K3b cross-encoder (do first: it's the teacher + K2 feature source)
-- [ ] T1.1 BIGGEST: `CROSS_ENCODER_K` 100 → 200 (train==serve), `nb/phase2_ce_finetune.ipynb`. Gate: proxy nDCG@20 up vs K=100; no warm regression. Est +0.01–0.03.
-- [ ] T1.2 `N_NEG` 15 → 30, pair with T1.1 (`nb/phase2_ce_finetune.ipynb`, `mcrs/training/ce_data.py:48-90`). Gate: lift over T1.1 alone.
-- [ ] T1.3 False-negative denoise: drop sampled negs the frozen base CE scores very high (`mcrs/training/ce_data.py` negative selection). Gate: lift, and `DOES_NOT_MOVE_TOWARD_GOAL` slice not regressed (spec §4.3).
+- [x] T1.1 BIGGEST: `CROSS_ENCODER_K` 100 → 200 (train==serve) — applied in `nb/phase2_ce_finetune.ipynb` config. COLAB GATE PENDING: proxy nDCG@20 up vs K=100; no warm regression. Est +0.01–0.03.
+- [x] T1.2 `N_NEG` 15 → 30 — applied in the config (pairs with T1.1). COLAB GATE PENDING: lift over T1.1 alone.
+- [x] T1.3 False-negative denoise — MECHANISM BUILT + TESTED (`ce_data.false_negative_drop_set`, `sample_negatives(neg_scores, fp_quantile)`, `build_ce_training_groups(teacher_score_fn, fp_quantile)`); wired behind `FALSE_NEG_DROP_QUANTILE` (default 0.0 = off, frozen-CE teacher). TO ENABLE on Colab: set quantile ~0.05–0.10. Gate: lift, and `DOES_NOT_MOVE_TOWARD_GOAL` slice not regressed (spec §4.3).
 - [ ] T1.4 (A100) Full `TRAIN_SUBSET`=15,199 + `CROSS_ENCODER_K`=500. Gate: lift over T1.1–T1.3; cost acceptable. Est +0.015–0.04.
 - [ ] T1.5 Freeze the winning K3b adapter as the teacher for Phase 2 and as the K2 frozen-CE source (record adapter id + depth).
 
