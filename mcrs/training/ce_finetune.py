@@ -30,6 +30,40 @@ def oof_ce_scores(turns, *, folds, seed, fit_fn, score_fn):
     return out
 
 
+def build_ce_ft_lookup(train_turns, serve_turns, *, folds, seed, fit_fn, score_fn):
+    """Leak-safe per-candidate FINE-TUNED-CE score lookup for K2 stacking (Step 2b, `ce_ft_score`).
+
+    A fine-tuned CE has seen the gold labels, so it cannot score the rows K2 trains on directly — it
+    must be cross-fit. This builds ONE `(session_id, turn_number, track_id) -> score` lookup with the
+    leak boundary baked in (feed it to `make_ce_feature_fn` exactly like the frozen `ce_score`):
+      - TRAIN turns: OOF k-fold cross-fit (`oof_ce_scores`) — each turn scored by a model that did NOT
+        train on its fold, so the feature is leak-free for training K2.
+      - SERVE turns: ONE model fit on ALL train folds (`fold=None`), scoring the serve turns. Leak-free
+        only because serve sessions are disjoint from train — so we HARD-FAIL on any shared session.
+
+    `fit_fn(train_rows, fold=)` fine-tunes a CE on rows `[(sid, turn, fold), ...]`; `score_fn(model,
+    row)` returns `{track_id: score}` for a turn's candidate pool (`row` has session_id/turn/fold).
+    Mirrors how the frozen-CE lookup is built (`build_ce_score_lookup`), but leak-safe for a TRAINED CE.
+    """
+    train_sids = {s for s, _ in train_turns}
+    overlap = train_sids & {s for s, _ in serve_turns}
+    if overlap:
+        raise ValueError(
+            f"train/serve share {len(overlap)} session(s) (e.g. {sorted(overlap)[:3]}): the all-train "
+            "serve model would leak into K2's train feature. Keep train and serve session-disjoint.")
+    # TRAIN side — out-of-fold, leak-free.
+    lookup = dict(oof_ce_scores(train_turns, folds=folds, seed=seed, fit_fn=fit_fn, score_fn=score_fn))
+    # SERVE side — one model fit on ALL train folds (tag rows with their real folds so it 'saw' them all),
+    # then score the disjoint serve turns (fold=None, so the score_fn leak-guard still passes).
+    fold_of = assign_session_folds([s for s, _ in train_turns], k=folds, seed=seed)
+    all_train_rows = [(s, t, f) for (s, t), f in zip(train_turns, fold_of)]
+    full_model = fit_fn(all_train_rows, fold=None)
+    for s, t in serve_turns:
+        for tid, sc in score_fn(full_model, {"session_id": s, "turn": t, "fold": None}).items():
+            lookup[(s, t, tid)] = sc
+    return lookup
+
+
 class CEGroupDataset(Dataset):
     """Holds [(query, [pos_doc, neg...], group_weight)]; tokenizes pairs lazily. `group_len` is a cheap
     length proxy (query token count) so the sampler can batch similar-length groups (less pad waste)."""
