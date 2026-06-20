@@ -25,6 +25,58 @@ def hit_rank(retrieved: Sequence[str], gold: str) -> Optional[int]:
         return None
 
 
+def _conversion_block(ranked_ids, golds, idxs, pool_k: int, top_k: int) -> dict[str, float]:
+    if not idxs:
+        return {"n": 0, "recall_at_pool": 0.0, "recall_at_top": 0.0,
+                "conversion": 0.0, "recall_loss": 0.0, "ranking_loss": 0.0}
+    n = len(idxs)
+    in_pool = sum(recall_at_k(ranked_ids[i], golds[i], pool_k) for i in idxs) / n
+    in_top = sum(recall_at_k(ranked_ids[i], golds[i], top_k) for i in idxs) / n
+    return {
+        "n": n,
+        "recall_at_pool": in_pool,                              # gold reachable at all (the ceiling)
+        "recall_at_top": in_top,                                # gold ranked into the scored top-k
+        "conversion": (in_top / in_pool) if in_pool else 0.0,   # of reachable golds, fraction converted
+        "recall_loss": 1.0 - in_pool,                           # never reached the pool -> recall's job
+        "ranking_loss": in_pool - in_top,                       # in pool, mis-ranked -> reranker's job
+    }
+
+
+def conversion_diagnosis(
+    ranked_ids: Sequence[Sequence[str]],
+    golds: Sequence[str],
+    *,
+    pool_k: int = 500,
+    top_k: int = 20,
+    segments: Optional[Sequence[str]] = None,
+) -> dict:
+    """Decompose the nDCG@top_k gap into recall-bound vs ranking-bound headroom (Option-0).
+
+    `ranked_ids[i]` is the reranker's FULL ordered candidate ids for turn i (e.g. K2's reranked pool);
+    `golds[i]` is that turn's gold tid. Splits the miss budget into:
+      - recall_loss   = 1 - recall@pool_k         (gold never reached the pool — ColBERT/recall lever)
+      - ranking_loss  = recall@pool_k - recall@top_k  (gold in the pool but not in the top-k — K2/CE lever)
+    and reports `conversion` = recall@top_k / recall@pool_k (of the reachable golds, the fraction the
+    reranker lands in the scored top-k). `verdict` names the larger headroom so effort goes where the
+    gap actually is. Pure over precomputed ranked lists — the GPU run that produces them is the caller's.
+    """
+    ranked_ids = [list(r) for r in ranked_ids]
+    overall = _conversion_block(ranked_ids, golds, list(range(len(golds))), pool_k, top_k)
+    if overall["ranking_loss"] > overall["recall_loss"]:
+        overall["verdict"] = "ranking-bound"
+    elif overall["recall_loss"] > overall["ranking_loss"]:
+        overall["verdict"] = "recall-bound"
+    else:
+        overall["verdict"] = "balanced"
+    if segments is not None:
+        overall["by_segment"] = {
+            s: _conversion_block(ranked_ids, golds, [i for i in range(len(golds)) if segments[i] == s],
+                                 pool_k, top_k)
+            for s in sorted(set(segments))
+        }
+    return overall
+
+
 @dataclass(frozen=True)
 class DiagnosticReport:
     overall: dict[str, float]
