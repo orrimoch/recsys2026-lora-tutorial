@@ -64,6 +64,23 @@ def test_target_turns_one_row_per_session():
     assert len({t.session_id for t in tgts}) == 2
 
 
+def test_gold_target_turns_is_the_scorable_final_turn_proxy():
+    # The dev FINAL-turn proxy = how Blind-A scores (one trailing turn/session), restricted to turns
+    # that carry a gold so they're scorable. _ROW's trailing turn (2) IS a music gold -> kept;
+    # _BLIND_ROW's trailing turn (3) is a user query with no gold -> dropped. Replaces the inline
+    # `[t for t in c.target_turns() if c.gold(...)]` duplicated across the phase3 notebooks.
+    c = Conversations([_ROW, _BLIND_ROW], cold_threshold=0)
+    gts = list(c.gold_target_turns())
+    assert len(gts) == 1
+    (t,) = gts
+    assert t.session_id == "u1__d" and t.turn_number == 2
+    assert c.gold(t.session_id, t.turn_number) == "track-2"
+    # exactly the gold-bearing subset of target_turns(), preserving its contexts
+    assert [(x.session_id, x.turn_number) for x in gts] == \
+           [(x.session_id, x.turn_number) for x in c.target_turns()
+            if c.gold(x.session_id, x.turn_number)]
+
+
 def test_gold_is_the_music_entry_per_turn():
     c = Conversations([_ROW])
     assert c.gold("u1__d", 1) == "track-1"

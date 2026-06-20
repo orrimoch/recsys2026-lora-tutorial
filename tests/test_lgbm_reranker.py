@@ -110,6 +110,50 @@ def test_save_load_roundtrip_preserves_ranking(tmp_path):
     assert before == after
 
 
+def test_xy_normalizes_injected_scores_over_full_pool_not_capped_subset():
+    """Train/serve skew fix: the per-turn `*_norm` calibration must use the FULL pool's min/max
+    (what val/serve sees), not the random neg-capped subset's. Otherwise a candidate's `_norm`
+    is computed at a different scale at train than at serve, and the GBDT splits don't transfer.
+
+    Setup: full pool spans s=0..19 on the negatives; the gold's raw s=5.0. With neg_cap=3 the
+    capped pool is {gold + 3 random negs}, whose min/max almost never coincide with the full
+    pool's 0/19 — so the gold's full-pool norm (5/19) differs from any capped-pool norm."""
+    scores = {"g": 5.0, **{f"n{i}": float(i) for i in range(20)}}   # full pool: min 0, max 19
+    fb = FeatureBuilder(catalog=None, channel_labels=["bm25"],
+                        score_fns={"s": lambda ctx, tid: scores[tid]})
+    rk = LGBMReranker(fb, neg_cap=3, seed=42)
+    ids = ["g"] + [f"n{i}" for i in range(20)]
+    cands = [Candidate(t, channel_ranks={"bm25": 1}, rrf_score=1.0) for t in ids]
+    rk._xy([(_ctx(), cands, "g")], cap=True)
+    g = next(c for c in cands if c.track_id == "g")
+    assert abs(g.features["s_norm"] - (5.0 / 19.0)) < 1e-9   # full-pool norm, not capped-pool
+
+
+def test_assert_feature_parity_names_the_missing_and_extra_features():
+    """Early, descriptive load-time guard: when a FeatureBuilder is reconstructed without the same
+    score_fns/channels the model was trained on, assert_feature_parity() must fail BEFORE any rerank
+    (not deep inside the harness) and NAME the missing/extra columns so the caller knows what to add.
+    Simulates loading a K2 trained with ce_score + a colbert channel into a stripped FeatureBuilder."""
+    import pytest
+    fb = FeatureBuilder(catalog=None, channel_labels=["bm25", "dense"],
+                        score_fns={"dense_cos": lambda ctx, tid: 0.0})
+    rk = LGBMReranker(fb)
+    # pretend we loaded a model trained on the FULL spine (extra colbert channel + ce_score feature)
+    rk.feature_names_ = list(fb.feature_names) + ["rank_inv__colbert", "ce_score", "ce_score_norm"]
+    with pytest.raises(ValueError) as e:
+        rk.assert_feature_parity()
+    msg = str(e.value)
+    assert "rank_inv__colbert" in msg and "ce_score" in msg     # names what's MISSING from the builder
+
+
+def test_assert_feature_parity_passes_when_specs_match():
+    fb = FeatureBuilder(catalog=None, channel_labels=["bm25", "dense"],
+                        score_fns={"dense_cos": lambda ctx, tid: 0.0})
+    rk = LGBMReranker(fb)
+    rk.feature_names_ = list(fb.feature_names)                  # exact match
+    assert rk.assert_feature_parity() is rk                     # no raise, chainable
+
+
 def test_rerank_raises_on_feature_spec_mismatch(tmp_path):
     # trained with bm25+dense+a score feature; reloaded with a DIFFERENT feature set -> must fail loud
     fb_train = FeatureBuilder(catalog=None, channel_labels=["bm25", "dense"],

@@ -83,6 +83,17 @@ class Conversations:
                 history_tids=history, segment=segment_for(history, self.cold_threshold),
             )
 
+    def gold_target_turns(self) -> Iterator[TurnContext]:
+        """The scorable dev FINAL-turn proxy: each session's trailing (prediction) turn, kept only
+        when it carries a gold. This is how Blind-A scores (one trailing turn/session), restricted to
+        turns we can actually score against a gold — so gate/early-stop a reranker on THIS, not on the
+        all-turns `turns()` set (whose shallow-turn-heavy distribution differs from the leaderboard's).
+        On the blind set the trailing turn carries no gold, so this yields nothing there by design.
+        """
+        for t in self.target_turns():
+            if self.gold(t.session_id, t.turn_number) is not None:
+                yield t
+
     @classmethod
     def from_disk(cls, path: str, split: str = "test", cold_threshold: int = 1) -> "Conversations":
         from datasets import load_from_disk

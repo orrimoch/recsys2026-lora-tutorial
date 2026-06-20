@@ -69,11 +69,14 @@ class LGBMReranker:
         return gold is not None and gold in {c.track_id for c in cands}
 
     def _xy(self, groups, cap: bool = True):
-        # cap negatives for TRAINING efficiency only; eval/val uses the full pool (what serve ranks)
+        # cap negatives for TRAINING efficiency only; eval/val uses the full pool (what serve ranks).
+        # Build features over the FULL pool BEFORE capping so the per-turn `*_norm` calibration uses
+        # the same min/max val/serve sees — capping first would min-max `_norm` over the ~neg_cap
+        # subset at train but the full pool at serve, a scale skew on dense_cos_norm/ce_score_norm.
         X, y, gsizes = [], [], []
         for ctx, cands, gold in groups:
+            self.fb.build(ctx, list(cands))
             cc = self._cap(cands, gold, salt=(ctx.session_id, ctx.turn_number)) if cap else list(cands)
-            self.fb.build(ctx, cc)
             for c in cc:
                 X.append([c.features[n] for n in self.fb.feature_names])
                 y.append(1 if c.track_id == gold else 0)
@@ -131,14 +134,31 @@ class LGBMReranker:
         self._booster = self.model.booster_
         return self
 
+    def assert_feature_parity(self) -> "LGBMReranker":
+        """Fail loudly + EARLY (call right after load(), before any rerank) if this FeatureBuilder's
+        columns differ from the trained model's pinned spec, NAMING the missing/extra features so the
+        caller knows which score_fn / channel to reconstruct (train==serve). Same check rerank() runs,
+        surfaced at load time with an actionable message instead of deep inside the harness. Chainable.
+        """
+        if self.feature_names_ is None:
+            raise RuntimeError("no trained feature spec to check — fit()/load() first")
+        have = list(self.fb.feature_names)
+        if have != self.feature_names_:
+            missing = [f for f in self.feature_names_ if f not in have]
+            extra = [f for f in have if f not in self.feature_names_]
+            raise ValueError(
+                "K2 feature spec mismatch (train != serve): this FeatureBuilder differs from the "
+                f"trained model's. trained on {len(self.feature_names_)} features, got {len(have)}. "
+                f"missing={missing} extra={extra}. "
+                "Reconstruct FeatureBuilder with the SAME channel_labels and score_fns the model was "
+                "trained on (e.g. add the colbert channel / the ce_score frozen-CE feature).")
+        return self
+
     def rerank(self, ctx: TurnContext, candidates: list[Candidate]) -> RankedList:
         if self._booster is None:
             raise RuntimeError("LGBMReranker.rerank called before fit()/load()")
-        if self.feature_names_ is not None and list(self.fb.feature_names) != self.feature_names_:
-            raise ValueError(
-                "feature spec mismatch: this FeatureBuilder differs from the trained model's. "
-                f"trained on {len(self.feature_names_)} features, got {len(self.fb.feature_names)}. "
-                "Reconstruct FeatureBuilder with the SAME channel_labels and score_fns (train==serve).")
+        if self.feature_names_ is not None:
+            self.assert_feature_parity()
         self.fb.build(ctx, candidates)
         scores = self._booster.predict(self.fb.matrix(candidates))
         order = np.argsort(-scores, kind="stable")
