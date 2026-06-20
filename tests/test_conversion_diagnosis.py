@@ -4,7 +4,50 @@ from __future__ import annotations
 
 import math
 
-from mcrs.eval.diagnostics import conversion_diagnosis, gold_rank_distribution
+from mcrs.eval.diagnostics import (
+    conversion_diagnosis,
+    feature_rescue_analysis,
+    gold_rank_distribution,
+)
+
+
+def test_feature_rescue_analysis_counts_rescues_and_demotions():
+    # Does a candidate feature's OWN ranking rescue the base reranker's just-missed golds into its
+    # top-k? top_k=2, band=(2,5): a gold the base ranks at 3-5 that the feature ranks <=2 is rescuable.
+    base = [
+        ["g0", "a", "b"],                       # g0 base rank 1 -> converted (base already has it)
+        ["a", "b", "c", "d", "g1"],             # g1 base rank 5 -> in band (2,5]
+        ["a", "b", "c", "d", "g2"],             # g2 base rank 5 -> in band (2,5]
+        ["a", "b"],                             # g3 absent     -> not_in_pool
+    ]
+    feat = [
+        ["g0", "a", "b"],                       # feature keeps g0 at rank 1
+        ["g1", "a", "b", "c", "d"],             # feature ranks g1 at 1 (<=top_k) -> RESCUABLE
+        ["a", "b", "c", "g2", "d"],             # feature ranks g2 at 4 (>top_k)  -> mid_missed
+        ["a", "b"],
+    ]
+    golds = ["g0", "g1", "g2", "g3"]
+    r = feature_rescue_analysis(base, feat, golds, top_k=2, band=(2, 5))
+    assert r["counts"]["converted"] == 1
+    assert r["counts"]["rescuable"] == 1        # g1
+    assert r["counts"]["mid_missed"] == 1       # g2
+    assert r["counts"]["not_in_pool"] == 1
+    assert r["rescue_rate"] == 0.5              # 1 rescued of 2 band golds
+    assert r["demotion_risk"] == 0.0            # no base-top-k gold pushed out by the feature
+
+
+def test_feature_rescue_analysis_flags_demotion_risk():
+    base = [["g0", "a", "b", "c"]]              # g0 base rank 1 -> converted
+    feat = [["a", "b", "c", "g0"]]              # feature drops g0 to rank 4 (>top_k) -> demotion risk
+    r = feature_rescue_analysis(base, feat, ["g0"], top_k=2, band=(2, 5))
+    assert r["counts"]["converted"] == 1
+    assert r["demotion_risk"] == 1.0           # the one converted gold would be demoted by the feature
+
+
+def test_feature_rescue_analysis_raises_on_length_mismatch():
+    import pytest
+    with pytest.raises(ValueError):
+        feature_rescue_analysis([["g"]], ["g"], ["g", "h"])
 
 
 def test_gold_rank_distribution_buckets_by_hit_rank():

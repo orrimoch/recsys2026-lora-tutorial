@@ -58,6 +58,56 @@ def gold_rank_distribution(
     return {"n": len(golds), "labels": labels, "buckets": counts}
 
 
+def feature_rescue_analysis(
+    base_ranked: Sequence[Sequence[str]],
+    feat_ranked: Sequence[Sequence[str]],
+    golds: Sequence[str],
+    *,
+    top_k: int = 20,
+    band: tuple[int, int] = (20, 50),
+) -> dict:
+    """Would a candidate feature's OWN ranking rescue the base reranker's just-missed golds?
+
+    `base_ranked[i]` (e.g. K2's order) and `feat_ranked[i]` (e.g. a fine-tuned cross-encoder's order)
+    are full ordered id lists over the SAME pool for turn i; `golds[i]` is the gold. Per gold:
+      converted    base_rank <= top_k                                   (base already converts it)
+      rescuable    band[0] < base_rank <= band[1]  AND feat_rank <= top_k  (feature could promote it)
+      mid_missed   band[0] < base_rank <= band[1]  AND feat_rank  > top_k  (feature doesn't help here)
+      deep         base_rank > band[1]                                  (base ranks it far down)
+      not_in_pool  base_rank is None
+
+    `rescue_rate` = rescuable / (rescuable + mid_missed): of the base's just-below-cutoff golds, the
+    fraction the feature ranks into its top_k — the 2a go/no-go for stacking the feature.
+    `demotion_risk` = (base-top_k golds the feature ranks > top_k) / converted: how much the feature
+    would fight the base on golds it already had right (a signal-noise check). Pure, no model/GPU."""
+    if not (len(base_ranked) == len(feat_ranked) == len(golds)):
+        raise ValueError(f"base_ranked ({len(base_ranked)}), feat_ranked ({len(feat_ranked)}) and "
+                         f"golds ({len(golds)}) must be 1:1 aligned.")
+    lo, hi = band
+    counts = {"converted": 0, "rescuable": 0, "mid_missed": 0, "deep": 0, "not_in_pool": 0}
+    demoted = 0
+    for b_ids, f_ids, g in zip(base_ranked, feat_ranked, golds):
+        br = hit_rank(b_ids, g)
+        fr = hit_rank(f_ids, g)
+        if br is None:
+            counts["not_in_pool"] += 1
+        elif br <= top_k:
+            counts["converted"] += 1
+            if fr is None or fr > top_k:
+                demoted += 1
+        elif br <= hi:
+            counts["rescuable" if (fr is not None and fr <= top_k) else "mid_missed"] += 1
+        else:
+            counts["deep"] += 1
+    band_total = counts["rescuable"] + counts["mid_missed"]
+    return {
+        "n": len(golds),
+        "counts": counts,
+        "rescue_rate": (counts["rescuable"] / band_total) if band_total else 0.0,
+        "demotion_risk": (demoted / counts["converted"]) if counts["converted"] else 0.0,
+    }
+
+
 def _conversion_block(ranked_ids, golds, idxs, pool_k: int, top_k: int) -> dict[str, float]:
     if not idxs:
         return {"n": 0, "recall_at_pool": 0.0, "recall_at_top": 0.0,
