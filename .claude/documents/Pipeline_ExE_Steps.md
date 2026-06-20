@@ -45,24 +45,33 @@ identical across finetune / rerank / blindA / dev_experiments so they all share 
 ## Step 2 — Train K2 (LGBM reranker)  ·  `nb/phase2_rerank.ipynb`  ·  GPU
 - Colab: https://colab.research.google.com/github/orrimoch/recsys2026-lora-tutorial/blob/fresh-start/nb/phase2_rerank.ipynb
 - Output: `OUT/k2_lgbm.txt` (+ `.features.json`). The ONLY notebook that trains K2.
-- Prereq: Step 1 ColBERT checkpoint (asserted). Config (cell 6): `USE_COLBERT=True`, `COLBERT_D_LEN=512`
-  (matches Step 1), `CE_STACK=True`, `CROSS_ENCODER_K=50` (frozen-CE FEATURE depth — not K3b's 200).
-- Cells: run all. Cell 10 is the slow part: the frozen bge-reranker scores train+dev pools (cached to
-  Drive, so a re-run is fast). LGBM fit itself is fast (CPU). Cell 12 prints fusion-only vs +K2 nDCG@20.
-- Gate: +K2 nDCG@20 clearly beats fusion-only.
-- Time/cost (the frozen-CE pass dominates) — G4/T4: ~2–4 h (~$0.4–0.7); A100: ~0.5–1.5 h (~$0.7–2).
+- Prereq: Step 1 ColBERT checkpoint (asserted). Config (cell 7): `USE_COLBERT=True`, `COLBERT_D_LEN=512`
+  (matches Step 1), `CE_STACK=True`, `CROSS_ENCODER_K=50` (frozen-CE FEATURE depth — not K3b's 200),
+  `TRAIN_SESSIONS=7000` (was 3000 — re-verifying data saturation under the new spine + the `_norm` fix;
+  K2 historically saturates at 3000, so 7000 may add ~0 at ~2x the CE-pass cost — drop back to 3000 if equal).
+- Cells: run all. The slow part: the frozen bge-reranker scores train+dev pools (chunked, cached +
+  RESUMABLE on Drive, so a re-run / disconnect is cheap). LGBM fit itself is fast (CPU).
+- Gate: read the `GATE final-turn` nDCG@20 line (Blind-A scores the final turn only — the all-turns
+  number printed beside it is a secondary diagnostic, NOT the gate). +K2 must clearly beat fusion-only.
+- Time/cost (frozen-CE pass dominates) — at `TRAIN_SESSIONS=7000`: G4/T4 ~2–2.5 h, A100 ~1–1.5 h;
+  at 3000 ~half that (~same nDCG).
 
 ## Step 3 — Fine-tune K3b cross-encoder  ·  `nb/phase2_ce_finetune.ipynb`  ·  GPU  ·  OPTIONAL for submit
 - Colab: https://colab.research.google.com/github/orrimoch/recsys2026-lora-tutorial/blob/fresh-start/nb/phase2_ce_finetune.ipynb
-- Output: adapter `OUT/ckpt_k3b`. Used as the ColBERT distillation TEACHER / a future final-stage
-  reranker. NOT chained in blind serve, so SKIP for a plain submission; run it only to enable
-  distillation (then re-run Step 1) or to gate K3b on its own.
-- Prereq: Step 2 K2 (loads `k2_lgbm.txt`, asserted). Config: `CROSS_ENCODER_K=200`, `N_NEG=30`,
-  `FALSE_NEG_DROP_QUANTILE=0.0`.
-- Cells: run all. Cell 6 = train; cell 7 = K2-vs-K2+K3b dev gate. Gate: K2+K3b > K2 and the
-  `DOES_NOT_MOVE_TOWARD_GOAL` slice not regressed.
-- Time/cost — TRAIN_SUBSET=4000 @ K=200: G4/T4 ~3–6 h (~$0.5–1.1); A100 ~1–2 h (~$1.3–2.6).
-  Full data (15k @ K=500): A100 ~4–6 h (~$5–8) — A100 strongly preferred.
+- STATUS (2026-06-20): the conversion-diagnosis probe CONFIRMED that CHAINING a cross-encoder after K2
+  at serve REGRESSES (frozen CE: −0.075 @K=50 / −0.154 @K=100 recall@20; worse with depth). So K3b is
+  NO LONGER a serve reranker — it is being repurposed as an OOF FEATURE for K2 (`ce_ft_score`, stacked
+  like the frozen `ce_score`; K2 stays in control). The old "K2 vs K2+K3b chained gate" is SUPERSEDED.
+- Selection is now K2-FREE: the in-training checkpoint metric scores the CE ALONE over the fused pool
+  (`NeuralReranker`, not `ChainReranker(k2, …)`). This unblocks the fine-tune (no production-K2
+  reconstruction needed) AND fixes the in-sample-K2 selection leak (Tier-3 #1).
+- Output: adapter `OUT/ckpt_k3b`. Also still usable as the ColBERT distillation TEACHER.
+- Config: `CROSS_ENCODER_K=200`, `N_NEG=30`, `FALSE_NEG_DROP_QUANTILE=0.0`, `TRAIN_SUBSET=4000`.
+- RESTRUCTURE IN PROGRESS (Step 2a→2b): K2-free selection done; the cheap feature-utility validation
+  (2a, 1 fine-tune) and — only if it passes — the OOF cross-fit + K2 retrain (2b) are being wired.
+  Run mechanics firm up as those land.
+- Time/cost — `TRAIN_SUBSET=4000` @ K=200: G4/T4 ~3–6 h, A100 ~1–2 h. The 2b OOF feature multiplies
+  the fine-tune cost by (fold count + 1).
 
 ## Step 4 — Dev-confirm  ·  `nb/phase3_blindA_submission.ipynb` with `BLIND=False`  ·  GPU
 - Colab: https://colab.research.google.com/github/orrimoch/recsys2026-lora-tutorial/blob/fresh-start/nb/phase3_blindA_submission.ipynb
@@ -85,6 +94,16 @@ identical across finetune / rerank / blindA / dev_experiments so they all share 
   Responder API (Gemini flash, 80 rows): a few minutes, ~negligible $.
 
 ---
+
+## Diagnosis (slot-free, no submission)  ·  `nb/phase3_conversion_diagnosis.ipynb`
+- Colab: https://colab.research.google.com/github/orrimoch/recsys2026-lora-tutorial/blob/fresh-start/nb/phase3_conversion_diagnosis.ipynb
+- Reconstructs the production K2 serve spine (mirrors Step 4) on the dev FINAL-turn proxy and decomposes
+  the nDCG@20 gap into recall_loss (gold never reached the top-500 pool → ColBERT) vs ranking_loss (gold
+  in pool, not top-20 → K2/CE). Also runs a frozen-CE re-scoring probe and a gold-rank histogram.
+- Latest read (2026-06-20): RANKING-bound (recall@500=0.68, +K2 recall@20=0.29, conversion=0.43);
+  16% of turns sit at K2-rank 21–50 (cheap headroom); CE chain regresses (→ K3b as a feature, not a
+  chain). Final-turn proxy is 100% WARM, so cold-segment recall is wasted for the leaderboard.
+- Use it after any K2/ColBERT change to attribute the movement (recall_loss vs ranking_loss). No slot.
 
 ## Minimal path to a submission (distillation OFF, K3b skipped)
 Step 1 → Step 2 → Step 4 → Step 5. Total GPU ≈ G4/T4 ~7–13 h (~$1.3–2.4) or A100 ~2.5–5 h (~$3–7).
