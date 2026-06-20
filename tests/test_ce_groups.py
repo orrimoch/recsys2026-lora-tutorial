@@ -238,6 +238,26 @@ def test_list_valued_metadata_is_coerced_not_crashed():
     assert len(groups) == 1                                          # built, no crash on list fields
 
 
+def test_pool_reranker_sources_negatives_from_reranked_top_not_rrf_order():
+    # ML-review T2 #1: at serve K3b re-scores the top-cross_encoder_k of the K2-RERANKED pool, but
+    # training sampled negatives from the RRF top-cross_encoder_k. Passing a pool_reranker (e.g. the
+    # loaded K2) must source negatives from the RERANKED order so train==serve.
+    cat = FakeCat()
+    pool = [Candidate(track_id=t, channel_ranks={"c": i}) for i, t in enumerate(["g", "x", "y", "z", "w"], 1)]
+    # reranker promotes z,w above x,y (keeps gold on top): reranked order = g, z, w, x, y
+    rr = lambda turn, cands: ([c for c in cands if c.track_id == "g"]
+                              + [c for c in cands if c.track_id in ("z", "w")]
+                              + [c for c in cands if c.track_id in ("x", "y")])
+    kw = dict(catalog=cat, cross_encoder_k=3, n_negatives=2, k_min=1, seed=0)
+    on = build_ce_training_groups(FakeQB(), FakeFusion([pool]), [_turn(1)], lambda t: "g",
+                                  pool_reranker=rr, serve_topk=5, **kw)
+    off = build_ce_training_groups(FakeQB(), FakeFusion([pool]), [_turn(1)], lambda t: "g", **kw)
+    on_negs = {d.split("-")[1] for d in on[0][1][1:]}       # docs are "doc-<tid>"; [0] is the gold
+    off_negs = {d.split("-")[1] for d in off[0][1][1:]}
+    assert on_negs and on_negs <= {"z", "w"}                # negatives from the K2-reranked top-3
+    assert off_negs and off_negs <= {"x", "y"}              # default: RRF top-3
+
+
 def test_teacher_score_fn_drops_false_negative_from_group():
     # T1.3 wiring: a frozen-CE teacher scores 'x' (rank-1 negative) as highly relevant -> it must be
     # filtered out of the group's negatives; with the lever off (default) it stays.

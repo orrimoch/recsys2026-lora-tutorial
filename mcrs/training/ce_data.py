@@ -140,7 +140,8 @@ def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, 
                              denoise_near_dup=True, skip_top_rank=False, k_min=4, seed,
                              gp_fn=None, w_low=0.3, fusion_query_builder=None,
                              fusion_chunk=0, show_progress=False, report=None,
-                             teacher_score_fn=None, fp_quantile=0.0):
+                             teacher_score_fn=None, fp_quantile=0.0,
+                             pool_reranker=None, serve_topk=None):
     """Build [(ce_query_text, [pos_doc, neg_doc...], group_weight)] for gold-in-pool turns.
 
     `query_builder` builds the CROSS-ENCODER pair query (e.g. the enriched/markered query).
@@ -151,9 +152,18 @@ def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, 
     turns whose gold is not in the top-`cross_encoder_k` pool, or that have < k_min negatives. When a
     `report` dict is given it gets `dropped_no_gold`, `dropped_few_neg`, `kept`, and `kept_keys`
     (the (session_id, turn_number) of each kept group, in order — use this to align folds to groups).
+
+    `pool_reranker(turn, candidates) -> reordered candidates` (e.g. the loaded K2's rerank, ML-review
+    T2 #1): at serve K3b re-scores the top-`cross_encoder_k` of the K2-RERANKED pool, not the RRF pool.
+    When given, fuse to `serve_topk` (the depth K2 reranks, default `cross_encoder_k`), reorder each
+    pool with the reranker, THEN take the top-`cross_encoder_k` — so the negatives the CE trains on come
+    from the same neighborhood it scores at serve (train==serve). Default (None) keeps the RRF order.
     """
     gp_weights = dict(GP_WEIGHTS); gp_weights["DOES_NOT_MOVE_TOWARD_GOAL"] = w_low
     fusion_qb = fusion_query_builder or query_builder
+    # fuse deeper when a reranker reorders the pool (mirror serve: K2 reranks the top-`serve_topk`, then
+    # K3b takes the top-`cross_encoder_k` of THAT order). Without a reranker, fuse straight to the CE depth.
+    fuse_depth = (serve_topk or cross_encoder_k) if pool_reranker is not None else cross_encoder_k
     ce_queries = [query_builder.build(t).text for t in turns]          # cross-encoder pair query
     fusion_queries = [fusion_qb.build(t).text for t in turns]          # pool-retrieval query (matches serve)
     bc = [{"history_tids": t.history_tids, "user_id": t.user_id} for t in turns]
@@ -172,11 +182,11 @@ def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, 
         pools = []
         for s in steps:
             e = s + fusion_chunk
-            pools.extend(fusion.fuse(fusion_queries[s:e], cross_encoder_k,
-                                     topk_internal=cross_encoder_k,
+            pools.extend(fusion.fuse(fusion_queries[s:e], fuse_depth,
+                                     topk_internal=fuse_depth,
                                      batch_context=bc[s:e], user_ids=uids[s:e]))
     else:
-        pools = fusion.fuse(fusion_queries, cross_encoder_k, topk_internal=cross_encoder_k,
+        pools = fusion.fuse(fusion_queries, fuse_depth, topk_internal=fuse_depth,
                             batch_context=bc, user_ids=uids)
     def _field(tid, key):                                   # real catalog fields can be LISTS -> coerce to str
         if tid not in catalog._meta:
@@ -190,6 +200,8 @@ def build_ce_training_groups(query_builder, fusion, turns, gold_fn, *, catalog, 
     groups, kept_keys, dropped_no_gold, dropped_few_neg = [], [], 0, 0
     for turn, qtext, pool in zip(turns, ce_queries, pools):
         gold = gold_fn(turn)
+        if pool_reranker is not None:                       # K2-reranked order (train==serve, T2 #1)
+            pool = pool_reranker(turn, list(pool))
         top = pool[:cross_encoder_k]
         ids = [c.track_id for c in top]
         if gold is None or gold not in ids:

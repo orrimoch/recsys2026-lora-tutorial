@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Optional, Sequence
 
-from mcrs.training.ce_data import false_negative_drop_set
+from mcrs.training.ce_data import false_negative_drop_set, is_near_dup, is_same_artist
 
 LABEL_POS = "MOVES_TOWARD_GOAL"
 
@@ -70,6 +70,10 @@ def build_triples_from_pools(
     k_negs: int,
     min_negs: int = 1,
     *,
+    title_fn: Optional[Callable[[str], Optional[str]]] = None,
+    artist_fn: Optional[Callable[[str], Optional[str]]] = None,
+    denoise_near_dup: bool = True,
+    drop_same_artist: bool = False,
     teacher_score_fn: Optional[Callable[[str, list[str]], Sequence[float]]] = None,
     fp_quantile: float = 0.0,
 ) -> tuple[list[dict], dict]:
@@ -80,19 +84,39 @@ def build_triples_from_pools(
     `build_colbert_triple`. Drops the row when the gold is not in the pool (unrecoverable recall miss)
     or it yields < `min_negs` negatives.
 
+    `title_fn`/`artist_fn(tid) -> str|None`: when given, denoise the hard negatives the SAME cheap way
+    the CE path does (ML-review T2 #2) BEFORE the top-`k_negs` cut — drop any candidate whose
+    normalized title equals the gold's (a different release of the same song = a true false negative the
+    contrastive loss would wrongly push away). Same-artist tracks are legitimate hard negatives and are
+    KEPT by default; pass `drop_same_artist=True` to also remove them. `denoise_near_dup=False` disables
+    the title filter even when `title_fn` is given.
+
     `teacher_score_fn(query, tids) -> scores` (a frozen/fine-tuned cross-encoder, T2.1/T2.4): when given,
     scores [gold] + candidate negatives so the triple carries teacher soft labels (`pos_score`/
     `neg_scores`) for KD, AND — when `fp_quantile>0` — drops the top fraction of negatives the teacher
     scores as relevant (likely unlabeled positives, T2.4) BEFORE taking the top-`k_negs`.
-    Returns (triples, stats) where stats = {kept, dropped_no_gold, dropped_no_neg}."""
+    Returns (triples, stats) where stats = {kept, dropped_no_gold, dropped_no_neg, dropped_fp, dropped_dup}."""
     triples: list[dict] = []
-    dropped_no_gold = dropped_no_neg = dropped_fp = 0
+    dropped_no_gold = dropped_no_neg = dropped_fp = dropped_dup = 0
     for row, pool in zip(positive_rows, pools):
         gold = row["gold_tid"]
         if gold not in pool:
             dropped_no_gold += 1
             continue
         cand = [t for t in pool if t != gold]              # hardest-first non-gold candidates
+        # Cheap false-negative denoise (mirrors ce_data.sample_negatives) before any cut/teacher pass.
+        if title_fn is not None or (artist_fn is not None and drop_same_artist):
+            gold_title = title_fn(gold) if title_fn is not None else None
+            kept = []
+            for t in cand:
+                if denoise_near_dup and title_fn is not None and is_near_dup(gold_title or "", title_fn(t) or ""):
+                    dropped_dup += 1
+                    continue
+                if drop_same_artist and artist_fn is not None and is_same_artist(gold, t, artist_fn):
+                    dropped_dup += 1
+                    continue
+                kept.append(t)
+            cand = kept
         pos_score = neg_scores = None
         if teacher_score_fn is not None:
             # The teacher scores relevance with its OWN query (`teacher_query` = the full query the
@@ -118,7 +142,7 @@ def build_triples_from_pools(
             pos_tid=gold, neg_tids=negs, session_id=row.get("session_id"),
             turn_number=row["turn_number"], pos_score=pos_score, neg_scores=neg_scores))
     stats = {"kept": len(triples), "dropped_no_gold": dropped_no_gold,
-             "dropped_no_neg": dropped_no_neg, "dropped_fp": dropped_fp}
+             "dropped_no_neg": dropped_no_neg, "dropped_fp": dropped_fp, "dropped_dup": dropped_dup}
     return triples, stats
 
 
@@ -230,6 +254,9 @@ def build_colbert_train_data(
     min_negs: int = 1,
     show_progress: bool = False,
     report: Optional[dict] = None,
+    title_fn: Optional[Callable[[str], Optional[str]]] = None,
+    artist_fn: Optional[Callable[[str], Optional[str]]] = None,
+    drop_same_artist: bool = False,
     teacher_score_fn: Optional[Callable[[str, list[str]], Sequence[float]]] = None,
     fp_quantile: float = 0.0,
     teacher_query_builder: Any = None,
@@ -276,6 +303,8 @@ def build_colbert_train_data(
         pbar.close()
 
     triples, stats = build_triples_from_pools(positives, pools, doc_text_fn, k_negs, min_negs=min_negs,
+                                              title_fn=title_fn, artist_fn=artist_fn,
+                                              drop_same_artist=drop_same_artist,
                                               teacher_score_fn=teacher_score_fn, fp_quantile=fp_quantile)
     if report is not None:
         report.update(positives=len(positives), **stats)

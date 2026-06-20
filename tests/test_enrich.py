@@ -16,6 +16,17 @@ _META = {"track_id": "a", "track_name": ["Heart Shaped Box"], "artist_name": ["N
          "album_name": ["In Utero"], "tag_list": ["grunge", "90s"], "release_date": "1993-09-21"}
 
 
+def test_enrich_prompt_has_hallucination_grounding_clause():
+    # Spec §4.1 hallucination guard: the system prompt must force grounding strictly in the provided
+    # metadata + tags, and (for unknown tracks) invent no specific facts — else fabricated eras/
+    # collaborators/dates get baked into the indexed, gold-bearing doc text (ML-review T2 #3).
+    system, _ = build_enrich_prompt(_META)
+    s = system.lower()
+    assert "ground" in s                       # ground strictly in the given metadata/tags
+    assert "invent" in s                        # invent no specific facts
+    assert "date" in s and "collaborat" in s    # bans fabricated dates/collaborators (and labels/charts)
+
+
 def test_meta_text_flattens_list_fields_and_year():
     t = meta_text(_META)
     assert "Heart Shaped Box" in t and "Nirvana" in t and "grunge" in t and "1993" in t

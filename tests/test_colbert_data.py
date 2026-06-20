@@ -175,6 +175,31 @@ class TestBuildTriplesFromPools:
         assert len(triples[0]["negatives"]) == 3
 
 
+class TestHardNegativeDenoise:
+    """ML-review T2 #2: the ColBERT contrastive path took cand[:k_negs] with NO false-neg filter,
+    so a different release of the gold's song (same normalized title) or a same-artist track became a
+    'negative' the loss pushes away from a true match. The CE path denoises these; ColBERT must too."""
+
+    def test_drops_near_dup_title_negatives_when_title_fn_given(self):
+        titles = {"g": "Holocene", "a": "Holocene (Live)", "b": "Skinny Love", "c": "Re: Stacks"}
+        title_fn = lambda t: titles[t]
+        rows, pools = [_pos("g")], [["g", "a", "b", "c"]]
+        on, _ = build_triples_from_pools(rows, pools, _DOC, k_negs=3, title_fn=title_fn)
+        off, _ = build_triples_from_pools(rows, pools, _DOC, k_negs=3)
+        assert on[0]["neg_tids"] == ["b", "c"]          # 'a' (near-dup of gold title) filtered out
+        assert "a" in off[0]["neg_tids"]                # default path unchanged (keeps it)
+
+    def test_drops_same_artist_negatives_only_when_enabled(self):
+        artists = {"g": "Bon Iver", "a": "Bon Iver", "b": "Other"}
+        artist_fn = lambda t: artists[t]
+        rows, pools = [_pos("g")], [["g", "a", "b"]]
+        on, _ = build_triples_from_pools(rows, pools, _DOC, k_negs=3,
+                                         artist_fn=artist_fn, drop_same_artist=True)
+        off, _ = build_triples_from_pools(rows, pools, _DOC, k_negs=3, artist_fn=artist_fn)
+        assert "a" not in on[0]["neg_tids"]             # same-artist dropped when enabled
+        assert "a" in off[0]["neg_tids"]                # default keeps same-artist as a hard negative
+
+
 def _drow(gold, query="q", tn=1):
     return {"query": query, "gold_tid": gold, "turn_number": tn}
 

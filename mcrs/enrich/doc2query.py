@@ -45,7 +45,12 @@ def build_enrich_prompt(meta: dict, n_requests: int = 4,
         "Focus on its ATTRIBUTES and the listener's INTENT — mood, energy, genre, era, themes, "
         "similar artists, and use-cases/activities. Assume the listener may NOT know the exact "
         "title or artist, so do not just restate them. Vary length from terse keywords to a full "
-        "conversational request. One per line, no numbering, no extra commentary."
+        "conversational request. One per line, no numbering, no extra commentary. "
+        # Hallucination guard (spec §4.1): the queries are appended to the indexed, gold-bearing doc,
+        # so a fabricated fact becomes a false retrieval match. Ground STRICTLY in what's given.
+        "GROUND every query strictly in the metadata and tags provided above; if you do not recognize "
+        "the track, infer style from the tags alone and INVENT no specific facts — no fabricated "
+        "release dates, collaborators, record labels, or chart positions."
     )
     if examples:
         # Few-shot STYLE anchors only (real listener phrasings, sampled from TRAIN — not tied to

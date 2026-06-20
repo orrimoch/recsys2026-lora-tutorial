@@ -19,6 +19,15 @@ def _cat(**kw):
     return Catalog(_ROWS, corpus_types=["track_name", "artist_name", "album_name", "release_date"], **kw)
 
 
+def test_unenriched_ids_reports_full_catalog_gaps_not_a_sample():
+    # ML-review T2 #4: the spine needs 100% enriched coverage (else channels silently mix raw + enriched
+    # docs, or build_doc KeyErrors). unenriched_ids() must scan the FULL universe, not a 500-tid sample.
+    partial = _cat(enriched_docs={"a": "enriched-a"})        # 'b' has no enriched doc
+    assert partial.unenriched_ids() == ["b"]                  # the gap is reported
+    full = _cat(enriched_docs={"a": "enriched-a", "b": "enriched-b"})
+    assert full.unenriched_ids() == []                        # 100% coverage -> empty
+
+
 def test_track_ids_is_the_universe():
     c = _cat()
     assert c.track_ids == frozenset({"a", "b"})

@@ -54,6 +54,15 @@ class Catalog:
     def is_enriched(self, track_id: str) -> bool:
         return track_id in self._enriched
 
+    def unenriched_ids(self) -> list[str]:
+        """Catalog track_ids (over the FULL universe, in index order) that have NO enriched doc.
+
+        Empty => 100% enrichment coverage. A non-empty result is a hard-gate signal: those tracks would
+        silently fall back to a RAW-format doc amid enriched neighbors in BM25/dense/ColBERT (a within-
+        index format skew), or KeyError in K3b's build_doc. Gate the spine on this over the whole
+        catalog — NOT a sample (ML-review T2 #4)."""
+        return [t for t in self.index_to_id if t not in self._enriched]
+
     def _raw_doc(self, track_id: str) -> str:
         row = self._meta[track_id]
         parts = []
