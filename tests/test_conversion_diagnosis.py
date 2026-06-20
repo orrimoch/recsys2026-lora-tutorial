@@ -45,6 +45,29 @@ def test_conversion_is_zero_when_no_gold_reaches_pool_no_div_by_zero():
     assert r["conversion"] == 0.0                          # guarded, not NaN/ZeroDivisionError
 
 
+def test_raises_when_top_k_exceeds_pool_k():
+    # top_k > pool_k is a misuse: recall@top would exceed recall@pool -> a negative, meaningless
+    # ranking_loss. Fail loud instead of silently returning garbage.
+    import pytest
+    with pytest.raises(ValueError):
+        conversion_diagnosis([["g"]], ["g"], pool_k=10, top_k=20)
+
+
+def test_raises_on_length_mismatch():
+    import pytest
+    with pytest.raises(ValueError):
+        conversion_diagnosis([["g0"], ["g1"]], ["g0"], pool_k=5, top_k=2)          # golds too short
+    with pytest.raises(ValueError):
+        conversion_diagnosis([["g0"], ["g1"]], ["g0", "g1"], pool_k=5, top_k=2,
+                             segments=["warm"])                                      # segments too short
+
+
+def test_empty_input_is_balanced_without_crashing():
+    r = conversion_diagnosis([], [], pool_k=500, top_k=20)
+    assert r["n"] == 0 and r["recall_at_pool"] == 0.0 and r["conversion"] == 0.0
+    assert r["verdict"] == "balanced"                  # no headroom either way; must not divide-by-zero
+
+
 def test_by_segment_decomposition():
     ranked = [
         ["g0", "a", "b", "c"],   # warm: converted

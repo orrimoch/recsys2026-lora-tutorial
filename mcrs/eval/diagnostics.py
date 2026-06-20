@@ -60,6 +60,13 @@ def conversion_diagnosis(
     reranker lands in the scored top-k). `verdict` names the larger headroom so effort goes where the
     gap actually is. Pure over precomputed ranked lists — the GPU run that produces them is the caller's.
     """
+    if top_k > pool_k:
+        raise ValueError(f"top_k ({top_k}) must be <= pool_k ({pool_k}): the scored top-k is a prefix "
+                         "of the pool, else ranking_loss is negative/meaningless.")
+    if len(ranked_ids) != len(golds):
+        raise ValueError(f"ranked_ids ({len(ranked_ids)}) and golds ({len(golds)}) must be 1:1 aligned.")
+    if segments is not None and len(segments) != len(golds):
+        raise ValueError(f"segments ({len(segments)}) must be 1:1 with golds ({len(golds)}).")
     ranked_ids = [list(r) for r in ranked_ids]
     overall = _conversion_block(ranked_ids, golds, list(range(len(golds))), pool_k, top_k)
     if overall["ranking_loss"] > overall["recall_loss"]:
