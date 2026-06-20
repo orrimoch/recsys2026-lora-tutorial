@@ -25,6 +25,39 @@ def hit_rank(retrieved: Sequence[str], gold: str) -> Optional[int]:
         return None
 
 
+def gold_rank_distribution(
+    ranked_ids: Sequence[Sequence[str]],
+    golds: Sequence[str],
+    *,
+    buckets: Sequence[int] = (20, 50, 100, 200, 500),
+) -> dict:
+    """Bucket each gold's 1-based hit rank in its reranked list into half-open bands [1..b0], (b0..b1]…
+    plus a `not_in_pool` band for golds absent (or ranked beyond the last bucket).
+
+    Answers "how far down does a fix have to reach?" for the in-pool-but-not-top-k golds: if they
+    cluster in 21-50 the reranker is close (cheap feature/retrain win); if they spread into 101-500 it
+    is badly mis-ordering them (low-EV for reranker tuning). Returns {n, labels (ordered), buckets}."""
+    if len(ranked_ids) != len(golds):
+        raise ValueError(f"ranked_ids ({len(ranked_ids)}) and golds ({len(golds)}) must be 1:1 aligned.")
+    edges = list(buckets)
+    labels, prev = [], 0
+    for b in edges:
+        labels.append(f"{prev + 1}-{b}")
+        prev = b
+    labels.append("not_in_pool")
+    counts = {l: 0 for l in labels}
+    for ids, g in zip(ranked_ids, golds):
+        r = hit_rank(ids, g)                       # 1-based rank, or None if absent
+        if r is None or r > edges[-1]:
+            counts["not_in_pool"] += 1
+            continue
+        for b, lab in zip(edges, labels):
+            if r <= b:
+                counts[lab] += 1
+                break
+    return {"n": len(golds), "labels": labels, "buckets": counts}
+
+
 def _conversion_block(ranked_ids, golds, idxs, pool_k: int, top_k: int) -> dict[str, float]:
     if not idxs:
         return {"n": 0, "recall_at_pool": 0.0, "recall_at_top": 0.0,

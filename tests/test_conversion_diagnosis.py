@@ -4,7 +4,34 @@ from __future__ import annotations
 
 import math
 
-from mcrs.eval.diagnostics import conversion_diagnosis
+from mcrs.eval.diagnostics import conversion_diagnosis, gold_rank_distribution
+
+
+def test_gold_rank_distribution_buckets_by_hit_rank():
+    # Where does each gold sit in the reranked list? Tells how far down a fix must reach to convert
+    # the in-pool-but-not-top-20 golds. Buckets are half-open bands on the 1-based hit rank.
+    ranked = [
+        ["g0"] + [f"a{i}" for i in range(40)],     # gold rank 1   -> "1-20"
+        [f"a{i}" for i in range(30)] + ["g1"],     # gold rank 31  -> "21-50"
+        [f"a{i}" for i in range(80)] + ["g2"],     # gold rank 81  -> "51-100"
+        [f"a{i}" for i in range(40)],              # gold absent   -> "not_in_pool"
+    ]
+    golds = ["g0", "g1", "g2", "g3"]
+    d = gold_rank_distribution(ranked, golds, buckets=(20, 50, 100, 200, 500))
+    assert d["n"] == 4
+    assert d["labels"][0] == "1-20" and d["labels"][-1] == "not_in_pool"
+    assert d["buckets"]["1-20"] == 1
+    assert d["buckets"]["21-50"] == 1
+    assert d["buckets"]["51-100"] == 1
+    assert d["buckets"]["101-200"] == 0
+    assert d["buckets"]["not_in_pool"] == 1
+    assert sum(d["buckets"].values()) == 4         # every gold lands in exactly one band
+
+
+def test_gold_rank_distribution_raises_on_length_mismatch():
+    import pytest
+    with pytest.raises(ValueError):
+        gold_rank_distribution([["g0"], ["g1"]], ["g0"])
 
 
 def test_decomposes_into_recall_and_ranking_loss_with_verdict():
