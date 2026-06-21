@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import random
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -26,7 +26,9 @@ class LGBMReranker:
                  params: Optional[dict] = None, neg_cap: int = 0,
                  val_fraction: float = 0.1, early_stopping_rounds: int = 0,
                  min_val_groups: int = 50, seed: int = 42,
-                 graded_labels: bool = False) -> None:
+                 graded_labels: bool = False,
+                 gp_weight_fn: Optional[Callable[[TurnContext], float]] = None,
+                 session_positives_fn: Optional[Callable[[TurnContext], set]] = None) -> None:
         # early_stopping_rounds=0 => OFF (plain fit on all groups). Enable only when the val
         # signal is reliable (full-scale data); on small/weak setups it underfits (best_iter≈1).
         self.fb = feature_builder
@@ -40,6 +42,17 @@ class LGBMReranker:
         # assigns labels). Default OFF preserves the binary objective. Val pool stays binary so early
         # stopping optimizes the TRUE single-gold nDCG@20 (see fit()).
         self.graded_labels = graded_labels
+        # gp_weight_fn(ctx) -> per-GROUP LightGBM sample_weight (broadcast to every row of the group).
+        # Use to down-weight off-goal golds (DOES_NOT_MOVE_TOWARD_GOAL): the gold is the PLAYED track,
+        # not necessarily a good rec, and train has far more off-goal golds than test — weighting realigns
+        # the train positive distribution to the served one. Train-only signal => strictly leak-safe as a
+        # weight (serve never weights), unlike the prior_gp_rate FEATURE (blind-availability skew).
+        self.gp_weight_fn = gp_weight_fn
+        # session_positives_fn(ctx) -> set of OTHER in-session gold track_ids (real plays by this user
+        # elsewhere in the conversation). Any such track in the pool gets the middle tier (1) — a
+        # multi-positive label built from real plays, not a metadata proxy. The current gold is matched
+        # first, so passing the full session-gold set is fine. Enables graded labels on its own.
+        self.session_positives_fn = session_positives_fn
         self.val_fraction = val_fraction
         self.early_stopping_rounds = early_stopping_rounds
         self.min_val_groups = min_val_groups
@@ -76,24 +89,45 @@ class LGBMReranker:
     def _has_gold(cands, gold) -> bool:
         return gold is not None and gold in {c.track_id for c in cands}
 
-    def _labels(self, cands: list[Candidate], gold: str, graded: bool) -> list[int]:
+    def _graded_active(self) -> bool:
+        """Graded (gold=2 + middle tier) labels are on if ANY tier source is enabled: the same-artist
+        tier (graded_labels) or the session multi-positive tier (session_positives_fn)."""
+        return self.graded_labels or self.session_positives_fn is not None
+
+    def _labels(self, cands: list[Candidate], gold: str, graded: bool,
+                session_pos: Optional[set] = None) -> list[int]:
         """Relevance label per candidate. Binary (gold=1/else=0) unless `graded`, in which case
-        gold=2, a non-gold track by the gold's artist=1, everything else=0. Same-artist needs the
-        catalog; without it (unit tests) graded degrades to the gold tier only."""
+        gold=2, a middle tier (1), else 0. The middle tier is the union of: an other-in-session gold
+        (`session_pos`, option 2) and — when graded_labels is set — a non-gold track by the gold's
+        artist (option from win#1). Same-artist needs the catalog; without it that source is skipped."""
         if not graded:
             return [1 if c.track_id == gold else 0 for c in cands]
         cat = self.fb.catalog
-        gold_artists = _artists(cat.metadata(gold)) if (cat is not None and gold in cat) else set()
+        spos = session_pos or set()
+        gold_artists = (_artists(cat.metadata(gold)) if (self.graded_labels and cat is not None
+                                                         and gold in cat) else set())
         out = []
         for c in cands:
             if c.track_id == gold:
                 out.append(2)
+            elif c.track_id in spos:
+                out.append(1)
             elif gold_artists and cat is not None and c.track_id in cat \
                     and (_artists(cat.metadata(c.track_id)) & gold_artists):
                 out.append(1)
             else:
                 out.append(0)
         return out
+
+    def _row_weights(self, groups, gsizes):
+        """Per-ROW LightGBM sample_weight = each group's gp_weight_fn(ctx) broadcast over its rows (in
+        the same order/sizes _xy produced). None when no gp_weight_fn => uniform weighting."""
+        if self.gp_weight_fn is None:
+            return None
+        w: list[float] = []
+        for (ctx, _, _), n in zip(groups, gsizes):
+            w.extend([float(self.gp_weight_fn(ctx))] * n)
+        return np.asarray(w, dtype=np.float32)
 
     def _xy(self, groups, cap: bool = True, graded: bool = False):
         # cap negatives for TRAINING efficiency only; eval/val uses the full pool (what serve ranks).
@@ -104,7 +138,9 @@ class LGBMReranker:
         for ctx, cands, gold in groups:
             self.fb.build(ctx, list(cands))
             cc = self._cap(cands, gold, salt=(ctx.session_id, ctx.turn_number)) if cap else list(cands)
-            labels = self._labels(cc, gold, graded)
+            spos = (self.session_positives_fn(ctx)
+                    if (graded and self.session_positives_fn is not None) else None)
+            labels = self._labels(cc, gold, graded, spos)
             for c, lbl in zip(cc, labels):
                 X.append([c.features[n] for n in self.fb.feature_names])
                 y.append(lbl)
@@ -114,7 +150,7 @@ class LGBMReranker:
     def build_training_data(self, groups):
         """Returns (X, y, group_sizes), skipping gold-not-in-pool groups, applying neg_cap."""
         kept = [(c, cs, g) for c, cs, g in groups if self._has_gold(cs, g)]
-        return self._xy(kept, graded=self.graded_labels)
+        return self._xy(kept, graded=self._graded_active())
 
     def _session_split(self, groups):
         """Split kept groups into (train, val) so a session never spans both."""
@@ -145,12 +181,14 @@ class LGBMReranker:
         if self.early_stopping_rounds and self.val_fraction > 0:
             train_groups, val_groups = self._session_split(groups)
             if len(val_groups) >= self.min_val_groups:
-                Xtr, ytr, gtr = self._xy(train_groups, cap=True, graded=self.graded_labels)
-                # val stays BINARY (graded=False): early stopping must optimize the true single-gold
-                # nDCG@20 (the served gate), not the graded same-artist surrogate.
+                Xtr, ytr, gtr = self._xy(train_groups, cap=True, graded=self._graded_active())
+                # val stays BINARY (graded=False) + UNWEIGHTED: early stopping must optimize the true
+                # single-gold nDCG@20 (the served gate), not the graded/weighted train surrogate.
                 Xva, yva, gva = self._xy(val_groups, cap=False)  # eval on the full pool
+                wtr = self._row_weights(train_groups, gtr)       # gp down-weighting (None => uniform)
                 self.n_train_groups_, self.n_val_groups_ = len(gtr), len(gva)
-                self.model.fit(Xtr, ytr, group=gtr, eval_set=[(Xva, yva)], eval_group=[gva],
+                self.model.fit(Xtr, ytr, group=gtr, sample_weight=wtr,
+                               eval_set=[(Xva, yva)], eval_group=[gva],
                                eval_at=[20], callbacks=[
                                    lgb.early_stopping(self.early_stopping_rounds, verbose=False),
                                    lgb.log_evaluation(0)])
@@ -158,9 +196,11 @@ class LGBMReranker:
                 return self
 
         # Default: plain fit on all kept groups (neg_cap applied), no early stopping.
-        X, y, g = self.build_training_data(groups)
+        kept = [(c, cs, gld) for c, cs, gld in groups if self._has_gold(cs, gld)]
+        X, y, g = self._xy(kept, graded=self._graded_active())
+        w = self._row_weights(kept, g)                   # gp down-weighting (None => uniform)
         self.n_train_groups_, self.n_val_groups_ = len(g), 0
-        self.model.fit(X, y, group=g)
+        self.model.fit(X, y, group=g, sample_weight=w)
         self._booster = self.model.booster_
         return self
 

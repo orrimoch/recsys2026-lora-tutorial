@@ -162,6 +162,114 @@ def test_graded_fit_runs_end_to_end_and_ranks_gold_first():
     assert ranked.items[0].track_id == "g"
 
 
+# ---- option 1: goal-progress positive weighting (down-weight off-goal golds) ----
+def test_gp_weight_fn_expands_per_group_weight_to_every_row():
+    """The per-group weight (e.g. 0.3 for an off-goal gold) is broadcast to all rows of the group so
+    LightGBM's sample_weight down-weights the whole group's lambda gradients."""
+    rk = LGBMReranker(_fb(), gp_weight_fn=lambda ctx: 0.3 if ctx.session_id == "bad" else 1.0)
+    groups = [(_ctx("bad"), [Candidate("g"), Candidate("a"), Candidate("b")], "g"),
+              (_ctx("ok"), [Candidate("g"), Candidate("c")], "g")]
+    _, _, gsizes = rk._xy(groups, cap=False)
+    w = rk._row_weights(groups, gsizes)
+    assert list(w) == [0.3, 0.3, 0.3, 1.0, 1.0]      # group weight repeated by group size
+
+
+def test_row_weights_none_when_no_gp_fn():
+    rk = LGBMReranker(_fb())                          # no gp_weight_fn
+    groups = [(_ctx(), [Candidate("g"), Candidate("a")], "g")]
+    _, _, gsizes = rk._xy(groups, cap=False)
+    assert rk._row_weights(groups, gsizes) is None    # uniform (LightGBM default)
+
+
+# ---- option 2: session multi-positive tier (other in-session golds -> tier 1) ----
+def test_session_multipositive_labels_other_session_golds_as_tier_one():
+    """A candidate that is a gold elsewhere in the same session (a real play by this user) gets the
+    middle tier; the current gold stays 2, unrelated stays 0. No catalog needed."""
+    rk = LGBMReranker(_fb(), session_positives_fn=lambda ctx: {"h1"})
+    cands = [Candidate(t) for t in ["g", "h1", "x"]]
+    _, y, _ = rk._xy([(_ctx(), cands, "g")], cap=False, graded=True)
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 2, "h1": 1, "x": 0}
+
+
+def test_session_positives_make_grading_active_via_public_builder():
+    """Setting session_positives_fn alone (graded_labels=False) still activates graded labels through
+    the public build_training_data path — gold=2, session-positive=1."""
+    rk = LGBMReranker(_fb(), session_positives_fn=lambda ctx: {"h1"})
+    cands = [Candidate(t) for t in ["g", "h1", "x"]]
+    _, y, _ = rk.build_training_data([(_ctx(), cands, "g")])
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 2, "h1": 1, "x": 0}
+
+
+def test_session_positives_including_current_gold_keep_gold_at_tier_two():
+    """The caller may pass the FULL set of in-session golds, which includes THIS turn's gold. The gold
+    must still tier to 2 (matched before the session-positive branch), not be downgraded to 1 — locks
+    the `session_positives_fn` 'current gold is matched first' contract for full-set callers."""
+    rk = LGBMReranker(_fb(), session_positives_fn=lambda ctx: {"g", "h1"})   # set includes the gold
+    cands = [Candidate(t) for t in ["g", "h1", "x"]]
+    _, y, _ = rk._xy([(_ctx(), cands, "g")], cap=False, graded=True)
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 2, "h1": 1, "x": 0}
+
+
+def test_val_pool_ignores_session_positives_stays_binary():
+    """Val (graded=False) must not apply the session tier, so early stopping keeps optimizing the true
+    single-gold nDCG@20."""
+    rk = LGBMReranker(_fb(), session_positives_fn=lambda ctx: {"h1"})
+    cands = [Candidate(t) for t in ["g", "h1", "x"]]
+    _, y, _ = rk._xy([(_ctx(), cands, "g")], cap=False)   # graded defaults False
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 1, "h1": 0, "x": 0}
+
+
+def test_session_positives_and_same_artist_both_map_to_tier_one():
+    """Options compose: with both graded_labels (same-artist) and session_positives_fn on, a same-artist
+    track and a session-gold both tier to 1; the gold stays 2."""
+    cat = _cat([{"track_id": "g", "artist_name": ["A"]},
+                {"track_id": "sa", "artist_name": ["A"]},     # same artist
+                {"track_id": "h1", "artist_name": ["Z"]},     # session positive, different artist
+                {"track_id": "x", "artist_name": ["B"]}])
+    rk = LGBMReranker(FeatureBuilder(cat, ["bm25"]), graded_labels=True,
+                      session_positives_fn=lambda ctx: {"h1"})
+    cands = [Candidate(t, channel_ranks={"bm25": 1}) for t in ["g", "sa", "h1", "x"]]
+    _, y, _ = rk._xy([(_ctx(), cands, "g")], cap=False, graded=True)
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 2, "sa": 1, "h1": 1, "x": 0}
+
+
+def test_fit_runs_end_to_end_with_gp_weights_and_session_positives():
+    cat = _cat([{"track_id": t, "artist_name": [f"art_{t}"]}
+                for t in ["g"] + [f"d{i}" for i in range(40)]
+                + [f"e{i}" for i in range(40)] + [f"f{i}" for i in range(40)]])
+    rk = LGBMReranker(FeatureBuilder(cat, ["bm25", "dense"]), n_estimators=50,
+                      gp_weight_fn=lambda ctx: 0.3 if ctx.session_id.endswith("7") else 1.0,
+                      session_positives_fn=lambda ctx: {"d0"})   # d0 always a session positive
+    rk.fit([_group("g", ["g", f"d{i}", f"e{i}", f"f{i}"], session=f"s{i}") for i in range(40)])
+    ranked = rk.rerank(*_group("g", ["d9", "e9", "g", "f9"])[:2])
+    assert ranked.items[0].track_id == "g"
+
+
+def test_early_stopping_path_weights_train_only_not_validation(monkeypatch):
+    """Leak-safety guard for the early-stopping branch: gp sample_weight is applied to the TRAIN set
+    (one weight per row) but the validation eval_set is passed UNWEIGHTED, so early stopping optimizes
+    the true served single-gold metric, not the down-weighted train surrogate."""
+    import lightgbm as lgb
+    captured = {}
+
+    class _Spy:
+        def __init__(self, **kw):
+            pass
+
+        def fit(self, X, y, group=None, sample_weight=None, eval_set=None, eval_group=None, **kw):
+            captured["train_w"] = sample_weight
+            captured["has_eval_weight"] = "eval_sample_weight" in kw   # we never pass val weights
+            self.booster_ = object()
+            return self
+
+    monkeypatch.setattr(lgb, "LGBMRanker", _Spy)   # fit() rebuilds self.model, so patch the class
+    rk = LGBMReranker(_fb(), val_fraction=0.3, min_val_groups=5, early_stopping_rounds=10,
+                      gp_weight_fn=lambda ctx: 0.3)
+    rk.fit([_group("g", ["g", f"d{i}", f"e{i}"], session=f"s{i}") for i in range(20)])
+    assert captured["train_w"] is not None and all(w == 0.3 for w in captured["train_w"])  # train weighted
+    assert not captured["has_eval_weight"]                                                  # val unweighted
+
+
 def test_build_training_data_skips_groups_without_gold_in_pool():
     rk = LGBMReranker(_fb())
     groups = [_group("a", ["a", "b", "c"]),                       # gold in pool
