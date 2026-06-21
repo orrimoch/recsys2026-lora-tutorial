@@ -25,6 +25,143 @@ def _fb():
     return FeatureBuilder(catalog=None, channel_labels=["bm25", "dense"])
 
 
+def _cat(rows):
+    from mcrs.data.catalog import Catalog
+    return Catalog(rows)
+
+
+# ---- graded labels (win #1: tier the LambdaRank labels so near-misses get gradient) ----
+def test_graded_labels_assign_gold_then_same_artist_then_rest():
+    """gold -> 2, same-artist-as-gold (non-gold) -> 1, unrelated -> 0. The extra tier creates
+    graded pairs LambdaRank can learn from where binary labels gave none (one positive vs 499 zeros)."""
+    cat = _cat([{"track_id": "g", "artist_name": ["A"]},
+                {"track_id": "sa", "artist_name": ["A"]},     # same artist as the gold
+                {"track_id": "x", "artist_name": ["B"]}])      # different artist
+    rk = LGBMReranker(FeatureBuilder(cat, ["bm25"]), graded_labels=True)
+    cands = [Candidate(t, channel_ranks={"bm25": 1}, rrf_score=0.5) for t in ["g", "sa", "x"]]
+    _, y, _ = rk._xy([(_ctx(), cands, "g")], cap=False, graded=True)
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 2, "sa": 1, "x": 0}
+
+
+def test_graded_labels_off_by_default_keeps_binary():
+    cat = _cat([{"track_id": "g", "artist_name": ["A"]},
+                {"track_id": "sa", "artist_name": ["A"]},
+                {"track_id": "x", "artist_name": ["B"]}])
+    rk = LGBMReranker(FeatureBuilder(cat, ["bm25"]))   # graded off
+    cands = [Candidate(t, channel_ranks={"bm25": 1}, rrf_score=0.5) for t in ["g", "sa", "x"]]
+    _, y, _ = rk.build_training_data([(_ctx(), cands, "g")])
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 1, "sa": 0, "x": 0}
+
+
+def test_graded_labels_without_catalog_degrade_to_gold_tier_only():
+    """No catalog (unit tests / no metadata) => can't compute same-artist; still emits the graded
+    gold tier (2) without crashing, every non-gold falls to 0."""
+    rk = LGBMReranker(_fb(), graded_labels=True)       # catalog=None
+    cands = [Candidate(t, channel_ranks={"bm25": 1}, rrf_score=0.5) for t in ["g", "sa", "x"]]
+    _, y, _ = rk._xy([(_ctx(), cands, "g")], cap=False, graded=True)
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 2, "sa": 0, "x": 0}
+
+
+def test_validation_pool_stays_binary_even_when_graded_on():
+    """Early stopping must optimize the TRUE single-gold nDCG@20, so the val pool is scored binary
+    even when training labels are graded (caller passes graded=False for val)."""
+    cat = _cat([{"track_id": "g", "artist_name": ["A"]},
+                {"track_id": "sa", "artist_name": ["A"]},
+                {"track_id": "x", "artist_name": ["B"]}])
+    rk = LGBMReranker(FeatureBuilder(cat, ["bm25"]), graded_labels=True)
+    cands = [Candidate(t, channel_ranks={"bm25": 1}, rrf_score=0.5) for t in ["g", "sa", "x"]]
+    _, y, _ = rk._xy([(_ctx(), cands, "g")], cap=False, graded=False)
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 1, "sa": 0, "x": 0}
+
+
+def test_graded_label_matches_any_shared_artist_on_multi_artist_tracks():
+    """artist_name is list-valued; a candidate tiers to 1 if it shares ANY artist with the gold
+    (set intersection), not only on an exact artist-list match."""
+    cat = _cat([{"track_id": "g", "artist_name": ["A", "B"]},     # gold: two artists
+                {"track_id": "sa", "artist_name": ["B", "C"]},    # shares B -> tier 1
+                {"track_id": "x", "artist_name": ["D"]}])          # shares none -> 0
+    rk = LGBMReranker(FeatureBuilder(cat, ["bm25"]), graded_labels=True)
+    cands = [Candidate(t, channel_ranks={"bm25": 1}, rrf_score=0.5) for t in ["g", "sa", "x"]]
+    _, y, _ = rk._xy([(_ctx(), cands, "g")], cap=False, graded=True)
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 2, "sa": 1, "x": 0}
+
+
+def test_graded_gold_absent_from_catalog_still_labels_gold_tier():
+    """If the gold isn't in the catalog (no artist to match against), no candidate can tier to 1,
+    but the gold itself still gets the graded gold tier (2) — no crash, no fabricated tier-1s."""
+    cat = _cat([{"track_id": "sa", "artist_name": ["A"]},          # gold 'g' NOT in catalog
+                {"track_id": "x", "artist_name": ["B"]}])
+    rk = LGBMReranker(FeatureBuilder(cat, ["bm25"]), graded_labels=True)
+    cands = [Candidate(t, channel_ranks={"bm25": 1}, rrf_score=0.5) for t in ["g", "sa", "x"]]
+    _, y, _ = rk._xy([(_ctx(), cands, "g")], cap=False, graded=True)
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 2, "sa": 0, "x": 0}
+
+
+def test_graded_gold_in_catalog_but_missing_artist_yields_no_tier_one():
+    """Distinct branch from gold-absent: the gold IS in the catalog but its row has no/empty
+    artist_name (_artists does `.get('artist_name') or []`). gold_artists is empty, so nothing tiers
+    to 1, yet the gold still gets 2 — locks the `or []` behavior."""
+    cat = _cat([{"track_id": "g"},                                  # gold in catalog, NO artist_name
+                {"track_id": "sa", "artist_name": ["A"]},
+                {"track_id": "x", "artist_name": []}])               # empty artist list
+    rk = LGBMReranker(FeatureBuilder(cat, ["bm25"]), graded_labels=True)
+    cands = [Candidate(t, channel_ranks={"bm25": 1}, rrf_score=0.5) for t in ["g", "sa", "x"]]
+    _, y, _ = rk._xy([(_ctx(), cands, "g")], cap=False, graded=True)
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 2, "sa": 0, "x": 0}
+
+
+def test_graded_labels_tier_every_same_artist_negative_not_just_the_first():
+    """Two distinct non-gold tracks by the gold's artist must BOTH tier to 1 — guards against a bug
+    that labels only the first same-artist match (every other graded test has exactly one tier-1)."""
+    cat = _cat([{"track_id": "g", "artist_name": ["A"]},
+                {"track_id": "sa1", "artist_name": ["A"]},          # same artist
+                {"track_id": "sa2", "artist_name": ["A"]},          # same artist (second)
+                {"track_id": "x", "artist_name": ["B"]}])
+    rk = LGBMReranker(FeatureBuilder(cat, ["bm25"]), graded_labels=True)
+    cands = [Candidate(t, channel_ranks={"bm25": 1}, rrf_score=0.5) for t in ["g", "sa1", "sa2", "x"]]
+    _, y, _ = rk._xy([(_ctx(), cands, "g")], cap=False, graded=True)
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 2, "sa1": 1, "sa2": 1, "x": 0}
+
+
+def test_graded_labels_computed_on_capped_pool_and_keep_the_gold():
+    """neg_cap drops negatives BEFORE labelling; the label array must match the capped group size and
+    always retain the gold (tier 2). A same-artist neg may or may not survive the random cap — the
+    invariant is len(y)==group_size and exactly one tier-2 (the gold)."""
+    cat = _cat([{"track_id": "g", "artist_name": ["A"]}]
+               + [{"track_id": f"n{i}", "artist_name": [f"art{i}"]} for i in range(20)])
+    rk = LGBMReranker(FeatureBuilder(cat, ["bm25"]), neg_cap=3, graded_labels=True, seed=42)
+    cands = [Candidate("g", channel_ranks={"bm25": 1}, rrf_score=1.0)] + [
+        Candidate(f"n{i}", channel_ranks={"bm25": i + 2}, rrf_score=0.1) for i in range(20)]
+    _, y, gsizes = rk._xy([(_ctx(), cands, "g")], cap=True, graded=True)
+    assert gsizes == [4]                      # gold + neg_cap(3)
+    assert len(y) == 4                         # label array matches the capped group
+    assert int((y == 2).sum()) == 1            # exactly one gold tier, retained through capping
+
+
+def test_build_training_data_emits_graded_labels_when_enabled():
+    """Integration through the PUBLIC training entrypoint (not just _xy): with graded_labels=True the
+    plain-fit data path yields {0,1,2}, with the gold at 2 and a same-artist neg at 1."""
+    cat = _cat([{"track_id": "g", "artist_name": ["A"]},
+                {"track_id": "sa", "artist_name": ["A"]},
+                {"track_id": "x", "artist_name": ["B"]}])
+    rk = LGBMReranker(FeatureBuilder(cat, ["bm25"]), graded_labels=True)
+    cands = [Candidate(t, channel_ranks={"bm25": 1}, rrf_score=0.5) for t in ["g", "sa", "x"]]
+    X, y, _ = rk.build_training_data([(_ctx(), cands, "g")])
+    assert set(int(v) for v in y) == {0, 1, 2}
+    assert y.dtype.kind == "i"                  # LightGBM lambdarank needs integer labels
+    assert {c.track_id: int(v) for c, v in zip(cands, y)} == {"g": 2, "sa": 1, "x": 0}
+
+
+def test_graded_fit_runs_end_to_end_and_ranks_gold_first():
+    cat = _cat([{"track_id": t, "artist_name": [f"art_{t}"]}
+                for t in ["g"] + [f"d{i}" for i in range(40)]
+                + [f"e{i}" for i in range(40)] + [f"f{i}" for i in range(40)]])
+    rk = LGBMReranker(FeatureBuilder(cat, ["bm25", "dense"]), n_estimators=50, graded_labels=True)
+    rk.fit([_group("g", ["g", f"d{i}", f"e{i}", f"f{i}"]) for i in range(40)])
+    ranked = rk.rerank(*_group("g", ["d9", "e9", "g", "f9"])[:2])
+    assert ranked.items[0].track_id == "g"
+
+
 def test_build_training_data_skips_groups_without_gold_in_pool():
     rk = LGBMReranker(_fb())
     groups = [_group("a", ["a", "b", "c"]),                       # gold in pool
