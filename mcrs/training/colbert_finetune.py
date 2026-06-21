@@ -122,8 +122,10 @@ def rerank_pool(query_emb: np.ndarray, pool_embs: Sequence[np.ndarray],
 def make_dev_eval_callback(pack: dict, eval_steps: int, dev_subset: int, k: int,
                            seed: int, save_best_fn, early_stop_patience: int = 0,
                            metrics_path: Optional[str] = None):  # pragma: no cover
-    """TrainerCallback: every `eval_steps`, rerank a dev turn-1 subset with the LIVE model (same
-    MaxSim re-probe as the gate); on a new best dev recall@k call `save_best_fn(model)` to persist it.
+    """TrainerCallback: every `eval_steps`, rerank a dev wall subset with the LIVE model (same MaxSim
+    re-probe as the gate); on a new best dev recall@k call `save_best_fn(model)` to persist it. The
+    wall subset is whatever the pack marks (BUG #1 fix: the served final-turn-warm proxy by default,
+    not a turn-1-cold filter), so the checkpoint is selected on the distribution it serves.
 
     `save_best_fn` is injected so the caller decides WHAT to persist (full model for full-FT, or just
     the LoRA adapter). `early_stop_patience` > 0 halts training after that many consecutive evals
@@ -161,7 +163,7 @@ def make_dev_eval_callback(pack: dict, eval_steps: int, dev_subset: int, k: int,
     wall = [pack["wall"][i] for i in sub]
     need_tids = sorted({t for pool in pools for t in pool})
     need_texts = [pack["tid_to_text"][t] for t in need_tids]
-    print(f"[dev-eval] subset={len(queries)} turn-1 queries, {len(need_tids)} pool docs, "
+    print(f"[dev-eval] subset={len(queries)} wall queries, {len(need_tids)} pool docs, "
           f"every {eval_steps} steps -> recall@{k} (patience={early_stop_patience})", file=sys.stderr)
 
     state = {"best": -1.0, "since_improve": 0}

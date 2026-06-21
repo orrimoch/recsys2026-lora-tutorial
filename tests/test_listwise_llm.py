@@ -207,3 +207,48 @@ def test_cache_generate_fn_no_dir_always_calls(tmp_path):
     cached = lw.cache_generate_fn(gen, None)
     cached("p"); cached("p")
     assert calls["n"] == 2
+
+
+# --- in-session liked tracks rendered into the prompt (bug #5) --------------
+# The warm final-turn proxy is bound by within-session continuation. The listwise
+# reranker must SEE the tracks the user already liked this session (turn.history_tids),
+# not just the user utterances — it's the single strongest warm-continuation signal.
+
+def test_render_conversation_includes_liked_tracks():
+    turn = _turn(["user: more like that"], goal=None)
+    object.__setattr__(turn, "history_tids", ["a", "b"]) if False else None
+    # build a turn that actually carries history
+    turn = TurnContext(session_id="s", user_id="u", turn_number=1,
+                       utterances=["user: more like that"], goal=None,
+                       user_profile=UserProfile("u", None, None, None, []),
+                       history_tids=["a", "b"], segment="warm")
+    out = lw.render_conversation(turn, _describe)
+    assert "user: more like that" in out
+    assert "track a" in out and "track b" in out         # liked tracks rendered
+
+
+def test_render_conversation_no_history_is_just_utterances():
+    turn = _turn(["user: hello"])
+    assert lw.render_conversation(turn, _describe) == "user: hello"
+
+
+def test_render_conversation_tolerates_describe_errors():
+    turn = TurnContext(session_id="s", user_id="u", turn_number=1, utterances=["user: hi"],
+                       goal=None, user_profile=UserProfile("u", None, None, None, []),
+                       history_tids=["bad"], segment="warm")
+    def boom(tid): raise KeyError(tid)
+    assert lw.render_conversation(turn, boom) == "user: hi"   # bad describe -> skipped, no crash
+
+
+def test_listwise_rerank_feeds_liked_tracks_to_the_llm():
+    turn = TurnContext(session_id="s", user_id="u", turn_number=1,
+                       utterances=["user: keep it going"], goal=None,
+                       user_profile=UserProfile("u", None, None, None, []),
+                       history_tids=["x"], segment="warm")
+    ranked = RankedList(turn, [Candidate("a"), Candidate("b")])
+    seen = {}
+    def gen(prompt):
+        seen["p"] = prompt
+        return "[1] > [2]"
+    lw.listwise_rerank(ranked, _describe, gen, window=2)
+    assert "track x" in seen["p"]                          # the liked track reached the prompt

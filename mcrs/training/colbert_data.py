@@ -150,11 +150,18 @@ def dev_eval_pack_from_pools(
     rows: Sequence[dict],
     pools: Sequence[Sequence[str]],
     doc_text_fn: Callable[[str], str],
+    *,
+    wall_value: Optional[bool] = None,
 ) -> dict:
     """Assemble the dev-eval pack the fine-tune selection callback consumes, from dev rows + their
     aligned candidate pools. Each row has {query, gold_tid, turn_number}. Drops rows with no gold
-    (can't score recall). `wall[i]` marks the turn-1 gate (the metric the checkpoint is selected on);
-    `tid_to_text` covers the union of all pool tids so the live model can re-encode + rerank them."""
+    (can't score recall). `wall[i]` marks the rows the checkpoint is SELECTED on (the subset
+    `wall_recall_at_k` scores); `tid_to_text` covers the union of all pool tids so the live model can
+    re-encode + rerank them.
+
+    `wall_value`: when None (legacy), `wall[i] = (turn_number == 1)` — selects on the turn-1 gate.
+    Pass `wall_value=True` when every row IS already a served (final-turn) row, so the whole pack is
+    on the selection wall regardless of each row's turn_number (BUG #1 fix: select on what we serve)."""
     queries, golds, out_pools, wall = [], [], [], []
     tid_to_text: dict[str, str] = {}
     for row, pool in zip(rows, pools):
@@ -164,7 +171,7 @@ def dev_eval_pack_from_pools(
         queries.append(row["query"])
         golds.append(gold)
         out_pools.append(list(pool))
-        wall.append(int(row["turn_number"]) == 1)
+        wall.append(bool(wall_value) if wall_value is not None else int(row["turn_number"]) == 1)
         for t in pool:
             if t not in tid_to_text:
                 tid_to_text[t] = doc_text_fn(t)
@@ -318,18 +325,30 @@ def build_dev_eval_pack(
     doc_text_fn: Callable[[str], str],
     *,
     pool_size: int = 100,
+    final_turn: bool = True,
 ) -> dict:
-    """Build the dev-eval pack (DEV/TEST split) for in-loop checkpoint selection. Gate = turn-1
-    recall (the probe metric), so we evaluate turn-1 dev turns only. SAME `query_builder` + `fusion`
-    + `doc_text_fn` as train, so the dev re-probe matches serve. Returns the pack for
-    `colbert_finetune.make_dev_eval_callback`."""
-    turns = [t for t in conversations.turns() if int(t.turn_number) == 1]
+    """Build the dev-eval pack (DEV/TEST split) for in-loop checkpoint selection. SAME `query_builder`
+    + `fusion` + `doc_text_fn` as train, so the dev re-probe matches serve. Returns the pack for
+    `colbert_finetune.make_dev_eval_callback`.
+
+    BUG #1 fix (selection/serve skew): Blind-A scores ONE warm FINAL turn per session, so the
+    checkpoint MUST be selected on that SERVED distribution. With `final_turn=True` (default) the pack
+    is built from `conversations.gold_target_turns()` — each session's trailing gold-bearing turn (the
+    final-turn warm proxy) — and EVERY such row is on the selection wall. The previous behavior selected
+    on a turn-1-COLD filter (`turns()` restricted to turn 1), capping the recall channel on the wrong
+    curve. Pass `final_turn=False` to restore that legacy turn-1 gate (kept for ablation/back-compat)."""
+    if final_turn:
+        turns = list(conversations.gold_target_turns())     # served final-turn warm proxy (Blind-A curve)
+        wall_value: Optional[bool] = True                   # every served row is on the selection wall
+    else:
+        turns = [t for t in conversations.turns() if int(t.turn_number) == 1]   # legacy turn-1 gate
+        wall_value = None
     rows = []
     for t in turns:
         rows.append({
             "query": query_builder.build(t).text,
             "gold_tid": conversations.gold(t.session_id, t.turn_number),
-            "turn_number": 1,
+            "turn_number": int(t.turn_number),
             "history_tids": list(t.history_tids),
             "user_id": t.user_id,
             "segment": t.segment,
@@ -339,4 +358,4 @@ def build_dev_eval_pack(
           for r in rows]
     uids = [r["user_id"] for r in rows]
     pools = fusion.batch_text_to_item_retrieval(queries, pool_size, batch_context=bc, user_ids=uids)
-    return dev_eval_pack_from_pools(rows, pools, doc_text_fn)
+    return dev_eval_pack_from_pools(rows, pools, doc_text_fn, wall_value=wall_value)

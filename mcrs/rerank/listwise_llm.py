@@ -110,13 +110,34 @@ def rerank_ids(conversation: str, goal: Optional[str], ids: list[str],
     return listwise_reorder(ids, order, window)
 
 
+def render_conversation(turn, describe_fn: Callable[[str], str], max_history: int = 8) -> str:
+    """Render the conversation the listwise LLM reasons over: the user utterances PLUS
+    the tracks the user has already liked this session (turn.history_tids, described via
+    describe_fn). Within-session continuation is the strongest warm signal, so the
+    reranker must see the liked tracks, not just the text. A describe_fn that raises on a
+    tid is skipped (never crashes the row). No history -> just the utterances."""
+    lines = list(turn.utterances)
+    descs = []
+    for tid in (turn.history_tids or [])[-max_history:]:
+        try:
+            d = describe_fn(tid)
+        except Exception:  # noqa: BLE001 — a bad/missing tid must not kill the rerank
+            continue
+        if d:
+            descs.append(d)
+    if descs:
+        lines.append("[Tracks the user has already liked this session: " + "; ".join(descs) + "]")
+    return "\n".join(lines)
+
+
 def listwise_rerank(ranked: RankedList, describe_fn: Callable[[str], str],
                     generate_fn: Callable[[str], Optional[str]], window: int = 50) -> RankedList:
     """RankedList wrapper around rerank_ids: render the conversation from the turn's
-    utterances, reorder the candidate ids, then re-emit the Candidates in the new
-    order (preserving each candidate's features/scores). Pure given `generate_fn`."""
+    utterances AND its in-session liked tracks, reorder the candidate ids, then re-emit
+    the Candidates in the new order (preserving each candidate's features/scores).
+    Pure given `generate_fn`."""
     turn = ranked.turn
-    conversation = "\n".join(turn.utterances)
+    conversation = render_conversation(turn, describe_fn)
     ids = [c.track_id for c in ranked.items]
     new_ids = rerank_ids(conversation, turn.goal, ids, describe_fn, generate_fn, window)
     # bucket candidates by id so a reordering (and any rare duplicate id) maps back

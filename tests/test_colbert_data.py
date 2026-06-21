@@ -11,6 +11,7 @@ from __future__ import annotations
 from mcrs.contracts import Query, TurnContext, UserProfile
 from mcrs.training.colbert_data import (
     build_colbert_triple,
+    build_dev_eval_pack,
     build_triples_from_pools,
     dev_eval_pack_from_pools,
     goal_progress_label,
@@ -229,6 +230,66 @@ class TestDevEvalPackFromPools:
         pack = dev_eval_pack_from_pools(rows, [["x"], ["g2"]], _DOC)
         assert pack["queries"] == ["q2"] and pack["golds"] == ["g2"]
         assert pack["pools"] == [["g2"]]
+
+    def test_wall_value_overrides_turn1_filter(self):
+        # Selection/serve fix: when the pack is the FINAL-turn proxy (every row IS the served turn),
+        # the caller can mark every kept row as wall=True so wall_recall_at_k scores the whole served
+        # set, regardless of each row's turn_number (which is turn>1 for most final turns).
+        rows = [_drow("g1", tn=3), _drow("g2", tn=5)]
+        pack = dev_eval_pack_from_pools(rows, [["g1"], ["g2"]], _DOC, wall_value=True)
+        assert pack["wall"] == [True, True]
+
+
+# ----- BUG #1 (selection/serve skew): the checkpoint is selected on the SERVED final-turn-warm
+# distribution (gold_target_turns), not a turn-1-cold filter. -----
+class _FakeConv:
+    """Minimal Conversations stand-in exposing the two accessors the dev pack can build from."""
+    def __init__(self):
+        # turn-1 (cold) ctxs and the trailing/final (warm) ctxs differ — the bug picked the wrong set.
+        self._turn1 = [_ctx(1, sid="s1"), _ctx(1, sid="s2")]
+        self._final = [_ctx(4, sid="s1", history=("g0",)), _ctx(6, sid="s2", history=("g0",))]
+        self._golds = {("s1", 1): "g1a", ("s2", 1): "g1b",
+                       ("s1", 4): "gF1", ("s2", 6): "gF2"}
+
+    def turns(self):
+        return iter(self._turn1)
+
+    def gold_target_turns(self):
+        return iter(self._final)
+
+    def gold(self, sid, tn):
+        return self._golds.get((sid, int(tn)))
+
+
+class _IdFusion:
+    """Returns each query's gold (parsed back from the _FakeQB text) as a 1-item pool — enough to
+    assert WHICH turns the pack was built from without needing a real retrieval channel."""
+    def __init__(self, conv):
+        self._conv = conv
+
+    def batch_text_to_item_retrieval(self, queries, pool_size, batch_context=None, user_ids=None):
+        out = []
+        for q in queries:                       # q == "Q:<sid>:<tn>"
+            _, sid, tn = q.split(":")
+            out.append([self._conv.gold(sid, int(tn))])
+        return out
+
+
+def test_build_dev_eval_pack_selects_on_final_turn_proxy_by_default():
+    conv = _FakeConv()
+    pack = build_dev_eval_pack(conv, _FakeQB(), _IdFusion(conv), _DOC, pool_size=10)
+    # built from gold_target_turns (final/served turns), NOT the turn-1 filter
+    assert pack["golds"] == ["gF1", "gF2"]
+    assert pack["queries"] == ["Q:s1:4", "Q:s2:6"]
+    # every served row is on the selection wall, so wall_recall scores the whole served set
+    assert pack["wall"] == [True, True]
+
+
+def test_build_dev_eval_pack_final_turn_false_restores_turn1_gate():
+    conv = _FakeConv()
+    pack = build_dev_eval_pack(conv, _FakeQB(), _IdFusion(conv), _DOC, pool_size=10, final_turn=False)
+    assert pack["golds"] == ["g1a", "g1b"]      # old turn-1 behavior preserved behind a flag
+    assert pack["wall"] == [True, True]         # turn-1 rows -> all wall under the legacy logic
 
 
 # ----- T2.1 / T2.4: teacher distillation scores + false-negative drop on hard negs -----

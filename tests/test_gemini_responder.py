@@ -567,3 +567,20 @@ def test_select_best_handles_unscored_candidates():
     scored = [("Absolutely, you're looking for X.", 5.0),  # 2 violations, judged
               ('"Y" leans on a fuzzed-out bassline.', None)]  # 0 violations, unjudged
     assert gr.select_best(scored, gr.count_violations) == '"Y" leans on a fuzzed-out bassline.'
+
+
+# --- cache key includes the thinking/gen salt (bug #10) --------------------
+# The disk cache was keyed only by (prompt, model, best_of). A thinking-budget /
+# temperature retune left prompt+model+best_of unchanged, so it read STALE replies
+# from the warm Drive cache and the A/B looked flat. The salt fixes that.
+
+def test_cached_response_salt_separates_thinking_budget(tmp_path):
+    calls = {"n": 0}
+    def gen():
+        calls["n"] += 1
+        return f"resp{calls['n']}"
+    a = gr.cached_response(str(tmp_path), "p", "m", 2, gen, "fb", cache_salt="tb0")
+    b = gr.cached_response(str(tmp_path), "p", "m", 2, gen, "fb", cache_salt="tb512")
+    assert calls["n"] == 2 and a != b            # different thinking budget -> NOT a stale hit
+    again = gr.cached_response(str(tmp_path), "p", "m", 2, gen, "fb", cache_salt="tb0")
+    assert calls["n"] == 2 and again == a        # same salt still hits the cache

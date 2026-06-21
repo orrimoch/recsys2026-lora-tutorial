@@ -78,11 +78,14 @@ class GenModel:
             model=self.model, contents=prompt, config=cfg)
 
 
-def _resp_cache_path(cache_dir: str, prompt: str, model: str, best_of: int) -> Path:
-    """Cache key = (prompt, model, best_of). The prompt already encodes ctx + the
-    rendered tracks + goal + top_n + plain/structured mode, so only model + best_of
-    must be added (best_of changes generation, not the prompt)."""
-    key = "\n".join([prompt, str(model), str(best_of)])
+def _resp_cache_path(cache_dir: str, prompt: str, model: str, best_of: int,
+                     cache_salt: str = "") -> Path:
+    """Cache key = (prompt, model, best_of, cache_salt). The prompt already encodes ctx
+    + the rendered tracks + goal + top_n + plain/structured mode; best_of changes
+    generation. cache_salt carries the generation knobs the prompt does NOT encode
+    (thinking_budget, temperature config) — without it a thinking/temp retune reads
+    STALE replies from a warm cache and an A/B looks flat (bug #10)."""
+    key = "\n".join([prompt, str(model), str(best_of), str(cache_salt)])
     h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:24]
     return Path(cache_dir) / f"{h}.json"
 
@@ -127,14 +130,16 @@ def reuse_response(reuse_map: dict, session_id, turn_number, track_ids, top_n: i
 
 
 def cached_response(cache_dir, prompt: str, model: str, best_of: int,
-                    gen_fn, fallback: str) -> str:
+                    gen_fn, fallback: str, cache_salt: str = "") -> str:
     """Disk-cache the responder output so reruns don't re-pay Gemini. `gen_fn()`
     returns the freshly generated response. A FALLBACK (generation failed -> kept
     the original) is NOT cached, so a fixed API/key regenerates next run (the same
-    rule the listwise reranker uses for empty parses). cache_dir falsy -> no cache."""
+    rule the listwise reranker uses for empty parses). cache_dir falsy -> no cache.
+    cache_salt keys generation knobs not in the prompt (thinking_budget/temperature)
+    so a retune doesn't read stale replies (bug #10)."""
     cp = None
     if cache_dir:
-        cp = _resp_cache_path(cache_dir, prompt, model, best_of)
+        cp = _resp_cache_path(cache_dir, prompt, model, best_of, cache_salt)
         if cp.exists():
             try:
                 return json.loads(cp.read_text(encoding="utf-8"))["response"]
@@ -783,7 +788,8 @@ def main():
                     def _gen():
                         return generate_response(model, prompt, fallback, parse_fn=parse_fn)
                 new_resp = cached_response(args.cache_dir, prompt, MODEL, args.best_of,
-                                           _gen, fallback)
+                                           _gen, fallback,
+                                           cache_salt=f"tb{args.thinking_budget}")
         except Exception as e:  # noqa: BLE001 — never let one row kill the run
             print(f"  row {i} ({p.get('session_id')}): error, keeping original response: {e!r}")
             new_resp = fallback
