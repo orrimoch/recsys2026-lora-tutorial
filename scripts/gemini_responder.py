@@ -37,6 +37,45 @@ from pathlib import Path
 import pandas as pd
 
 MODEL = os.environ.get("GEMINI_RESPONDER_MODEL", "gemini-2.5-flash")
+# A 2-3 sentence reply (or a small JSON in structured mode) needs only a few
+# hundred tokens; the cap is a runaway guard, NOT a latency knob (unused tokens
+# cost nothing). With thinking off it never truncates a real reply.
+MAX_OUTPUT_TOKENS = int(os.environ.get("GEMINI_MAX_OUTPUT_TOKENS", "1024"))
+# 0 = thinking DISABLED. The gemini-2.5 models otherwise spend their whole output
+# budget "thinking" and return finish_reason=STOP with NO answer Part, so `.text`
+# raises and every row falls back. Disabling it both fixes that and is far faster.
+THINKING_BUDGET = int(os.environ.get("GEMINI_THINKING_BUDGET", "0"))
+
+
+class GenModel:
+    """Adapter exposing the legacy `model.generate_content(prompt, generation_config=...)`
+    surface on top of the modern google-genai client, with THINKING DISABLED and a hard
+    `max_output_tokens` cap. This is the fix for the gemini-2.5 failure where the model
+    spends its whole budget thinking, returns finish_reason=STOP with no answer Part, and
+    `.text` raises (-> every row fell back). thinking_budget=0 is valid for flash /
+    flash-lite; pro cannot fully disable thinking, so a 0 is clamped to its 128 minimum.
+
+    Keeping this surface identical to the old genai.GenerativeModel means _call_model /
+    generate_response / generate_best_of_n and all their tests are untouched."""
+
+    def __init__(self, client, types, model, max_output_tokens=MAX_OUTPUT_TOKENS,
+                 thinking_budget=THINKING_BUDGET):
+        self.client, self.types, self.model = client, types, model
+        self.max_output_tokens = max_output_tokens
+        # pro can't run with a 0 budget; bump a requested 0 to the 128 floor for it.
+        self.thinking_budget = (128 if thinking_budget == 0 and "pro" in model.lower()
+                                else thinking_budget)
+
+    def generate_content(self, prompt, generation_config=None):
+        gc = generation_config or {}
+        t = self.types
+        cfg = t.GenerateContentConfig(
+            max_output_tokens=self.max_output_tokens,
+            temperature=gc.get("temperature"),
+            thinking_config=t.ThinkingConfig(thinking_budget=self.thinking_budget),
+        )
+        return self.client.models.generate_content(
+            model=self.model, contents=prompt, config=cfg)
 
 
 def _resp_cache_path(cache_dir: str, prompt: str, model: str, best_of: int) -> Path:
@@ -599,6 +638,12 @@ def main():
                          "judge model, submit the highest-scoring (1 = single shot, default)")
     ap.add_argument("--judge-model", default=JUDGE_MODEL,
                     help="model that scores best-of-N candidates (default: cheap flash)")
+    ap.add_argument("--thinking-budget", type=int, default=THINKING_BUDGET,
+                    help="gemini-2.5 thinking token budget. 0 = DISABLED (default) — fixes the "
+                         "empty-Part/finish_reason=STOP failure (.text raises) and is much faster. "
+                         "pro can't run at 0 and is clamped to its 128 minimum.")
+    ap.add_argument("--max-output-tokens", type=int, default=MAX_OUTPUT_TOKENS,
+                    help="hard cap on response tokens (runaway guard; unused tokens are free).")
     ap.add_argument("--fail-on-fallback", action="store_true",
                     help="exit nonzero if ANY row falls back to its original response "
                          "(no fresh Gemini output, no warm-start reuse). USE FOR SUBMISSIONS: "
@@ -613,19 +658,22 @@ def main():
     key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not key:
         sys.exit("ERROR: set GEMINI_API_KEY (Colab secret) before running.")
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types
     from datasets import load_dataset
-    genai.configure(api_key=key)
-    model = genai.GenerativeModel(MODEL)
-    judge_model = genai.GenerativeModel(args.judge_model) if args.best_of > 1 else None
+    client = genai.Client(api_key=key)
+    model = GenModel(client, types, MODEL, args.max_output_tokens, args.thinking_budget)
+    judge_model = (GenModel(client, types, args.judge_model, args.max_output_tokens,
+                            args.thinking_budget) if args.best_of > 1 else None)
 
     preds = json.load(open(args.pred))
     if args.limit:
         preds = preds[: args.limit]
     mode = "structured_personality" if args.structured_personality else "plain"
     bo = f", best_of={args.best_of} (judge={args.judge_model})" if args.best_of > 1 else ""
+    think = "thinking=OFF" if args.thinking_budget == 0 else f"thinking={args.thinking_budget}"
     print(f"[responder] {len(preds)} rows from {args.pred} via {MODEL} "
-          f"(top_n={args.top_n}, mode={mode}{bo})")
+          f"(top_n={args.top_n}, mode={mode}, {think}, max_out={args.max_output_tokens}{bo})")
 
     ds = load_dataset(args.dataset, split="test")
     sess_by_id = {s["session_id"]: s for s in ds}

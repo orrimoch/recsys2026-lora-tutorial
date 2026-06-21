@@ -460,3 +460,51 @@ def test_clean_tags_keeps_descriptors_and_drops_junk():
 def test_clean_tags_handles_empty_and_none():
     assert gr.clean_tags(None, {}, set(), "X", "Y") == []
     assert gr.clean_tags([], {}, set(), "X", "Y") == []
+
+
+# --- GenModel adapter (thinking-off fix, google-genai surface) -------------
+# A tiny stand-in for `google.genai.types`: records the config it is asked to
+# build so the test can assert thinking was disabled + the cap was applied.
+class _FakeTypes:
+    def GenerateContentConfig(self, **kw):
+        return types.SimpleNamespace(kind="cfg", **kw)
+
+    def ThinkingConfig(self, **kw):
+        return types.SimpleNamespace(kind="think", **kw)
+
+
+class _FakeClient:
+    """Captures the generate_content call args and returns a text response."""
+    def __init__(self):
+        self.last = None
+        self.models = self
+
+    def generate_content(self, **kw):
+        self.last = kw
+        return types.SimpleNamespace(text="hi")
+
+
+def test_genmodel_disables_thinking_and_caps_tokens_for_flash():
+    client = _FakeClient()
+    m = gr.GenModel(client, _FakeTypes(), "gemini-2.5-flash",
+                    max_output_tokens=512, thinking_budget=0)
+    out = m.generate_content("prompt", generation_config={"temperature": 0.8})
+    assert out.text == "hi"
+    cfg = client.last["config"]
+    assert client.last["model"] == "gemini-2.5-flash"
+    assert client.last["contents"] == "prompt"
+    assert cfg.max_output_tokens == 512
+    assert cfg.temperature == 0.8
+    assert cfg.thinking_config.thinking_budget == 0   # thinking DISABLED
+
+
+def test_genmodel_clamps_zero_budget_to_floor_for_pro():
+    # pro cannot run with a 0 thinking budget -> a requested 0 is bumped to 128.
+    m = gr.GenModel(_FakeClient(), _FakeTypes(), "gemini-2.5-pro", thinking_budget=0)
+    assert m.thinking_budget == 128
+
+
+def test_genmodel_works_through_call_model_path():
+    # _call_model -> .generate_content(prompt, generation_config=...) -> resp.text
+    m = gr.GenModel(_FakeClient(), _FakeTypes(), "gemini-2.5-flash")
+    assert gr._call_model(m, "prompt", gen_config={"temperature": 1.0}) == "hi"
