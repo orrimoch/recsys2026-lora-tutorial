@@ -204,10 +204,10 @@ crutch — name the concrete thing instead (say "that stop-start funk riff", not
 # recency lifts compliance far more than the same rules buried in the prose block above.
 FINAL_CHECKLIST = """=== CHECK BEFORE YOU REPLY ===
 1. Name ONE specific track from the candidates and say why it fits.
-2. Cite at least one CONCRETE musical attribute you were given; NO reception/popularity/"iconic/classic/fan-favorite" claims and NO album-art/visual mentions.
+2. Cite at least one CONCRETE musical attribute you were given. NEVER state reception/popularity or any checkable external fact NOT in the data — no "iconic/classic/beloved/legendary", and absolutely no chart/award/sales/iTunes/"one of the best" claims (these are hallucinations and are penalized hard). NO album-art/visual mentions.
 3. Echo one specific thing the user said — and the earlier liked track BY NAME if the conversation has one. Never frame the pick as filling a task/goal/genre slot ("for general recommendations", "in the genre you asked for").
-4. Vary the opener: not "For …/Since …/Absolutely/Yes", and not the same shape as the last reply.
-5. At most one intensifier (no "definitely/truly/perfectly/really/absolutely"); no "you're looking for" crutch; no exclamation-mark opener.
+4. Do NOT open with "Since …/For …/Yes/Absolutely/Sure" — start mid-scene on the track itself, a musical detail (the riff/beat/voice), or the user's exact words. Vary the shape from the last reply.
+5. At most one intensifier (no "definitely/truly/perfectly/really/absolutely"); no "you're looking for / after" crutch; no exclamation-mark opener.
 6. 2-3 tight sentences; output the reply text only."""
 
 
@@ -476,6 +476,67 @@ def pick_best(scored):
     return scored[0][0]
 
 
+# ── anti-pattern guard (fix 1) + reception teeth (fix 3) ───────────────────────
+# The 2026-06-21 Blind-A judge analysis: 35% of replies opened "Since you …", 35%
+# used the "you're looking for" crutch, and several made hallucinated reception
+# claims — all already banned in the prompt, which the model obeyed only ~65% of
+# the time. The guard scores each best-of candidate by banned-pattern count and
+# prefers the cleanest, so compliance is enforced by SELECTION, not the prose rules.
+_BANNED_OPENER = re.compile(r'^\s*["\']?\s*(for|since|yes|absolutely|sure)\b', re.I)
+_CRUTCH = re.compile(r"you('?re| are)\s+(looking for|after|seeking|in the mood for|craving)", re.I)
+_RECEPTION = re.compile(
+    r"\b(iconic|classic|fan[- ]fav(?:ou?rite|orite)|beloved|quintessential|standout|"
+    r"legendary|timeless|acclaimed|everyone loves)\b", re.I)
+# Strong reception = invented, checkable facts not in the catalog -> the worst judge hit; penalized twice.
+_RECEPTION_STRONG = re.compile(
+    r"\b(chart(?:-topping|ed)?|billboard|grammy|platinum|gold record|best[- ]selling|itunes|"
+    r"award[- ]winning|massive hit|number one|#1|one of the best|sold .* copies|critically acclaimed)\b", re.I)
+_ALBUM_ART = re.compile(r"\b(album art|cover art|artwork|album cover|the cover|packaging|visual)\b", re.I)
+_INTENS = re.compile(
+    r"\b(absolutely|truly|definitely|literally|really|simply|perfectly|incredible|captivating|"
+    r"amazing|fantastic|wonderfully|deeply|perfect)\b", re.I)
+
+
+def count_violations(reply: str) -> int:
+    """Count banned-pattern violations in a candidate reply (higher = worse). Covers
+    the prompt's hard rules: banned opener (For/Since/Yes/Absolutely/Sure), the
+    "you're looking for" crutch, reception/popularity words (hallucinated-fact ones
+    penalized twice), album-art/visual mentions, an exclamation-mark opener, and
+    >=2 intensifiers. Empty -> 0 (the fallback path handles emptiness)."""
+    if not reply or not reply.strip():
+        return 0
+    r = reply.strip()
+    v = 0
+    if _BANNED_OPENER.match(r):
+        v += 1
+    if _CRUTCH.search(r):
+        v += 1
+    if _RECEPTION.search(r):
+        v += 1
+    if _RECEPTION_STRONG.search(r):
+        v += 2                                    # invented, checkable reception is the worst failure
+    if _ALBUM_ART.search(r):
+        v += 1
+    if re.match(r"^[^.!?]*!", r):                  # exclamation before the first sentence ends
+        v += 1
+    if len(_INTENS.findall(r)) >= 2:
+        v += 1
+    return v
+
+
+def select_best(scored, penalty_fn=count_violations):
+    """`scored`: list of (reply, judge_score|None). Pick the reply with the FEWEST
+    rule violations, tie-broken by highest judge score (an unscored candidate ranks
+    last among equals). [] -> None. This makes selection robust even when the judge
+    fails: a cleaner reply still wins on violations alone."""
+    if not scored:
+        return None
+    def key(rs):
+        r, s = rs
+        return (penalty_fn(r), -(s if s is not None else float("-inf")))
+    return min(scored, key=key)[0]
+
+
 def generate_best_of_n(gen_model, judge_model, prompt, judge_context, tracks_str,
                        fallback, n, temperatures, sleep_fn=time.sleep, parse_fn=None):
     """Generate n candidate replies (varied temperature), score each with the
@@ -500,7 +561,8 @@ def generate_best_of_n(gen_model, judge_model, prompt, judge_context, tracks_str
         jraw = _call_model(judge_model, build_judge_prompt(judge_context, tracks_str, r),
                           sleep_fn=sleep_fn)
         scored.append((r, parse_judge_score(jraw)))
-    return pick_best(scored)
+    # guard: fewest banned-pattern violations first, judge score as tie-breaker.
+    return select_best(scored, count_violations)
 
 
 # ── tag cleaning ──────────────────────────────────────────────────────────────

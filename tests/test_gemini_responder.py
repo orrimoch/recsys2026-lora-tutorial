@@ -508,3 +508,62 @@ def test_genmodel_works_through_call_model_path():
     # _call_model -> .generate_content(prompt, generation_config=...) -> resp.text
     m = gr.GenModel(_FakeClient(), _FakeTypes(), "gemini-2.5-flash")
     assert gr._call_model(m, "prompt", gen_config={"temperature": 1.0}) == "hi"
+
+
+# --- anti-pattern guard (fix 1) + reception teeth (fix 3) -------------------
+# The judge analysis of the 2026-06-21 Blind-A set showed 35% of replies opened
+# "Since you …", 35% used the "you're looking for" crutch, and several made
+# hallucinated reception claims — all things the prompt already bans. The guard
+# scores each best-of candidate by banned-pattern count and prefers the cleanest,
+# so compliance is enforced by selection, not hoped for from the prompt.
+
+def test_count_violations_flags_banned_opener():
+    assert gr.count_violations("Since you liked X, try Y.") >= 1
+    assert gr.count_violations("For that vibe, try Y.") >= 1
+    assert gr.count_violations("Absolutely, this one fits.") >= 1
+
+
+def test_count_violations_flags_looking_for_crutch():
+    assert gr.count_violations('"Y" has that gritty energy you\'re looking for.') >= 1
+    assert gr.count_violations("This is the sound you're after.") >= 1
+
+
+def test_count_violations_flags_reception_words():
+    assert gr.count_violations('"Y" is an iconic, beloved classic.') >= 1
+
+
+def test_count_violations_double_penalizes_hallucinated_reception():
+    # chart / award / "one of the best" / iTunes claims are the worst (invented facts)
+    weak = gr.count_violations('"Y" has a warm piano line.')                 # clean
+    strong = gr.count_violations('"Y" was one of the best tracks of 2009, a huge iTunes chart hit.')
+    assert strong >= weak + 2
+
+
+def test_count_violations_flags_album_art_and_exclamation_opener():
+    assert gr.count_violations("You loved the cover art, so try Y.") >= 1
+    assert gr.count_violations("What a riff! Try Y for the same energy.") >= 1
+
+
+def test_count_violations_clean_compliant_reply_is_zero():
+    r = ('"Strawberry Fields Forever" drifts on a hazy mellotron under a dreamy melody — '
+         'the same psychedelic mood you connected with on the earlier track.')
+    assert gr.count_violations(r) == 0
+
+
+def test_select_best_prefers_fewer_violations_over_judge_score():
+    scored = [("Since you liked X, try Y.", 5.0),         # 1 violation, high judge
+              ('"Y" opens on a lone piano riff.', 3.0)]   # 0 violations, lower judge
+    assert gr.select_best(scored, gr.count_violations) == '"Y" opens on a lone piano riff.'
+
+
+def test_select_best_tie_breaks_on_judge_when_violations_equal():
+    scored = [('"A" rides a brushed-drum groove.', 2.0),  # both 0 violations
+              ('"B" rides a brushed-drum groove.', 4.0)]
+    assert gr.select_best(scored, gr.count_violations) == '"B" rides a brushed-drum groove.'
+
+
+def test_select_best_handles_unscored_candidates():
+    # judge failed (None) on the cleaner one; it should still win on violations
+    scored = [("Absolutely, you're looking for X.", 5.0),  # 2 violations, judged
+              ('"Y" leans on a fuzzed-out bassline.', None)]  # 0 violations, unjudged
+    assert gr.select_best(scored, gr.count_violations) == '"Y" leans on a fuzzed-out bassline.'
