@@ -59,6 +59,10 @@ class FeatureBuilder:
             + ["n_channels_top10", "consensus_3plus", "top5_bm25_and_dense"]
             # T3.4 popularity-debias + recency
             + ["popularity_percentile", "recency"]
+            # session/behavioral: in-session replay + artist affinity (causal, leak-free)
+            + ["is_replay", "artist_play_count", "last_artist_match", "artist_recency"]
+            # chat-derived: does the dialogue name the candidate's artist/track (causal, leak-free)
+            + ["artist_mentioned_in_chat", "track_mentioned_in_chat"]
             + self.score_names
             # T3.1 per-turn min-max calibration of each injected score (scale-comparable across turns)
             + [f"{n}_norm" for n in self.score_names]
@@ -72,11 +76,25 @@ class FeatureBuilder:
         import bisect
         return bisect.bisect_right(arr, pop) / len(arr)
 
+    @staticmethod
+    def _chat_text(ctx: TurnContext) -> str:
+        """Lowercased concatenation of the causal dialogue (utterances 1..t) + goal text."""
+        parts = list(ctx.utterances) + ([ctx.goal] if ctx.goal else [])
+        return " ".join(parts).lower()
+
     def build(self, ctx: TurnContext, candidates: list[Candidate]) -> list[Candidate]:
         hist_artists: set = set()
         for h in ctx.history_tids:
             if self.catalog is not None and h in self.catalog:
                 hist_artists |= _artists(self.catalog.metadata(h))
+        # per-position history artist sets (for play-count / recency / last-play affinity) + replay set
+        hist_set = set(ctx.history_tids)
+        hist_artist_sets = [
+            (_artists(self.catalog.metadata(h)) if (self.catalog is not None and h in self.catalog) else set())
+            for h in ctx.history_tids
+        ]
+        last_artists = hist_artist_sets[-1] if hist_artist_sets else set()
+        chat = self._chat_text(ctx)
         query_len = float(sum(len(u.split()) for u in ctx.utterances))
         is_cold = 1.0 if ctx.segment == "cold" else 0.0
 
@@ -108,6 +126,24 @@ class FeatureBuilder:
             # T3.4 popularity-debias + recency
             f["popularity_percentile"] = self._pop_percentile(float(_first(meta.get("popularity"), 0.0)))
             f["recency"] = min(1.0, max(0.0, 1.0 - (2026.0 - f["release_year"]) / 30.0)) if f["release_year"] > 0 else 0.0
+            # session/behavioral: in-session replay + artist affinity (per-candidate, causal)
+            cand_artists = _artists(meta)
+            f["is_replay"] = 1.0 if c.track_id in hist_set else 0.0
+            f["artist_play_count"] = float(sum(1 for hs in hist_artist_sets if hs & cand_artists))
+            f["last_artist_match"] = 1.0 if (cand_artists & last_artists) else 0.0
+            rec = 0.0
+            for dist, hs in enumerate(reversed(hist_artist_sets)):
+                if hs & cand_artists:
+                    rec = 1.0 / (1.0 + dist)
+                    break
+            f["artist_recency"] = rec
+            # chat-derived: does the dialogue name the candidate's artist / track (min-len 3 guard)
+            cand_track_names = meta.get("track_name") or []
+            cand_track_names = cand_track_names if isinstance(cand_track_names, list) else [cand_track_names]
+            f["artist_mentioned_in_chat"] = 1.0 if any(
+                len(a) >= 3 and a.lower() in chat for a in cand_artists) else 0.0
+            f["track_mentioned_in_chat"] = 1.0 if any(
+                len(str(t)) >= 3 and str(t).lower() in chat for t in cand_track_names) else 0.0
             for name in self.score_names:
                 f[name] = float(self.score_fns[name](ctx, c.track_id))
             c.features = f
