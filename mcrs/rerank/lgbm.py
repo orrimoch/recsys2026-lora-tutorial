@@ -65,8 +65,14 @@ class LGBMReranker:
         self.feature_names_: Optional[list[str]] = None
 
     # ---- group / feature assembly ----
-    def _cap(self, cands: list[Candidate], gold: str, salt=None) -> list[Candidate]:
-        """Keep the gold + a RANDOM sample of neg_cap negatives.
+    def _cap(self, cands: list[Candidate], labels: list[int], salt=None):
+        """Keep ALL positives (label>0) + a RANDOM sample of neg_cap negatives (label==0).
+        Returns (capped_cands, capped_labels), aligned.
+
+        Cap by LABEL, not by track_id: the old cap treated every non-gold as a negative, so a small
+        neg_cap randomly dropped most graded middle-tier positives (same-artist / session) BEFORE
+        training — any graded A/B then ran on a fraction of its tiers. Binary is byte-identical (only
+        the gold is label>0, sampled negatives are the same indices for a fixed (seed, salt)).
 
         Random (not top-N): keeping only the highest-ranked negatives biases them to higher
         rrf_score than the gold, which teaches the inverted 'high score => not gold' correlation
@@ -78,12 +84,13 @@ class LGBMReranker:
         that doesn't match the full-pool eval/serve distribution.
         """
         if not self.neg_cap:
-            return cands
-        pos = [c for c in cands if c.track_id == gold]
-        negs = [c for c in cands if c.track_id != gold]
+            return list(cands), list(labels)
+        pos = [(c, l) for c, l in zip(cands, labels) if l > 0]
+        negs = [(c, l) for c, l in zip(cands, labels) if l == 0]
         if len(negs) > self.neg_cap:
             negs = random.Random(f"{self.seed}|{salt}").sample(negs, self.neg_cap)
-        return pos + negs
+        combined = pos + negs
+        return [c for c, _ in combined], [l for _, l in combined]
 
     @staticmethod
     def _has_gold(cands, gold) -> bool:
@@ -137,10 +144,14 @@ class LGBMReranker:
         X, y, gsizes = [], [], []
         for ctx, cands, gold in groups:
             self.fb.build(ctx, list(cands))
-            cc = self._cap(cands, gold, salt=(ctx.session_id, ctx.turn_number)) if cap else list(cands)
+            # LABEL THE FULL POOL FIRST, then cap protecting positives. Capping before labelling
+            # silently dropped graded middle-tier positives (the cap saw them as negatives).
             spos = (self.session_positives_fn(ctx)
                     if (graded and self.session_positives_fn is not None) else None)
-            labels = self._labels(cc, gold, graded, spos)
+            labels = self._labels(list(cands), gold, graded, spos)
+            cc = list(cands)
+            if cap:
+                cc, labels = self._cap(cc, labels, salt=(ctx.session_id, ctx.turn_number))
             for c, lbl in zip(cc, labels):
                 X.append([c.features[n] for n in self.fb.feature_names])
                 y.append(lbl)

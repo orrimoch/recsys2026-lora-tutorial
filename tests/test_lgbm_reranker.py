@@ -304,6 +304,23 @@ def test_negative_cap_limits_group_size_keeping_the_gold():
     assert int(y.sum()) == 1             # gold retained
 
 
+def test_cap_protects_graded_middle_tier_positives_from_random_drop():
+    """label-before-cap fix: _cap must keep ALL label>0 rows (gold + middle-tier positives) and only
+    sample among true negatives. The old cap treated every non-gold as a negative, so a small neg_cap
+    randomly dropped most same-artist/session tier-1 positives BEFORE labeling -> any graded A/B ran on
+    a fraction of its intended tiers (uninterpretable). Here 1 gold + 5 session-positives + 50 negs,
+    neg_cap=3 -> all 6 positives survive; only the 50 negatives are capped to 3."""
+    rk = LGBMReranker(_fb(), neg_cap=3, seed=1,
+                      session_positives_fn=lambda ctx: {f"h{i}" for i in range(5)})
+    cands = ([Candidate("g")] + [Candidate(f"h{i}") for i in range(5)]
+             + [Candidate(f"n{i}") for i in range(50)])
+    _, y, gsizes = rk._xy([(_ctx(), cands, "g")], cap=True, graded=True)
+    assert gsizes == [9]                  # 1 gold + 5 tier-1 + 3 capped negs (NOT 4 = gold+3)
+    assert int((y == 2).sum()) == 1       # gold tier
+    assert int((y == 1).sum()) == 5       # ALL session positives survive the cap
+    assert int((y == 0).sum()) == 3       # negatives capped to neg_cap
+
+
 def test_cap_negative_sampling_is_per_group_and_deterministic():
     """K1 fix: _cap mixes a per-group salt into the seed, so different (session, turn) groups draw
     DIFFERENT negative subsets (a single fixed seed would draw the identical positional slice every
@@ -313,13 +330,14 @@ def test_cap_negative_sampling_is_per_group_and_deterministic():
     cands = [Candidate("g", channel_ranks={"bm25": 1}, rrf_score=1.0)] + [
         Candidate(f"n{i}", channel_ranks={"bm25": i + 2}, rrf_score=0.1) for i in range(20)
     ]
+    labels = [1 if c.track_id == gold else 0 for c in cands]   # binary: only the gold is label>0
     # deterministic for a fixed (seed, salt)
-    a1 = [c.track_id for c in rk._cap(cands, gold, salt=("s1", 1))]
-    a2 = [c.track_id for c in rk._cap(cands, gold, salt=("s1", 1))]
+    a1 = [c.track_id for c in rk._cap(cands, labels, salt=("s1", 1))[0]]
+    a2 = [c.track_id for c in rk._cap(cands, labels, salt=("s1", 1))[0]]
     assert a1 == a2
     assert a1[0] == "g" and len([t for t in a1 if t != "g"]) == 3   # gold kept + neg_cap negatives
     # decorrelated across groups: many distinct salts -> more than one distinct negative draw
-    draws = {tuple(sorted(c.track_id for c in rk._cap(cands, gold, salt=(f"s{i}", i))))
+    draws = {tuple(sorted(c.track_id for c in rk._cap(cands, labels, salt=(f"s{i}", i))[0]))
              for i in range(8)}
     assert len(draws) > 1   # a single fixed seed (the old bug) would collapse this to exactly 1
 
